@@ -1302,6 +1302,16 @@ import {
     settingsCountCases: document.getElementById('settings-count-cases'),
     settingsQuickBackupBtn: document.getElementById('settings-quick-backup-btn'),
 
+    // MongoDB Backend Test Elements
+    btnTestMongoConnection: document.getElementById('btn-test-mongo-connection'),
+    mongoTestLoading: document.getElementById('mongo-test-loading'),
+    mongoTestError: document.getElementById('mongo-test-error'),
+    mongoTestErrorText: document.getElementById('mongo-test-error-text'),
+    mongoTestIdle: document.getElementById('mongo-test-idle'),
+    mongoTestResults: document.getElementById('mongo-test-results'),
+    mongoTestCount: document.getElementById('mongo-test-count'),
+    mongoTestList: document.getElementById('mongo-test-list'),
+
     // Phase 5: Notifications Elements (QAV-ISS-011)
     notificationWrapper: document.getElementById('notification-wrapper'),
     notificationBtn: document.getElementById('notification-btn'),
@@ -9573,6 +9583,105 @@ import {
   }
 
   // ==========================================================================
+  // MongoDB Atlas Backend Connection Test Controller
+  // ==========================================================================
+  async function testMongoBackendConnection() {
+    const loadingEl = DOM.mongoTestLoading || document.getElementById('mongo-test-loading');
+    const errorEl = DOM.mongoTestError || document.getElementById('mongo-test-error');
+    const errorTextEl = DOM.mongoTestErrorText || document.getElementById('mongo-test-error-text');
+    const idleEl = DOM.mongoTestIdle || document.getElementById('mongo-test-idle');
+    const resultsEl = DOM.mongoTestResults || document.getElementById('mongo-test-results');
+    const countEl = DOM.mongoTestCount || document.getElementById('mongo-test-count');
+    const listEl = DOM.mongoTestList || document.getElementById('mongo-test-list');
+    const btn = DOM.btnTestMongoConnection || document.getElementById('btn-test-mongo-connection');
+
+    if (!loadingEl || !errorEl || !resultsEl || !listEl) return;
+
+    // Reset UI to loading state
+    loadingEl.style.display = 'flex';
+    errorEl.style.display = 'none';
+    if (idleEl) idleEl.style.display = 'none';
+    resultsEl.style.display = 'none';
+    if (btn) btn.disabled = true;
+
+    try {
+      const response = await fetch('http://localhost:5000/api/tests');
+      if (!response.ok) {
+        throw new Error(`Server returned HTTP ${response.status} (${response.statusText || 'Error'})`);
+      }
+      const data = await response.json();
+
+      let tests = [];
+      if (Array.isArray(data)) {
+        tests = data;
+      } else if (data && Array.isArray(data.tests)) {
+        tests = data.tests;
+      } else if (data && Array.isArray(data.data)) {
+        tests = data.data;
+      }
+
+      loadingEl.style.display = 'none';
+      resultsEl.style.display = 'block';
+
+      if (countEl) {
+        countEl.textContent = `Found ${tests.length} test${tests.length === 1 ? '' : 's'} in MongoDB Atlas`;
+      }
+
+      if (tests.length === 0) {
+        listEl.innerHTML = `
+          <div style="padding: 14px; background-color: var(--bg-card, rgba(255, 255, 255, 0.02)); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); text-align: center; font-size: 0.82rem; color: var(--text-muted);">
+            Connected successfully to MongoDB Atlas! The <code>tests</code> collection currently contains 0 documents.
+          </div>
+        `;
+      } else {
+        listEl.innerHTML = tests.map((test, idx) => {
+          const rawName = test?.name ?? test?.title ?? test?._id ?? `Test #${idx + 1}`;
+          const rawStatus = test?.status ?? 'Unknown';
+          const safeName = escapeHTML(String(rawName));
+          const safeStatus = escapeHTML(String(rawStatus));
+
+          const lowerStatus = String(rawStatus).toLowerCase();
+          let badgeBg = 'var(--bg-input)';
+          let badgeColor = 'var(--text-secondary)';
+          let badgeBorder = 'var(--border-medium)';
+
+          if (lowerStatus.includes('pass') || lowerStatus === 'active' || lowerStatus === 'success') {
+            badgeBg = 'var(--color-green-subtle, rgba(16, 185, 129, 0.15))';
+            badgeColor = 'var(--color-green, #10b981)';
+            badgeBorder = 'rgba(16, 185, 129, 0.3)';
+          } else if (lowerStatus.includes('fail') || lowerStatus === 'critical' || lowerStatus === 'error') {
+            badgeBg = 'var(--color-red-subtle, rgba(239, 68, 68, 0.15))';
+            badgeColor = 'var(--color-red, #ef4444)';
+            badgeBorder = 'rgba(239, 68, 68, 0.3)';
+          } else if (lowerStatus.includes('block') || lowerStatus.includes('skip') || lowerStatus.includes('pend')) {
+            badgeBg = 'var(--color-amber-subtle, rgba(245, 158, 11, 0.15))';
+            badgeColor = 'var(--color-amber, #f59e0b)';
+            badgeBorder = 'rgba(245, 158, 11, 0.3)';
+          }
+
+          return `
+            <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background-color: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); gap: 12px;">
+              <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
+                <span style="font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted); flex-shrink: 0;">#${idx + 1}</span>
+                <span style="font-weight: 600; font-size: 0.86rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${safeName}</span>
+              </div>
+              <span style="font-size: 0.72rem; font-weight: 700; padding: 2px 10px; border-radius: 9999px; text-transform: uppercase; letter-spacing: 0.04em; background-color: ${badgeBg}; color: ${badgeColor}; border: 1px solid ${badgeBorder}; flex-shrink: 0;">${safeStatus}</span>
+            </div>
+          `;
+        }).join('');
+      }
+    } catch (err) {
+      loadingEl.style.display = 'none';
+      errorEl.style.display = 'flex';
+      if (errorTextEl) {
+        errorTextEl.textContent = `Unable to connect to backend at http://localhost:5000/api/tests (${err.message}). Ensure the backend server is running via node server.js on port 5000.`;
+      }
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  // ==========================================================================
   // Phase 5: Notification System Controller (QAV-ISS-011)
   // ==========================================================================
   function formatRelativeTime(isoString) {
@@ -10757,6 +10866,12 @@ import {
     if (DOM.settingsActionToastsToggle) {
       DOM.settingsActionToastsToggle.addEventListener('change', (e) => {
         applyPreferences({ actionToasts: e.target.checked }, true);
+      });
+    }
+
+    if (DOM.btnTestMongoConnection) {
+      DOM.btnTestMongoConnection.addEventListener('click', () => {
+        testMongoBackendConnection();
       });
     }
 

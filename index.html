@@ -2602,6 +2602,90 @@
                 </div>
               </div>
             </div>
+
+            <!-- Card 4: MongoDB Atlas Backend Integration -->
+            <div class="settings-card" id="settings-mongodb-card">
+              <div class="settings-card-header">
+                <div class="settings-card-icon icon-purple">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                    <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                    <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                  </svg>
+                </div>
+                <div>
+                  <h3 class="settings-card-title">MongoDB Backend Connection</h3>
+                  <p class="settings-card-desc">Verify connection to MongoDB Atlas and view test items from <code>GET /api/tests</code></p>
+                </div>
+              </div>
+
+              <div class="settings-card-body">
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+                  <div>
+                    <div style="font-weight: 600; font-size: 0.9rem; color: var(--text-primary); margin-bottom: 2px;">Backend API Endpoint</div>
+                    <div style="font-size: 0.8rem; color: var(--text-muted);">
+                      Target: <code style="padding: 2px 6px; background-color: var(--bg-input); border-radius: 4px; font-family: var(--font-mono); font-size: 0.78rem;">http://localhost:5000/api/tests</code>
+                    </div>
+                  </div>
+                  <button type="button" id="btn-test-mongo-connection" class="btn btn-primary btn-sm">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 15px; height: 15px;">
+                      <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path>
+                    </svg>
+                    <span>Test Connection</span>
+                  </button>
+                </div>
+
+                <!-- Loading State Banner -->
+                <div id="mongo-test-loading" style="display: none; padding: 12px 16px; background-color: var(--color-blue-subtle, rgba(59, 130, 246, 0.12)); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: var(--radius-md); font-size: 0.85rem; color: var(--color-blue, #3b82f6); align-items: center; gap: 10px;">
+                  <svg class="refresh-spinning" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 18px; height: 18px; flex-shrink: 0;">
+                    <line x1="12" y1="2" x2="12" y2="6"></line>
+                    <line x1="12" y1="18" x2="12" y2="22"></line>
+                    <line x1="4.93" y1="4.93" x2="7.76" y2="7.76"></line>
+                    <line x1="16.24" y1="16.24" x2="19.07" y2="19.07"></line>
+                    <line x1="2" y1="12" x2="6" y2="12"></line>
+                    <line x1="18" y1="12" x2="22" y2="12"></line>
+                    <line x1="4.93" y1="19.07" x2="7.76" y2="16.24"></line>
+                    <line x1="16.24" y1="7.76" x2="19.07" y2="4.93"></line>
+                  </svg>
+                  <span>Connecting to backend at <code>http://localhost:5000/api/tests</code> and querying MongoDB Atlas...</span>
+                </div>
+
+                <!-- Error State Banner -->
+                <div id="mongo-test-error" style="display: none; padding: 12px 16px; background-color: var(--color-red-subtle, rgba(239, 68, 68, 0.12)); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: var(--radius-md); font-size: 0.85rem; color: var(--color-red, #ef4444); align-items: flex-start; gap: 10px;" role="alert">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 18px; height: 18px; flex-shrink: 0; margin-top: 2px;">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                  </svg>
+                  <div style="flex: 1; min-width: 0;">
+                    <div style="font-weight: 600; margin-bottom: 3px;">Connection Test Failed</div>
+                    <div id="mongo-test-error-text" style="color: var(--text-secondary); font-size: 0.8125rem; line-height: 1.4;"></div>
+                  </div>
+                </div>
+
+                <!-- Idle State Box -->
+                <div id="mongo-test-idle" style="padding: 16px; background-color: var(--bg-card, rgba(255, 255, 255, 0.02)); border: 1px dashed var(--border-medium); border-radius: var(--radius-md); text-align: center; font-size: 0.84rem; color: var(--text-secondary);">
+                  Click <strong>Test Connection</strong> above to query <code>http://localhost:5000/api/tests</code> and test communication with the MongoDB Atlas database.
+                </div>
+
+                <!-- Results Container -->
+                <div id="mongo-test-results" style="display: none;">
+                  <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                    <div id="mongo-test-count" style="font-size: 0.82rem; font-weight: 600; color: var(--text-secondary);"></div>
+                    <div style="display: inline-flex; align-items: center; gap: 5px; font-size: 0.75rem; font-weight: 600; color: var(--color-green, #10b981); background-color: var(--color-green-subtle, rgba(16, 185, 129, 0.12)); padding: 2px 8px; border-radius: 9999px; border: 1px solid rgba(16, 185, 129, 0.3);">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width: 12px; height: 12px;">
+                        <polyline points="20 6 9 17 4 12"></polyline>
+                      </svg>
+                      <span>Connected Successfully</span>
+                    </div>
+                  </div>
+
+                  <div id="mongo-test-list" style="display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto;">
+                    <!-- Rendered dynamically -->
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 
