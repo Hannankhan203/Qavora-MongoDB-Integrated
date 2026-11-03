@@ -2,9 +2,8 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * Qavora — QA Checklists Persistence, Validation & Progress Store (Prompt 2)
- * Manages browser localStorage persistence under versioned keys completely
- * independent of unrelated Qavora project storage.
+ * Qavora — QA Checklists In-Memory Data Store & Validation (MongoDB Migration Prep)
+ * Manages pure in-memory data store during active session with zero browser persistence.
  */
 
 export const CHECKLISTS_STORAGE_KEY = 'qavora_qa_checklists_v1';
@@ -30,28 +29,38 @@ export function generateStableId(prefix = 'id') {
 }
 
 /**
- * Memory fallback used only if browser localStorage is disabled/blocked or in headless tests.
+ * In-Memory Data Store for Qavora application data (pure JavaScript memory).
+ * Completely eliminates browser persistent storage in preparation for MongoDB database migration.
  */
-function createMemoryStorage() {
-  const map = new Map();
-  return {
-    getItem(k) {
-      return map.has(k) ? map.get(k) : null;
-    },
-    setItem(k, v) {
-      map.set(k, String(v));
-    },
-    removeItem(k) {
-      map.delete(k);
-    }
-  };
-}
+const inMemoryDataStore = new Map();
 
-let memoryFallback = null;
+const memoryDataStoreAdapter = {
+  getItem(key) {
+    return inMemoryDataStore.has(key) ? inMemoryDataStore.get(key) : null;
+  },
+  setItem(key, value) {
+    inMemoryDataStore.set(key, String(value));
+  },
+  removeItem(key) {
+    inMemoryDataStore.delete(key);
+  },
+  clear() {
+    inMemoryDataStore.clear();
+  }
+};
+
 let customStorageAdapter = null;
 
 export function setStorageAdapterForTesting(adapterOrNull) {
   customStorageAdapter = adapterOrNull;
+}
+
+export function getMemoryDataStore() {
+  return inMemoryDataStore;
+}
+
+export function clearMemoryDataStore() {
+  inMemoryDataStore.clear();
 }
 
 export function isQuotaExceededError(err) {
@@ -97,23 +106,7 @@ export function getStorageBackend() {
   if (customStorageAdapter) {
     return { backend: customStorageAdapter, isFallback: false };
   }
-  try {
-    const storageCandidate = typeof window !== 'undefined' && window.localStorage
-      ? window.localStorage
-      : (typeof localStorage !== 'undefined' ? localStorage : null);
-    if (storageCandidate) {
-      const probeKey = '__tp_qa_probe__';
-      storageCandidate.setItem(probeKey, '1');
-      storageCandidate.removeItem(probeKey);
-      return { backend: storageCandidate, isFallback: false };
-    }
-  } catch (_err) {
-    // localStorage blocked (e.g. strict privacy mode)
-  }
-  if (!memoryFallback) {
-    memoryFallback = createMemoryStorage();
-  }
-  return { backend: memoryFallback, isFallback: true };
+  return { backend: memoryDataStoreAdapter, isFallback: false };
 }
 
 export function safeStorageWrite(key, serializedValue, context = 'saving data') {
@@ -643,7 +636,7 @@ export function loadAllChecklists() {
     migrateLegacyChecklistStorage();
     const raw = backend.getItem(CHECKLISTS_STORAGE_KEY);
     if (!raw) {
-      return { checklists: [], warning: isFallback ? 'Local storage is restricted; using session memory.' : null };
+      return { checklists: [], warning: null };
     }
 
     let parsed;
@@ -686,13 +679,13 @@ export function loadAllChecklists() {
 
     return {
       checklists,
-      warning: isFallback ? 'Browser localStorage is unavailable; changes will only persist for this tab session.' : null
+      warning: null
     };
   } catch (err) {
-    console.error('Qavora: Failed reading QA checklists', err);
+    console.error('Qavora: Failed reading QA checklists from in-memory store', err);
     return {
       checklists: [],
-      warning: 'Unable to access browser storage.'
+      warning: 'Unable to access in-memory data store.'
     };
   }
 }

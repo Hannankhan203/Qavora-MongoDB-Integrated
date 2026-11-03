@@ -30,7 +30,8 @@ import {
   getChecklistPromotionPreview,
   findPromotedProjectForChecklist,
   buildProjectFromChecklist,
-  promoteChecklistToProject
+  promoteChecklistToProject,
+  setStorageAdapterForTesting
 } from './qaChecklistStore.js';
 
 function createControllableStorage() {
@@ -79,6 +80,7 @@ globalThis.window = {
 };
 globalThis.localStorage = mockLocalStorage;
 globalThis.sessionStorage = mockSessionStorage;
+setStorageAdapterForTesting(mockLocalStorage);
 
 console.log('=== QAVORA PHASE 1 REMEDIATION VERIFICATION SUITE ===\n');
 

@@ -27,7 +27,7 @@ Prepare the browser and staging workspace before executing functional checks.
 Environment: Staging (Chrome, Firefox, Safari)
 
 Desktop Setup:
-☐ Clear browser cache, cookies, and local storage.
+☐ Clear browser cache, cookies, and temporary data.
 ☐ Open the application and verify no console errors appear.
 ☐ Confirm main navigation and landing view render properly.
 

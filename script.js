@@ -39,6 +39,8 @@ import {
 
   let qaRunnerController = null;
   let qaTransferController = null;
+  let inMemoryRollbackSnapshot = null;
+  let inMemoryTheme = 'dark';
 
   // ==========================================================================
   // Storage Keys & Constants
@@ -330,7 +332,7 @@ import {
         try {
           parsed = JSON.parse(raw);
         } catch (jsonErr) {
-          console.error('Qavora: JSON parse error in localStorage projects', jsonErr);
+          console.error('Qavora: JSON parse error in memory projects', jsonErr);
           if (typeof showToast === 'function') {
             showToast('Warning: Unable to parse local project records. Stored data preserved.', 'error');
           }
@@ -530,7 +532,7 @@ import {
 
         return normalizedProjects;
       } catch (err) {
-        console.error('Qavora: Failed to read projects from localStorage', err);
+        console.error('Qavora: Failed to read projects from memory store', err);
         return [];
       }
     },
@@ -633,49 +635,45 @@ import {
           qaActiveRunner !== undefined ? qaActiveRunner : getActiveRunnerState(),
           checklistsToSave
         );
-        sessionStorage.setItem(ROLLBACK_KEY, JSON.stringify({
+        inMemoryRollbackSnapshot = {
           timestamp: new Date().toISOString(),
-          projects: projects,
-          activities: activities,
-          qaChecklists: checklistsToSave,
+          projects: JSON.parse(JSON.stringify(projects || [])),
+          activities: JSON.parse(JSON.stringify(activities || [])),
+          qaChecklists: JSON.parse(JSON.stringify(checklistsToSave || [])),
           qaActiveRunner: runnerStateToSave
-        }));
+        };
       } catch (err) {
-        console.warn('Qavora: Unable to write rollback to sessionStorage', err);
+        console.warn('Qavora: Unable to write in-memory rollback snapshot', err);
       }
     },
 
     getRollbackSnapshot() {
       try {
-        const raw = sessionStorage.getItem(ROLLBACK_KEY) || sessionStorage.getItem(LEGACY_ROLLBACK_KEY);
-        return raw ? JSON.parse(raw) : null;
+        return inMemoryRollbackSnapshot ? JSON.parse(JSON.stringify(inMemoryRollbackSnapshot)) : null;
       } catch {
         return null;
       }
     },
 
     clearRollbackSnapshot() {
-      try {
-        sessionStorage.removeItem(ROLLBACK_KEY);
-        sessionStorage.removeItem(LEGACY_ROLLBACK_KEY);
-      } catch {}
+      inMemoryRollbackSnapshot = null;
     },
 
     getTheme() {
       try {
-        migrateLegacyWorkspaceStorage();
         const { raw } = safeStorageRead(STORAGE_KEYS.THEME);
-        return raw || 'dark';
+        return raw || inMemoryTheme || 'dark';
       } catch {
-        return 'dark';
+        return inMemoryTheme || 'dark';
       }
     },
 
     saveTheme(theme) {
       try {
-        return safeStorageWrite(STORAGE_KEYS.THEME, theme, 'saving theme');
+        inMemoryTheme = theme === 'light' ? 'light' : 'dark';
+        return safeStorageWrite(STORAGE_KEYS.THEME, inMemoryTheme, 'saving theme in memory');
       } catch (err) {
-        console.error('Qavora: Failed to save theme', err);
+        console.error('Qavora: Failed to save theme in memory', err);
       }
     },
 
@@ -9103,7 +9101,7 @@ import {
     const currentActiveRunner = getActiveRunnerState();
 
     if (strategy === 'replace') {
-      // 1. Create safety rollback snapshot in sessionStorage (preserving projects, activities, QA checklists, and active runner state — QAV-ISS-013)
+      // 1. Create safety in-memory rollback snapshot (preserving projects, activities, QA checklists, and active runner state — QAV-ISS-013)
       Storage.saveRollbackSnapshot(currentProjects, currentActivities, currentChecklists, currentActiveRunner);
 
       // 2. Persist imported projects through the normalization engine

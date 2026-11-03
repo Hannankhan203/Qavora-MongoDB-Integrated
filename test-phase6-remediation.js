@@ -1151,9 +1151,9 @@ console.log('\n--- Test Group 8: Backup / Restore / Import / Export ---');
   assert.strictEqual(restoredChecklists.length, 1, 'Restored checklists must contain 1 checklist');
   assert.strictEqual(restoredChecklists[0].title, 'Backup Checklist 1');
 
-  // 4. Verify safety rollback snapshot was saved in sessionStorage
-  const rollbackRaw = sessionStorage.getItem('qavora_rollback_v1');
-  assert(rollbackRaw, 'Rollback snapshot must be preserved in sessionStorage before replace');
+  // 4. Verify safety rollback snapshot was saved in memory
+  const rollbackSnap = hook.Storage.getRollbackSnapshot();
+  assert(rollbackSnap, 'Rollback snapshot must be preserved in in-memory storage before replace');
 
   console.log('✓ Test Group 8 passed: Complete backup, restore, relationship preservation, and rollback snapshot verified.');
 }

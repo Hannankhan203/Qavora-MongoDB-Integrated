@@ -177,7 +177,7 @@
       <div class="sidebar-footer">
         <div class="storage-badge">
           <span class="storage-dot"></span>
-          <span class="storage-text">Offline Local Storage</span>
+          <span class="storage-text">In-Memory Data Store</span>
         </div>
         <div class="version-label">Qavora v1.3 • Test Architecture</div>
       </div>
@@ -666,7 +666,7 @@
               <div class="qa-runner-progress-top">
                 <div>
                   <h3 class="qa-runner-progress-heading">QA Testing Progress</h3>
-                  <p class="qa-runner-progress-sub">Progress saves automatically to browser storage as you check off tests</p>
+                  <p class="qa-runner-progress-sub">Progress saves automatically in memory as you check off tests</p>
                 </div>
                 <div class="qa-runner-big-pct">
                   <span class="qa-runner-pct-label">Progress:</span>
@@ -2390,7 +2390,7 @@
             <div class="section-hero-text">
               <h2 class="section-hero-title">Workspace Settings</h2>
               <p class="section-hero-desc">
-                Configure appearance themes, default testing preferences, and inspect local storage health.
+                Configure appearance themes, default testing preferences, and inspect data store health.
               </p>
             </div>
             <div class="settings-header-actions">
@@ -2554,7 +2554,7 @@
                 </div>
                 <div>
                   <h3 class="settings-card-title">Storage &amp; Data Health</h3>
-                  <p class="settings-card-desc">Overview of client-side browser storage and quick backup access</p>
+                  <p class="settings-card-desc">Overview of client-side in-memory data store and quick backup access</p>
                 </div>
               </div>
 
@@ -3436,7 +3436,7 @@
                         Permanently purge all local test data
                       </div>
                       <div style="font-size: 0.8125rem; color: var(--text-muted); max-width: 650px; margin-top: 4px;">
-                        This operation clears all stored projects, test plans, suites, test cases, execution runs, and defect records from browser localStorage. You will be prompted to download a backup first.
+                        This operation clears all stored projects, test plans, suites, test cases, execution runs, and defect records from the in-memory data store. You will be prompted to download a backup first.
                       </div>
                     </div>
                     <button id="btn-trigger-reset-modal" class="btn btn-danger">
@@ -3461,7 +3461,7 @@
                 </div>
                 <div class="panel-body">
                   <p class="data-card-desc">
-                    Qavora is engineered with an offline-first, client-authoritative design. All application state is stored locally within your web browser's isolated <code class="code-tag">localStorage</code> engine.
+                    Qavora is engineered with an in-memory client-authoritative design in preparation for database migration. All application state resides securely in active JavaScript memory.
                   </p>
                   <ul class="data-feature-list" style="margin-top: 12px;">
                     <li>
@@ -3478,11 +3478,11 @@
 
               <div class="panel">
                 <div class="panel-header">
-                  <h3 class="panel-title">LocalStorage Quota &amp; Best Practices</h3>
+                  <h3 class="panel-title">In-Memory Capacity &amp; Best Practices</h3>
                 </div>
                 <div class="panel-body">
                   <p class="data-card-desc">
-                    Modern browsers allocate approximately 5 MB to 10 MB of UTF-16 storage per origin. Because Qavora utilizes compact, normalized JSON data, a standard workspace can hold thousands of test cases and execution runs.
+                    Because Qavora utilizes compact, normalized JSON data, the in-memory data store can hold thousands of test cases and execution runs during the current session.
                   </p>
                   <ul class="data-feature-list" style="margin-top: 12px;">
                     <li>

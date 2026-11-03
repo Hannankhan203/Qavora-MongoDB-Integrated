@@ -2049,50 +2049,6 @@ export function initQARunnerAndChecklists({
     }
   });
 
-  if (typeof window !== 'undefined') {
-    window.addEventListener('storage', e => {
-      if (e.key === CHECKLISTS_STORAGE_KEY || e.key === ACTIVE_RUNNER_STORAGE_KEY) {
-        const prevActiveId = UIState.activeChecklistId;
-        const { checklists } = loadAllChecklists();
-        const activeWasDeleted = Boolean(prevActiveId && !checklists.some(c => c.id === prevActiveId));
-
-        if (activeWasDeleted) {
-          if (UIState.pendingDeleteChecklistId === prevActiveId) {
-            closeDeleteChecklistModal();
-          }
-          closeRunnerTitleRename();
-          UIState.pendingAddTestTarget = null;
-          UIState.activeChecklistId = checklists.length > 0 ? checklists[0].id : null;
-          showMsg('Active checklist was removed in another tab.', 'info');
-        }
-
-        refreshGlobalBadgesAndBanners();
-        const myChkSection = document.getElementById('view-my-checklists');
-        const runnerSection = document.getElementById('view-qa-runner');
-        if (myChkSection && myChkSection.classList.contains('active')) {
-          renderMyChecklistsView();
-        }
-        if (runnerSection && runnerSection.classList.contains('active')) {
-          const isEditingActiveChecklist = Boolean(
-            !activeWasDeleted &&
-              UIState.runnerEditMode &&
-              els.runnerPhasesContainer &&
-              els.runnerPhasesContainer.contains(document.activeElement)
-          );
-          if (isEditingActiveChecklist && UIState.activeChecklistId) {
-            const latestActive = checklists.find(c => c.id === UIState.activeChecklistId);
-            if (latestActive) {
-              syncChecklistSwitcherDropdown(checklists, latestActive.id);
-              updateRunnerOverallDOM(latestActive);
-            }
-          } else {
-            renderRunnerView();
-          }
-        }
-      }
-    });
-  }
-
   refreshGlobalBadgesAndBanners();
 
   return {
