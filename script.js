@@ -9605,7 +9605,7 @@ import {
     if (btn) btn.disabled = true;
 
     try {
-      const response = await fetch('http://localhost:5000/api/tests');
+      const response = await fetch('/api/tests');
       if (!response.ok) {
         throw new Error(`Server returned HTTP ${response.status} (${response.statusText || 'Error'})`);
       }
@@ -9674,7 +9674,7 @@ import {
       loadingEl.style.display = 'none';
       errorEl.style.display = 'flex';
       if (errorTextEl) {
-        errorTextEl.textContent = `Unable to connect to backend at http://localhost:5000/api/tests (${err.message}). Ensure the backend server is running via node server.js on port 5000.`;
+        errorTextEl.textContent = `Unable to connect to backend at /api/tests (${err.message}). Ensure the backend server is running.`;
       }
     } finally {
       if (btn) btn.disabled = false;

@@ -1,12 +1,11 @@
 import tailwindcss from '@tailwindcss/vite';
-import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig} from 'vite';
 
 export default defineConfig(({ command }) => {
   return {
-    base: process.env.VITE_BASE_PATH || (process.env.GITHUB_ACTIONS === 'true' ? '/Qavora/' : (command === 'build' ? '/Qavora/' : '/')),
-    plugins: [react(), tailwindcss()],
+    base: process.env.VITE_BASE_PATH || '/',
+    plugins: [tailwindcss()],
     resolve: {
       alias: {
         '@': path.resolve(import.meta.dirname, '.'),
