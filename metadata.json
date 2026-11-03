@@ -1,0 +1,6 @@
+{
+  "name": "Qavora — Manual QA Testing Manager",
+  "description": "A generic, no-code manual software testing management dashboard to organize test plans, execute test cases, record results, and track QA progress.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
