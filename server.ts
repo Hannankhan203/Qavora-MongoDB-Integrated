@@ -3,6 +3,8 @@ import type { Request, Response, NextFunction } from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import dns from 'dns/promises';
+import net from 'net';
 import { fileURLToPath } from 'url';
 import { MongoClient, ObjectId } from 'mongodb';
 import bcrypt from 'bcryptjs';
@@ -347,6 +349,215 @@ function buildMongoConnectionDiagnostics(error: any, client?: MongoClient | null
   return diagnostics;
 }
 
+interface MongoHostTcpDiagnostic {
+  hostname: string;
+  port: number;
+  resolvedIps: string[];
+  tcpStatus: 'success' | 'failure';
+  tcpConnected: boolean;
+  errorCode: string | null;
+  dnsErrorCode?: string | null;
+}
+
+function extractSafeHostnamesFromMongoUri(rawUri: string): { scheme: string; hosts: string[] } {
+  try {
+    const schemeMatch = rawUri.trim().match(/^(mongodb(?:\+srv)?):\/\/(.+)$/i);
+    if (!schemeMatch) {
+      return { scheme: 'unknown', hosts: [] };
+    }
+
+    const scheme = schemeMatch[1].toLowerCase();
+    const remainder = schemeMatch[2];
+
+    // Strip path and query string
+    const slashIdx = remainder.indexOf('/');
+    const qIdx = remainder.indexOf('?');
+    let authorityEnd = remainder.length;
+    if (slashIdx !== -1) authorityEnd = Math.min(authorityEnd, slashIdx);
+    if (qIdx !== -1) authorityEnd = Math.min(authorityEnd, qIdx);
+    const authority = remainder.slice(0, authorityEnd);
+
+    // Strip username:password@ userinfo if present (never log or retain credentials)
+    const atIdx = authority.lastIndexOf('@');
+    const hostListPart = atIdx !== -1 ? authority.slice(atIdx + 1) : authority;
+
+    const hosts: string[] = [];
+    for (const rawEntry of hostListPart.split(',')) {
+      const trimmed = rawEntry.trim();
+      if (!trimmed) continue;
+
+      let hostname = '';
+      if (trimmed.startsWith('[')) {
+        const closeBracket = trimmed.indexOf(']');
+        if (closeBracket === -1) continue;
+        const bracketHost = trimmed.slice(1, closeBracket).trim();
+        const afterBracket = trimmed.slice(closeBracket + 1).trim();
+        if (afterBracket && !/^:\d{1,5}$/.test(afterBracket)) {
+          continue;
+        }
+        if (net.isIP(bracketHost) === 6) {
+          hostname = bracketHost.toLowerCase();
+        }
+      } else {
+        const colonIdx = trimmed.indexOf(':');
+        if (colonIdx !== -1) {
+          const portPart = trimmed.slice(colonIdx + 1).trim();
+          // Reject malformed user:pass entries missing '@' where suffix is not a numeric port
+          if (!/^\d{1,5}$/.test(portPart)) {
+            continue;
+          }
+          hostname = trimmed.slice(0, colonIdx).trim().toLowerCase();
+        } else {
+          hostname = trimmed.toLowerCase();
+        }
+
+        // Allow only valid DNS hostname characters or IPv4 literals
+        if (!hostname || (!/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(hostname) && net.isIP(hostname) === 0)) {
+          continue;
+        }
+      }
+
+      if (hostname && !hosts.includes(hostname)) {
+        hosts.push(hostname);
+      }
+    }
+
+    return { scheme, hosts };
+  } catch {
+    return { scheme: 'unknown', hosts: [] };
+  }
+}
+
+function probeTcpPort(host: string, port: number, timeoutMs: number): Promise<{ connected: boolean; errorCode: string | null }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const socket = new net.Socket();
+
+    const finish = (connected: boolean, errorCode: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(wallClockTimer);
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve({ connected, errorCode });
+    };
+
+    const wallClockTimer = setTimeout(() => {
+      finish(false, 'ETIMEDOUT');
+    }, timeoutMs);
+
+    socket.setTimeout(timeoutMs);
+
+    socket.once('connect', () => {
+      finish(true, null);
+    });
+
+    socket.once('timeout', () => {
+      finish(false, 'ETIMEDOUT');
+    });
+
+    socket.once('error', (err: NodeJS.ErrnoException) => {
+      const code = err?.code ? sanitizeDiagnosticText(err.code) : sanitizeDiagnosticText(err?.name || 'TCP_ERROR');
+      finish(false, code || 'TCP_ERROR');
+    });
+
+    try {
+      socket.connect(port, host);
+    } catch (syncErr: any) {
+      const code = syncErr?.code ? sanitizeDiagnosticText(syncErr.code) : 'TCP_CONNECT_THROW';
+      finish(false, code);
+    }
+  });
+}
+
+async function runMongoNetworkDiagnostics(connectionUri: string): Promise<void> {
+  const TCP_DIAGNOSTIC_PORT = 27017;
+  const TCP_TIMEOUT_MS = 5000;
+
+  try {
+    const { scheme, hosts: initialHosts } = extractSafeHostnamesFromMongoUri(connectionUri);
+    if (initialHosts.length === 0) {
+      return;
+    }
+
+    const targetHostnames: string[] = [];
+
+    if (scheme === 'mongodb+srv') {
+      for (const seedHost of initialHosts) {
+        try {
+          const srvRecords = await dns.resolveSrv(`_mongodb._tcp.${seedHost}`);
+          const srvTargets = srvRecords
+            .map((rec) => (rec?.name ? rec.name.replace(/\.$/, '').trim().toLowerCase() : ''))
+            .filter(Boolean);
+
+          if (srvTargets.length > 0) {
+            for (const target of srvTargets) {
+              if (!targetHostnames.includes(target)) {
+                targetHostnames.push(target);
+              }
+            }
+          } else if (!targetHostnames.includes(seedHost)) {
+            targetHostnames.push(seedHost);
+          }
+        } catch (srvErr: any) {
+          const srvCode = srvErr?.code ? sanitizeDiagnosticText(srvErr.code) : 'SRV_LOOKUP_FAILED';
+          console.warn(
+            `[Qavora MongoDB NetDiag] SRV lookup failed for ${sanitizeDiagnosticText(seedHost)}: errorCode=${srvCode}`
+          );
+          if (!targetHostnames.includes(seedHost)) {
+            targetHostnames.push(seedHost);
+          }
+        }
+      }
+    } else {
+      for (const h of initialHosts) {
+        if (!targetHostnames.includes(h)) {
+          targetHostnames.push(h);
+        }
+      }
+    }
+
+    await Promise.all(
+      targetHostnames.map(async (hostname) => {
+        const safeHost = sanitizeDiagnosticText(hostname);
+        let resolvedIps: string[] = [];
+        let dnsErrorCode: string | null = null;
+
+        if (net.isIP(hostname) !== 0) {
+          resolvedIps = [hostname];
+        } else {
+          try {
+            const lookupResults = await dns.lookup(hostname, { all: true });
+            resolvedIps = Array.from(new Set(lookupResults.map((entry) => entry.address).filter(Boolean)));
+          } catch (dnsErr: any) {
+            dnsErrorCode = dnsErr?.code ? sanitizeDiagnosticText(dnsErr.code) : 'DNS_LOOKUP_FAILED';
+          }
+        }
+
+        const tcpProbeTarget = resolvedIps[0] || hostname;
+        const tcpResult = await probeTcpPort(tcpProbeTarget, TCP_DIAGNOSTIC_PORT, TCP_TIMEOUT_MS);
+        const finalErrorCode = tcpResult.connected ? null : (tcpResult.errorCode || dnsErrorCode || 'UNKNOWN');
+
+        const summary: MongoHostTcpDiagnostic = {
+          hostname: safeHost,
+          port: TCP_DIAGNOSTIC_PORT,
+          resolvedIps: resolvedIps.map((ip) => sanitizeDiagnosticText(ip)),
+          tcpStatus: tcpResult.connected ? 'success' : 'failure',
+          tcpConnected: tcpResult.connected,
+          errorCode: finalErrorCode,
+          ...(dnsErrorCode ? { dnsErrorCode } : {})
+        };
+
+        console.log(`[Qavora MongoDB NetDiag] ${JSON.stringify(summary)}`);
+      })
+    );
+  } catch (diagErr: any) {
+    console.warn(
+      `[Qavora MongoDB NetDiag] Diagnostic check skipped safely: ${sanitizeDiagnosticText(diagErr?.code || diagErr?.message || 'Unknown error')}`
+    );
+  }
+}
+
 async function connectToDatabase(): Promise<any> {
   const currentUri = process.env.MONGODB_URI;
   const currentDbName = process.env.MONGODB_DB || 'qavora';
@@ -385,6 +596,8 @@ async function connectToDatabase(): Promise<any> {
         db = mockDb;
         return db;
       }
+
+      await runMongoNetworkDiagnostics(currentUri);
 
       console.log(`[Qavora Server] Initializing MongoDB Atlas client (database: ${currentDbName})...`);
       const client = new MongoClient(currentUri, {
