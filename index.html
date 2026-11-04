@@ -24,7 +24,288 @@
   <!-- Mobile Sidebar Backdrop Overlay -->
   <div id="sidebar-overlay" class="sidebar-overlay" aria-hidden="true"></div>
 
-  <div class="app-container">
+  <!-- Session Restoration Loading Overlay (Phase 4 — Step 5) -->
+  <div id="auth-loading-overlay" class="auth-loading-overlay" aria-live="polite" aria-busy="true">
+    <div class="auth-loading-content">
+      <div class="auth-loading-logo">
+        <div class="brand-icon brand-icon-lg">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+            <path d="M2 17l10 5 10-5"></path>
+            <path d="M2 12l10 5 10-5"></path>
+          </svg>
+        </div>
+        <div class="auth-loading-brand">
+          <span class="brand-title">Qavora</span>
+          <span class="brand-tag">Manual QA</span>
+        </div>
+      </div>
+      <div class="auth-loading-spinner" aria-label="Loading session"></div>
+      <p class="auth-loading-text">Verifying session...</p>
+    </div>
+  </div>
+
+  <!-- Authentication Screen: Login & Registration (Phase 4 — Step 5) -->
+  <div id="auth-container" class="auth-container" style="display: none;">
+    <div class="auth-card-wrapper">
+      <div class="auth-brand-header">
+        <div class="brand-icon brand-icon-lg">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+            <path d="M2 17l10 5 10-5"></path>
+            <path d="M2 12l10 5 10-5"></path>
+          </svg>
+        </div>
+        <div class="auth-brand-text">
+          <h1 class="auth-brand-title">Qavora</h1>
+          <span class="auth-brand-subtitle">Manual QA Testing Platform</span>
+        </div>
+      </div>
+
+      <div class="auth-card">
+        <!-- Auth View Switcher Tabs -->
+        <div class="auth-tabs" role="tablist" aria-label="Authentication Options">
+          <button type="button" role="tab" id="auth-tab-login" class="auth-tab-btn active" aria-selected="true" aria-controls="auth-login-panel">
+            Sign In
+          </button>
+          <button type="button" role="tab" id="auth-tab-register" class="auth-tab-btn" aria-selected="false" aria-controls="auth-register-panel">
+            Create Account
+          </button>
+        </div>
+
+        <!-- Feedback & Error Message Banners -->
+        <div id="auth-error-alert" class="auth-alert auth-alert-error" role="alert" style="display: none;">
+          <svg class="auth-alert-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="8" x2="12" y2="12"></line>
+            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+          </svg>
+          <span id="auth-error-message" class="auth-alert-text"></span>
+        </div>
+
+        <div id="auth-success-alert" class="auth-alert auth-alert-success" role="status" style="display: none;">
+          <svg class="auth-alert-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <polyline points="20 6 9 17 4 12"></polyline>
+          </svg>
+          <span id="auth-success-message" class="auth-alert-text"></span>
+        </div>
+
+        <!-- 1. LOGIN PANEL -->
+        <div id="auth-login-panel" class="auth-panel" role="tabpanel" aria-labelledby="auth-tab-login">
+          <div class="auth-header-copy">
+            <h2 class="auth-panel-heading">Welcome Back</h2>
+            <p class="auth-panel-subheading">Sign in to your account to access your test plans and executions.</p>
+          </div>
+
+          <form id="auth-login-form" class="auth-form" novalidate>
+            <div class="auth-form-group">
+              <label for="login-email" class="auth-label">Email Address</label>
+              <div class="auth-input-wrapper">
+                <svg class="auth-input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path>
+                  <polyline points="22,6 12,13 2,6"></polyline>
+                </svg>
+                <input
+                  type="email"
+                  id="login-email"
+                  name="email"
+                  class="auth-input"
+                  placeholder="name@company.com"
+                  autocomplete="email"
+                  required
+                />
+              </div>
+              <div id="login-email-error" class="auth-field-error" style="display: none;"></div>
+            </div>
+
+            <div class="auth-form-group">
+              <div class="auth-label-row">
+                <label for="login-password" class="auth-label">Password</label>
+              </div>
+              <div class="auth-input-wrapper">
+                <svg class="auth-input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                </svg>
+                <input
+                  type="password"
+                  id="login-password"
+                  name="password"
+                  class="auth-input has-toggle"
+                  placeholder="Enter your password"
+                  autocomplete="current-password"
+                  required
+                />
+                <button
+                  type="button"
+                  id="login-password-toggle"
+                  class="auth-password-toggle-btn"
+                  aria-label="Show password"
+                  title="Toggle password visibility"
+                >
+                  <svg class="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                    <circle cx="12" cy="12" r="3"></circle>
+                  </svg>
+                  <svg class="icon-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" style="display: none;">
+                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+                    <line x1="1" y1="1" x2="23" y2="23"></line>
+                  </svg>
+                </button>
+              </div>
+              <div id="login-password-error" class="auth-field-error" style="display: none;"></div>
+            </div>
+
+            <button type="submit" id="login-submit-btn" class="btn btn-primary auth-submit-btn">
+              <span class="auth-btn-spinner" style="display: none;"></span>
+              <span class="auth-btn-text">Sign In</span>
+            </button>
+          </form>
+
+          <div class="auth-footer-prompt">
+            <span>Don't have an account?</span>
+            <button type="button" id="switch-to-register-link" class="auth-link-btn">Create one now</button>
+          </div>
+        </div>
+
+        <!-- 2. REGISTRATION PANEL -->
+        <div id="auth-register-panel" class="auth-panel" role="tabpanel" aria-labelledby="auth-tab-register" style="display: none;">
+          <div class="auth-header-copy">
+            <h2 class="auth-panel-heading">Create QA Account</h2>
+            <p class="auth-panel-subheading">Get started with manual testing workspaces and user data isolation.</p>
+          </div>
+
+          <form id="auth-register-form" class="auth-form" novalidate>
+            <div class="auth-form-group">
+              <label for="register-name" class="auth-label">Full Name</label>
+              <div class="auth-input-wrapper">
+                <svg class="auth-input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                  <circle cx="12" cy="7" r="4"></circle>
+                </svg>
+                <input
+                  type="text"
+                  id="register-name"
+                  name="name"
+                  class="auth-input"
+                  placeholder="e.g. Alex Morgan"
+                  autocomplete="name"
+                  required
+                />
+              </div>
+              <div id="register-name-error" class="auth-field-error" style="display: none;"></div>
+            </div>
+
+            <div class="auth-form-group">
+              <label for="register-email" class="auth-label">Work Email</label>
+              <div class="auth-input-wrapper">
+                <svg class="auth-input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path>
+                  <polyline points="22,6 12,13 2,6"></polyline>
+                </svg>
+                <input
+                  type="email"
+                  id="register-email"
+                  name="email"
+                  class="auth-input"
+                  placeholder="name@company.com"
+                  autocomplete="email"
+                  required
+                />
+              </div>
+              <div id="register-email-error" class="auth-field-error" style="display: none;"></div>
+            </div>
+
+            <div class="auth-form-group">
+              <label for="register-password" class="auth-label">Password <span class="auth-label-hint">(min 8 characters)</span></label>
+              <div class="auth-input-wrapper">
+                <svg class="auth-input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                </svg>
+                <input
+                  type="password"
+                  id="register-password"
+                  name="password"
+                  class="auth-input has-toggle"
+                  placeholder="At least 8 characters"
+                  autocomplete="new-password"
+                  minlength="8"
+                  required
+                />
+                <button
+                  type="button"
+                  id="register-password-toggle"
+                  class="auth-password-toggle-btn"
+                  aria-label="Show password"
+                  title="Toggle password visibility"
+                >
+                  <svg class="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                    <circle cx="12" cy="12" r="3"></circle>
+                  </svg>
+                  <svg class="icon-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" style="display: none;">
+                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+                    <line x1="1" y1="1" x2="23" y2="23"></line>
+                  </svg>
+                </button>
+              </div>
+              <div id="register-password-error" class="auth-field-error" style="display: none;"></div>
+            </div>
+
+            <div class="auth-form-group">
+              <label for="register-confirm-password" class="auth-label">Confirm Password</label>
+              <div class="auth-input-wrapper">
+                <svg class="auth-input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                </svg>
+                <input
+                  type="password"
+                  id="register-confirm-password"
+                  name="confirmPassword"
+                  class="auth-input has-toggle"
+                  placeholder="Re-enter your password"
+                  autocomplete="new-password"
+                  minlength="8"
+                  required
+                />
+                <button
+                  type="button"
+                  id="register-confirm-password-toggle"
+                  class="auth-password-toggle-btn"
+                  aria-label="Show password confirmation"
+                  title="Toggle password visibility"
+                >
+                  <svg class="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8z"></path>
+                    <circle cx="12" cy="12" r="3"></circle>
+                  </svg>
+                  <svg class="icon-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" style="display: none;">
+                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+                    <line x1="1" y1="1" x2="23" y2="23"></line>
+                  </svg>
+                </button>
+              </div>
+              <div id="register-confirm-error" class="auth-field-error" style="display: none;"></div>
+            </div>
+
+            <button type="submit" id="register-submit-btn" class="btn btn-primary auth-submit-btn">
+              <span class="auth-btn-spinner" style="display: none;"></span>
+              <span class="auth-btn-text">Create Account</span>
+            </button>
+          </form>
+
+          <div class="auth-footer-prompt">
+            <span>Already have an account?</span>
+            <button type="button" id="switch-to-login-link" class="auth-link-btn">Sign in here</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="app-container" class="app-container" style="display: none;">
     <!-- Sidebar -->
     <aside id="sidebar" class="sidebar">
       <div class="sidebar-header">
@@ -180,6 +461,14 @@
           <span class="storage-text">In-Memory Data Store</span>
         </div>
         <div class="version-label">Qavora v1.3 • Test Architecture</div>
+        <button type="button" id="sidebar-logout-btn" class="sidebar-logout-btn" title="Sign out of Qavora" aria-label="Sign out">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+            <polyline points="16 17 21 12 16 7"></polyline>
+            <line x1="21" y1="12" x2="9" y2="12"></line>
+          </svg>
+          <span>Sign Out</span>
+        </button>
       </div>
     </aside>
 
@@ -268,13 +557,22 @@
             </div>
           </div>
 
-          <div class="user-profile" title="QA Lead Account">
-            <div class="avatar">QA</div>
+          <div class="user-profile" id="header-user-profile" title="QA Lead Account">
+            <div class="avatar" id="header-user-avatar">QA</div>
             <div class="user-meta">
-              <span class="user-name">QA Tester</span>
-              <span class="user-role">Manual Lead</span>
+              <span class="user-name" id="header-user-name">QA Tester</span>
+              <span class="user-role" id="header-user-role">Manual Lead</span>
             </div>
           </div>
+
+          <button type="button" id="header-logout-btn" class="btn btn-secondary btn-sm header-logout-btn" title="Sign out of Qavora" aria-label="Sign out">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="logout-icon" aria-hidden="true">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+              <polyline points="16 17 21 12 16 7"></polyline>
+              <line x1="21" y1="12" x2="9" y2="12"></line>
+            </svg>
+            <span>Log Out</span>
+          </button>
         </div>
       </header>
 

@@ -33,6 +33,8 @@ import {
   safeStorageRead,
   safeStorageRemove
 } from './qaChecklistStore.js';
+import { authController } from './authController.js';
+import { initAuthUI } from './authUI.js';
 
 (function () {
   'use strict';
@@ -144,6 +146,12 @@ import {
   const State = {
     currentView: 'checklist-generator',
     currentDetailProjectId: null,
+
+    // In-memory Projects Cache & Hydration Status (Phase 2)
+    projects: null,
+    projectsHydrated: false,
+    projectsLoading: false,
+    projectsError: null,
 
     // My Projects Filtering
     searchQuery: '',
@@ -323,7 +331,17 @@ import {
   }
 
   const Storage = {
+    isHydrated() {
+      return Boolean(State.projectsHydrated && Array.isArray(State.projects));
+    },
+
     getProjects() {
+      // Return in-memory cache if hydrated
+      if (State.projectsHydrated && Array.isArray(State.projects)) {
+        return State.projects;
+      }
+
+      // Pre-hydration fallback: read and normalize from localStorage
       try {
         migrateLegacyWorkspaceStorage();
         const { raw } = safeStorageRead(STORAGE_KEYS.PROJECTS);
@@ -537,7 +555,12 @@ import {
       }
     },
 
-    saveProjects(projects) {
+    saveProjects(projects, meta = {}) {
+      // Keep in-memory State cache synchronized
+      const prevProjects = Array.isArray(State.projects) ? [...State.projects] : null;
+      if (Array.isArray(projects)) {
+        State.projects = projects;
+      }
       try {
         const payload = JSON.stringify(projects);
         const res = safeStorageWrite(STORAGE_KEYS.PROJECTS, payload, 'saving projects');
@@ -545,6 +568,10 @@ import {
           if (typeof showToast === 'function') {
             showToast(res.error, 'error');
           }
+        }
+        // Write-through to MongoDB Atlas if not in hydration or skip sync
+        if (res.ok && !meta.skipBackendSync && !State.projectsLoading && typeof ProjectsPersistence !== 'undefined') {
+          ProjectsPersistence.onProjectsSaved(projects, prevProjects, meta);
         }
         return res;
       } catch (err) {
@@ -760,6 +787,471 @@ import {
         console.error('Qavora: Failed to save notifications', err);
         return [];
       }
+    }
+  };
+
+  // ==========================================================================
+  // Centralized Projects API Client (Phase 2)
+  // ==========================================================================
+  const ProjectsAPI = {
+    baseUrl: '/api/projects',
+
+    /**
+     * Internal safe HTTP client for /api/projects
+     * Handles status codes, network errors, 503 DB unavailable, and JSON parsing.
+     */
+    async _request(endpoint, options = {}) {
+      const url = (typeof endpoint === 'string' && (endpoint.startsWith('http') || endpoint.startsWith('/')))
+        ? endpoint
+        : `${this.baseUrl}/${endpoint || ''}`;
+
+      const headers = {
+        'Accept': 'application/json',
+        ...(options.headers || {})
+      };
+
+      // Phase 4: Centralized JWT Bearer injection
+      if (typeof authController !== 'undefined' && authController.getToken()) {
+        if (!headers['Authorization'] && !headers['authorization']) {
+          headers['Authorization'] = `Bearer ${authController.getToken()}`;
+        }
+      }
+
+      if (options.body && typeof options.body === 'string' && !headers['Content-Type']) {
+        headers['Content-Type'] = 'application/json';
+      }
+
+      try {
+        const response = await fetch(url, {
+          ...options,
+          headers
+        });
+
+        const status = response.status;
+        const isDbUnavailable = status === 503;
+
+        // Phase 4: Intercept 401 Unauthorized to reset invalid authentication state
+        if (status === 401 && typeof authController !== 'undefined') {
+          authController.handleUnauthorized();
+        }
+
+        let parsed = null;
+        const contentType = response.headers.get('content-type') || '';
+
+        if (contentType.includes('application/json')) {
+          try {
+            parsed = await response.json();
+          } catch (jsonErr) {
+            console.warn('Qavora: Could not parse response as JSON', jsonErr);
+          }
+        } else {
+          try {
+            const rawText = await response.text();
+            parsed = rawText ? { raw: rawText } : null;
+          } catch (textErr) {
+            console.warn('Qavora: Could not read text response', textErr);
+          }
+        }
+
+        if (!response.ok) {
+          const errorMessage = (parsed && (parsed.error || parsed.message))
+            ? (parsed.error || parsed.message)
+            : `HTTP ${status} (${response.statusText || 'Error'})`;
+
+          return {
+            ok: false,
+            status,
+            data: parsed && parsed.data !== undefined ? parsed.data : null,
+            error: errorMessage,
+            message: parsed && parsed.message ? parsed.message : errorMessage,
+            isDbUnavailable
+          };
+        }
+
+        // 2xx Success response
+        return {
+          ok: true,
+          status,
+          data: (parsed && Object.prototype.hasOwnProperty.call(parsed, 'data')) ? parsed.data : parsed,
+          rawResponse: parsed,
+          message: parsed && parsed.message ? parsed.message : '',
+          insertedCount: parsed && typeof parsed.insertedCount === 'number' ? parsed.insertedCount : undefined,
+          error: null,
+          isDbUnavailable: false
+        };
+      } catch (networkErr) {
+        console.error('Qavora: ProjectsAPI network/fetch error', networkErr);
+        return {
+          ok: false,
+          status: 0,
+          data: null,
+          error: networkErr.message || 'Network request failed',
+          message: 'Unable to reach backend server. Operating in offline/local fallback.',
+          isDbUnavailable: true
+        };
+      }
+    },
+
+    /**
+     * GET /api/projects - Fetch all projects
+     */
+    async getAll() {
+      return this._request(this.baseUrl, { method: 'GET' });
+    },
+
+    /**
+     * GET /api/projects/:id - Fetch single project by ID
+     */
+    async getById(id) {
+      if (!id || (typeof id !== 'string' && typeof id !== 'number')) {
+        return { ok: false, status: 400, data: null, error: 'A valid project ID is required' };
+      }
+      return this._request(`${this.baseUrl}/${encodeURIComponent(String(id).trim())}`, {
+        method: 'GET'
+      });
+    },
+
+    /**
+     * POST /api/projects - Create a new project
+     */
+    async create(projectData) {
+      if (!projectData || typeof projectData !== 'object') {
+        return { ok: false, status: 400, data: null, error: 'Project data object is required' };
+      }
+      return this._request(this.baseUrl, {
+        method: 'POST',
+        body: JSON.stringify(projectData)
+      });
+    },
+
+    /**
+     * PUT /api/projects/:id - Update project metadata / nested structure
+     */
+    async update(id, updates) {
+      if (!id || (typeof id !== 'string' && typeof id !== 'number')) {
+        return { ok: false, status: 400, data: null, error: 'A valid project ID is required' };
+      }
+      if (!updates || typeof updates !== 'object') {
+        return { ok: false, status: 400, data: null, error: 'Update payload object is required' };
+      }
+      return this._request(`${this.baseUrl}/${encodeURIComponent(String(id).trim())}`, {
+        method: 'PUT',
+        body: JSON.stringify(updates)
+      });
+    },
+
+    /**
+     * PATCH /api/projects/:id/data - Update full project data (nested QA structures & metadata)
+     */
+    async updateData(id, fullData) {
+      if (!id || (typeof id !== 'string' && typeof id !== 'number')) {
+        return { ok: false, status: 400, data: null, error: 'A valid project ID is required' };
+      }
+      if (!fullData || typeof fullData !== 'object') {
+        return { ok: false, status: 400, data: null, error: 'Project data payload is required' };
+      }
+      return this._request(`${this.baseUrl}/${encodeURIComponent(String(id).trim())}/data`, {
+        method: 'PATCH',
+        body: JSON.stringify(fullData)
+      });
+    },
+
+    /**
+     * PATCH /api/projects/:id/status - Update project status
+     */
+    async updateStatus(id, status) {
+      if (!id || (typeof id !== 'string' && typeof id !== 'number')) {
+        return { ok: false, status: 400, data: null, error: 'A valid project ID is required' };
+      }
+      if (!status || typeof status !== 'string') {
+        return { ok: false, status: 400, data: null, error: 'Valid status string is required' };
+      }
+      return this._request(`${this.baseUrl}/${encodeURIComponent(String(id).trim())}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status })
+      });
+    },
+
+    /**
+     * DELETE /api/projects/:id - Delete a project
+     */
+    async delete(id) {
+      if (!id || (typeof id !== 'string' && typeof id !== 'number')) {
+        return { ok: false, status: 400, data: null, error: 'A valid project ID is required' };
+      }
+      return this._request(`${this.baseUrl}/${encodeURIComponent(String(id).trim())}`, {
+        method: 'DELETE'
+      });
+    },
+
+    /**
+     * POST /api/projects/sync-local - Bulk upload local projects without overwriting
+     */
+    async syncLocal(projects) {
+      if (!Array.isArray(projects)) {
+        return { ok: false, status: 400, data: null, error: 'Projects array is required for sync' };
+      }
+      return this._request(`${this.baseUrl}/sync-local`, {
+        method: 'POST',
+        body: JSON.stringify({ projects })
+      });
+    },
+
+    /**
+     * In-memory cache hydration helper
+     */
+    hydrateCache(projects) {
+      if (Array.isArray(projects)) {
+        State.projects = projects.map(p => {
+          if (!p || typeof p !== 'object') return p;
+          if (p.id && typeof ProjectsPersistence !== 'undefined') {
+            ProjectsPersistence.markPersisted(p.id);
+          }
+          return {
+            ...p,
+            testPlan: p.testPlan || { phases: [] },
+            testSuites: Array.isArray(p.testSuites) ? p.testSuites : [],
+            executions: Array.isArray(p.executions) ? p.executions : [],
+            defects: Array.isArray(p.defects) ? p.defects : []
+          };
+        });
+        State.projectsHydrated = true;
+        State.projectsError = null;
+        if (typeof updateSyncStatusIndicator === 'function') {
+          updateSyncStatusIndicator();
+        }
+      }
+      return State.projects;
+    },
+
+    /**
+     * In-memory cache reset helper
+     */
+    clearCache() {
+      State.projects = null;
+      State.projectsHydrated = false;
+      State.projectsLoading = false;
+      State.projectsError = null;
+      if (typeof updateSyncStatusIndicator === 'function') {
+        updateSyncStatusIndicator();
+      }
+    }
+  };
+
+  // ==========================================================================
+  // Centralized Projects Write-Through Persistence Engine (Phase 3 - Step 4)
+  // ==========================================================================
+  const ProjectsPersistence = {
+    // Tracks project IDs that are confirmed to exist on the remote MongoDB Atlas collection
+    persistedProjectIds: new Set(),
+
+    // Per-project in-flight request promises to prevent duplicate simultaneous network writes
+    inFlightSync: new Map(),
+
+    // Per-project pending updates queued while an in-flight sync is active (prevents out-of-order writes)
+    pendingSync: new Map(),
+
+    /**
+     * Mark one or more project IDs as already persisted in MongoDB Atlas
+     */
+    markPersisted(idOrIds) {
+      if (!idOrIds) return;
+      if (Array.isArray(idOrIds)) {
+        idOrIds.forEach(id => {
+          if (id) this.persistedProjectIds.add(String(id));
+        });
+      } else {
+        this.persistedProjectIds.add(String(idOrIds));
+      }
+    },
+
+    /**
+     * Remove a project ID from local tracking
+     */
+    unmarkPersisted(id) {
+      if (id) {
+        this.persistedProjectIds.delete(String(id));
+      }
+    },
+
+    /**
+     * Checks if project is tracked as existing on MongoDB Atlas
+     */
+    isPersisted(id) {
+      return Boolean(id && this.persistedProjectIds.has(String(id)));
+    },
+
+    /**
+     * Synchronize a project to MongoDB Atlas.
+     * Uses POST for newly created projects and PATCH /api/projects/:id/data for existing projects.
+     * Queues pending writes if an existing write is currently in-flight.
+     */
+    async syncProject(project, options = {}) {
+      if (!project || !project.id || typeof project !== 'object') {
+        return { ok: false, error: 'Invalid project record for sync' };
+      }
+
+      if (typeof authController !== 'undefined' && !authController.isAuthenticated()) {
+        // Unauthenticated session: keep changes securely in local storage without triggering 401s
+        return { ok: false, status: 401, error: 'Authentication required for server synchronization' };
+      }
+
+      const projectId = String(project.id).trim();
+
+      // If a sync is already in flight for this specific project, queue this latest version
+      if (this.inFlightSync.has(projectId)) {
+        this.pendingSync.set(projectId, { project: { ...project }, options });
+        return this.inFlightSync.get(projectId);
+      }
+
+      const syncPromise = (async () => {
+        try {
+          const isKnownOnServer = this.isPersisted(projectId) && !options.isNew;
+          let result;
+
+          if (isKnownOnServer) {
+            // Update existing project using full project data PATCH
+            result = await ProjectsAPI.updateData(projectId, project);
+
+            // If 404 on server (e.g. wiped or remote sync missing), seamlessly fall back to POST
+            if (!result.ok && result.status === 404) {
+              console.info(`Qavora: Project "${projectId}" not found on MongoDB Atlas (404). Falling back to POST create.`);
+              result = await ProjectsAPI.create(project);
+            }
+          } else {
+            // New project: POST /api/projects
+            result = await ProjectsAPI.create(project);
+
+            // If 409 conflict (already exists on server with this ID), gracefully update it
+            if (!result.ok && (result.status === 409 || (result.error && result.error.includes('already exists')))) {
+              console.info(`Qavora: Project "${projectId}" already exists on MongoDB Atlas (409). Falling back to PATCH /data.`);
+              result = await ProjectsAPI.updateData(projectId, project);
+            }
+          }
+
+          if (result && result.ok) {
+            this.markPersisted(projectId);
+
+            // If MongoDB returned canonical document with genuine BSON _id, attach it to local object
+            const serverDoc = result.data;
+            if (serverDoc && serverDoc._id) {
+              project._id = serverDoc._id;
+              // Also update in State.projects if present
+              if (Array.isArray(State.projects)) {
+                const inMemory = State.projects.find(p => p && p.id === projectId);
+                if (inMemory && !inMemory._id) {
+                  inMemory._id = serverDoc._id;
+                }
+              }
+            }
+
+            // If State was not marked hydrated yet, mark it now since server communication succeeded
+            if (!State.projectsHydrated && !State.projectsLoading) {
+              State.projectsHydrated = true;
+              State.projectsError = null;
+              if (typeof updateSyncStatusIndicator === 'function') {
+                updateSyncStatusIndicator();
+              }
+            }
+          } else {
+            // Log warning without failing UI operations — local storage backup guarantees offline safety
+            console.warn(`Qavora: Atlas sync for project "${projectId}" returned:`, result ? result.status : 'no-result', result ? result.error : '');
+          }
+
+          return result;
+        } catch (err) {
+          console.warn(`Qavora: Atlas sync error for project "${projectId}":`, err);
+          return { ok: false, error: err?.message || 'Sync failed' };
+        } finally {
+          this.inFlightSync.delete(projectId);
+
+          // If another change occurred while sync was running, process the pending version now
+          if (this.pendingSync.has(projectId)) {
+            const next = this.pendingSync.get(projectId);
+            this.pendingSync.delete(projectId);
+            this.syncProject(next.project, next.options);
+          }
+        }
+      })();
+
+      this.inFlightSync.set(projectId, syncPromise);
+      return syncPromise;
+    },
+
+    /**
+     * Delete a project from MongoDB Atlas
+     */
+    async deleteProject(projectId) {
+      if (!projectId) return { ok: false, error: 'Project ID required' };
+      const pId = String(projectId).trim();
+
+      this.unmarkPersisted(pId);
+      this.inFlightSync.delete(pId);
+      this.pendingSync.delete(pId);
+
+      if (typeof authController !== 'undefined' && !authController.isAuthenticated()) {
+        return { ok: true, localOnly: true };
+      }
+
+      try {
+        const res = await ProjectsAPI.delete(pId);
+        if (!res.ok && res.status !== 404) {
+          console.warn(`Qavora: Delete project "${pId}" on Atlas returned:`, res.status, res.error);
+        }
+        return res;
+      } catch (err) {
+        console.warn(`Qavora: Delete project "${pId}" network error:`, err);
+        return { ok: false, error: err?.message || 'Delete failed' };
+      }
+    },
+
+    /**
+     * Centralized hook called whenever projects are saved to Storage
+     */
+    onProjectsSaved(newProjects, prevProjects = null, meta = {}) {
+      if (!Array.isArray(newProjects)) return;
+
+      // If a specific project was targeted
+      if (meta && meta.projectId) {
+        const target = newProjects.find(p => p && p.id === meta.projectId);
+        if (target) {
+          this.syncProject(target, { isNew: Boolean(meta.isNew) });
+        }
+        return;
+      }
+
+      // If a project was explicitly deleted
+      if (meta && meta.deletedProjectId) {
+        this.deleteProject(meta.deletedProjectId);
+        return;
+      }
+
+      // General delta detection
+      const prevList = Array.isArray(prevProjects) ? prevProjects : [];
+      const prevMap = new Map(prevList.map(p => [p.id, p]));
+
+      // Detect deletions
+      const newIds = new Set(newProjects.map(p => p.id));
+      prevList.forEach(p => {
+        if (!newIds.has(p.id)) {
+          this.deleteProject(p.id);
+        }
+      });
+
+      // Detect additions and modifications
+      newProjects.forEach(p => {
+        if (!p || !p.id) return;
+        const prev = prevMap.get(p.id);
+        if (!prev) {
+          // Brand new project
+          this.syncProject(p, { isNew: !this.isPersisted(p.id) });
+        } else {
+          // Check if modified (by reference or updatedAt)
+          if (prev !== p || prev.updatedAt !== p.updatedAt) {
+            this.syncProject(p, { isNew: false });
+          }
+        }
+      });
     }
   };
 
@@ -5953,9 +6445,12 @@ import {
           });
         });
       }
-      const saveRes = Storage.saveProjects(updated);
+      const saveRes = Storage.saveProjects(updated, { deletedProjectId: targetId });
       if (!saveRes.ok) {
         return;
+      }
+      if (typeof ProjectsPersistence !== 'undefined') {
+        ProjectsPersistence.deleteProject(targetId);
       }
       Storage.addActivity('Deleted project', targetProj.name || targetId);
       showToast(`Project deleted.`, 'info');
@@ -9470,6 +9965,361 @@ import {
     }
   }
 
+  /**
+   * Refreshes the currently active workspace view without rebinding event listeners
+   * or reloading the page. Used after asynchronous MongoDB hydration (Phase 2 - Step 3).
+   */
+  function refreshActiveView() {
+    const currentView = State.currentView;
+    switch (currentView) {
+      case 'dashboard':
+        renderDashboard();
+        break;
+      case 'projects':
+        renderMyProjects();
+        break;
+      case 'project-details':
+        if (State.currentDetailProjectId) {
+          const p = Storage.getProjects().find(x => x.id === State.currentDetailProjectId);
+          if (p) {
+            renderProjectDetailsData(p);
+          } else {
+            switchView('projects');
+          }
+        } else {
+          switchView('projects');
+        }
+        break;
+      case 'plans':
+        renderTestPlansWorkspace();
+        break;
+      case 'execution':
+        renderTestExecutionWorkspace();
+        break;
+      case 'defects':
+        renderDefectsWorkspace();
+        break;
+      case 'reports':
+        renderReportsWorkspace();
+        break;
+      case 'data':
+        renderDataWorkspace();
+        break;
+      case 'settings':
+        renderSettingsWorkspace();
+        break;
+      case 'checklist-generator':
+        if (qaRunnerController && typeof qaRunnerController.refreshGlobalBadgesAndBanners === 'function') {
+          qaRunnerController.refreshGlobalBadgesAndBanners();
+        }
+        break;
+      case 'my-checklists':
+        if (qaRunnerController && typeof qaRunnerController.renderMyChecklistsView === 'function') {
+          qaRunnerController.renderMyChecklistsView();
+        }
+        break;
+      case 'qa-runner':
+        if (qaRunnerController && typeof qaRunnerController.renderRunnerView === 'function') {
+          qaRunnerController.renderRunnerView();
+        }
+        break;
+      default:
+        renderDashboard();
+        break;
+    }
+  }
+
+  // ==========================================================================
+  // MongoDB Atlas Sync Status Indicator Controller (Phase 2 - Step 4)
+  // ==========================================================================
+  function ensureSyncIndicatorStyles() {
+    if (typeof document === 'undefined') return;
+    if (document.getElementById('qavora-sync-indicator-styles')) return;
+
+    const styleEl = document.createElement('style');
+    styleEl.id = 'qavora-sync-indicator-styles';
+    styleEl.textContent = `
+      .qavora-sync-indicator {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 10px;
+        border-radius: var(--radius-full, 9999px);
+        font-size: 0.75rem;
+        font-weight: 500;
+        line-height: 1;
+        background-color: var(--bg-surface);
+        border: 1px solid var(--border-subtle);
+        color: var(--text-secondary);
+        user-select: none;
+        white-space: nowrap;
+        transition: all 0.2s ease;
+      }
+      .qavora-sync-indicator .sync-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        flex-shrink: 0;
+        display: inline-block;
+        transition: all 0.25s ease;
+      }
+      .qavora-sync-indicator.sync-status-connecting {
+        border-color: rgba(245, 158, 11, 0.4);
+      }
+      .qavora-sync-indicator.sync-status-connecting .sync-dot {
+        background-color: #f59e0b;
+        box-shadow: 0 0 6px #f59e0b;
+        animation: qavora-sync-pulse 1.4s ease-in-out infinite;
+      }
+      .qavora-sync-indicator.sync-status-synced {
+        border-color: rgba(16, 185, 129, 0.3);
+      }
+      .qavora-sync-indicator.sync-status-synced .sync-dot {
+        background-color: var(--color-green, #10b981);
+        box-shadow: 0 0 6px var(--color-green, #10b981);
+      }
+      .qavora-sync-indicator.sync-status-local {
+        border-color: var(--border-subtle);
+      }
+      .qavora-sync-indicator.sync-status-local .sync-dot {
+        background-color: var(--text-muted, #94a3b8);
+        box-shadow: none;
+      }
+      @keyframes qavora-sync-pulse {
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.35; transform: scale(0.85); }
+      }
+      @media (max-width: 640px) {
+        .qavora-sync-indicator .sync-text {
+          display: none;
+        }
+        .qavora-sync-indicator {
+          padding: 6px;
+          border-radius: 50%;
+          min-width: 0;
+        }
+      }
+    `;
+    document.head.appendChild(styleEl);
+  }
+
+  function ensureHeaderSyncIndicator() {
+    if (typeof document === 'undefined') return null;
+    let indicator = document.getElementById('header-sync-indicator');
+    if (indicator) return indicator;
+
+    const topNavRight = document.querySelector('.top-nav-right');
+    if (!topNavRight) return null;
+
+    indicator = document.createElement('div');
+    indicator.id = 'header-sync-indicator';
+    indicator.className = 'qavora-sync-indicator sync-status-connecting';
+    indicator.setAttribute('role', 'status');
+    indicator.setAttribute('aria-live', 'polite');
+    indicator.innerHTML = '<span class="sync-dot" aria-hidden="true"></span><span class="sync-text">Connecting...</span>';
+
+    const themeBtn = document.getElementById('theme-toggle-btn');
+    if (themeBtn && themeBtn.parentNode === topNavRight) {
+      topNavRight.insertBefore(indicator, themeBtn);
+    } else {
+      topNavRight.appendChild(indicator);
+    }
+
+    return indicator;
+  }
+
+  function ensureSettingsSyncIndicator() {
+    if (typeof document === 'undefined') return null;
+    let settingsSync = document.getElementById('settings-sync-status-indicator');
+    if (settingsSync) return settingsSync;
+
+    const storageCardBody = document.querySelector('.settings-card-body .settings-storage-stats-row');
+    if (!storageCardBody || !storageCardBody.parentElement) return null;
+
+    const row = document.createElement('div');
+    row.id = 'settings-sync-status-row';
+    row.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; padding: 10px 14px; background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: var(--radius-md);';
+    row.innerHTML = `
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; color: var(--color-purple, #a855f7);">
+          <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+          <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+          <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+        </svg>
+        <span style="font-size: 0.82rem; font-weight: 600; color: var(--text-primary);">Database Synchronization</span>
+      </div>
+      <div id="settings-sync-status-indicator" class="qavora-sync-indicator" role="status">
+        <span class="sync-dot" aria-hidden="true"></span>
+        <span class="sync-text">Working locally</span>
+      </div>
+    `;
+
+    storageCardBody.parentElement.insertBefore(row, storageCardBody);
+    return document.getElementById('settings-sync-status-indicator');
+  }
+
+  function getSyncStatusInfo() {
+    if (State.projectsLoading) {
+      return {
+        state: 'connecting',
+        text: 'Connecting...',
+        title: 'Connecting to MongoDB Atlas backend...'
+      };
+    }
+    if (State.projectsHydrated) {
+      return {
+        state: 'synced',
+        text: 'Synced with Atlas',
+        title: 'Projects synchronized with MongoDB Atlas'
+      };
+    }
+    return {
+      state: 'local',
+      text: 'Working locally',
+      title: State.projectsError
+        ? `Operating with local storage: ${State.projectsError}`
+        : 'Operating with local storage fallback'
+    };
+  }
+
+  function updateSyncStatusIndicator() {
+    if (typeof document === 'undefined') return;
+
+    const info = getSyncStatusInfo();
+
+    // 1. Ensure CSS styles are present
+    ensureSyncIndicatorStyles();
+
+    // 2. Update Header Indicator
+    const headerIndicator = ensureHeaderSyncIndicator();
+    if (headerIndicator) {
+      headerIndicator.className = `qavora-sync-indicator sync-status-${info.state}`;
+      headerIndicator.title = info.title;
+      const textSpan = headerIndicator.querySelector('.sync-text');
+      if (textSpan) {
+        textSpan.textContent = info.text;
+      }
+    }
+
+    // 3. Update Sidebar Footer Storage Badge
+    const sidebarText = document.querySelector('.sidebar-footer .storage-text');
+    const sidebarDot = document.querySelector('.sidebar-footer .storage-dot');
+    const sidebarBadge = document.querySelector('.sidebar-footer .storage-badge');
+    if (sidebarText) {
+      sidebarText.textContent = info.text;
+    }
+    if (sidebarBadge) {
+      sidebarBadge.title = info.title;
+    }
+    if (sidebarDot) {
+      if (info.state === 'connecting') {
+        sidebarDot.style.backgroundColor = '#f59e0b';
+        sidebarDot.style.boxShadow = '0 0 6px #f59e0b';
+        sidebarDot.style.animation = 'qavora-sync-pulse 1.4s ease-in-out infinite';
+      } else if (info.state === 'synced') {
+        sidebarDot.style.backgroundColor = 'var(--color-green, #10b981)';
+        sidebarDot.style.boxShadow = '0 0 6px var(--color-green, #10b981)';
+        sidebarDot.style.animation = 'none';
+      } else {
+        sidebarDot.style.backgroundColor = 'var(--text-muted, #94a3b8)';
+        sidebarDot.style.boxShadow = 'none';
+        sidebarDot.style.animation = 'none';
+      }
+    }
+
+    // 4. Update Settings View Indicator (if present in DOM)
+    const settingsIndicator = document.getElementById('settings-sync-status-indicator');
+    if (settingsIndicator) {
+      settingsIndicator.className = `qavora-sync-indicator sync-status-${info.state}`;
+      settingsIndicator.title = info.title;
+      const settingsText = settingsIndicator.querySelector('.sync-text');
+      if (settingsText) {
+        settingsText.textContent = info.text;
+      }
+    }
+  }
+
+  /**
+   * Safe Background MongoDB Hydration (Phase 2 - Step 3)
+   * 1. Captures local projects synchronously before hydration.
+   * 2. If local projects exist, synchronizes them to MongoDB Atlas using $setOnInsert.
+   * 3. Retrieves canonical project list via ProjectsAPI.getAll().
+   * 4. Updates State.projects and marks State.projectsHydrated = true on valid server response.
+   * 5. Refreshes the active view without page reload or event listener duplication.
+   * 6. Preserves local storage and fallback cache if server or sync fails.
+   */
+  async function hydrateProjectsFromBackend() {
+    // Phase 4: Do not send authenticated requests if session is unauthenticated
+    if (typeof authController !== 'undefined' && !authController.isAuthenticated()) {
+      updateSyncStatusIndicator();
+      return { ok: false, reason: 'unauthenticated' };
+    }
+
+    // Guard against concurrent or redundant hydration calls
+    if (State.projectsLoading || State.projectsHydrated) {
+      updateSyncStatusIndicator();
+      return { ok: State.projectsHydrated, data: State.projects };
+    }
+
+    State.projectsLoading = true;
+    State.projectsError = null;
+    updateSyncStatusIndicator();
+
+    try {
+      // 1. Capture existing locally stored projects synchronously before hydration
+      const localProjects = Storage.getProjects();
+
+      // 2. If local projects exist, sync them to MongoDB Atlas first
+      if (Array.isArray(localProjects) && localProjects.length > 0) {
+        try {
+          const syncRes = await ProjectsAPI.syncLocal(localProjects);
+          if (!syncRes.ok) {
+            console.warn('Qavora: syncLocal returned non-ok status during background hydration', syncRes.status, syncRes.error);
+          }
+        } catch (syncErr) {
+          console.warn('Qavora: syncLocal threw error during background hydration', syncErr);
+        }
+      }
+
+      // 3. Retrieve canonical MongoDB project list
+      const fetchRes = await ProjectsAPI.getAll();
+
+      // 4. Validate server response
+      if (fetchRes && fetchRes.ok && Array.isArray(fetchRes.data)) {
+        // Hydrate in-memory cache
+        ProjectsAPI.hydrateCache(fetchRes.data);
+
+        // Keep local storage backup cache in sync with canonical MongoDB records
+        try {
+          safeStorageWrite(STORAGE_KEYS.PROJECTS, JSON.stringify(fetchRes.data), 'syncing local backup cache with MongoDB');
+        } catch (writeErr) {
+          console.warn('Qavora: Could not write MongoDB projects to local backup cache', writeErr);
+        }
+
+        // 5. Refresh currently active view
+        refreshActiveView();
+
+        return { ok: true, data: fetchRes.data };
+      } else {
+        // Server returned an error (e.g. 503 DB unavailable) or invalid data
+        const errMsg = (fetchRes && (fetchRes.error || fetchRes.message)) || 'Failed to fetch projects from MongoDB';
+        State.projectsError = errMsg;
+        // Do NOT mark cache as hydrated — preserve local fallback
+        console.warn('Qavora: Hydration could not complete. Retaining local fallback.', errMsg);
+        return { ok: false, error: errMsg };
+      }
+    } catch (err) {
+      const errMsg = err?.message || 'Unexpected network or runtime failure during hydration';
+      State.projectsError = errMsg;
+      // Do NOT mark cache as hydrated — preserve local fallback
+      console.error('Qavora: Error during hydrateProjectsFromBackend', err);
+      return { ok: false, error: errMsg };
+    } finally {
+      State.projectsLoading = false;
+      updateSyncStatusIndicator();
+    }
+  }
+
   function openMobileSidebar() {
     if (DOM.sidebar) DOM.sidebar.classList.add('open');
     if (DOM.sidebarOverlay) DOM.sidebarOverlay.classList.add('active');
@@ -9580,6 +10430,10 @@ import {
     if (DOM.settingsCountCases) {
       DOM.settingsCountCases.textContent = String(totalCases);
     }
+
+    // Phase 2 - Step 4: Ensure Settings view displays current MongoDB sync status
+    ensureSettingsSyncIndicator();
+    updateSyncStatusIndicator();
   }
 
   // ==========================================================================
@@ -9605,7 +10459,17 @@ import {
     if (btn) btn.disabled = true;
 
     try {
-      const response = await fetch('/api/tests');
+      const headers = (typeof authController !== 'undefined')
+        ? authController.getAuthHeaders({ 'Accept': 'application/json' })
+        : { 'Accept': 'application/json' };
+
+      const response = await fetch('/api/tests', { headers });
+      if (response.status === 401) {
+        if (typeof authController !== 'undefined') {
+          authController.handleUnauthorized();
+        }
+        throw new Error('Authentication required (401). Please log in to view MongoDB Atlas tests.');
+      }
       if (!response.ok) {
         throw new Error(`Server returned HTTP ${response.status} (${response.statusText || 'Error'})`);
       }
@@ -10921,6 +11785,28 @@ import {
   }
 
   // ==========================================================================
+  // Global Inter-Module Bridges (Checklist Promotion & Project Lookup)
+  // ==========================================================================
+  if (typeof globalThis !== 'undefined') {
+    globalThis.__qavoraGetActiveProjects = () => {
+      return (Array.isArray(State.projects) && State.projects.length > 0)
+        ? State.projects
+        : Storage.getProjects();
+    };
+
+    globalThis.__qavoraOnProjectPromoted = (project) => {
+      if (project && project.id) {
+        if (Array.isArray(State.projects) && !State.projects.some(p => p.id === project.id)) {
+          State.projects.unshift(project);
+        }
+        if (typeof ProjectsPersistence !== 'undefined') {
+          ProjectsPersistence.syncProject(project, { isNew: true });
+        }
+      }
+    };
+  }
+
+  // ==========================================================================
   // Initialization
   // ==========================================================================
   function init() {
@@ -10940,6 +11826,12 @@ import {
       navigateTo: (targetView, optArg) => switchView(targetView, optArg),
       notify: showToast,
       onChecklistPromoted: ({ project, checklist, summary }) => {
+        if (Array.isArray(State.projects) && !State.projects.some(p => p.id === project.id)) {
+          State.projects.unshift(project);
+        }
+        if (typeof ProjectsPersistence !== 'undefined') {
+          ProjectsPersistence.syncProject(project, { isNew: true });
+        }
         Storage.addActivity(
           'Promoted Checklist to Project',
           `${checklist.title} → ${project.name} (${summary.casesCount} cases)`
@@ -11007,11 +11899,113 @@ import {
       switchView(restoredQaView);
     }
 
+    // Initialize MongoDB Sync Status Indicator (Phase 2 - Step 4)
+    updateSyncStatusIndicator();
+
+    // Safe User Session Data Cleanup (Phase 4 — Step 6)
+    function clearUserSessionData() {
+      // 1. Reset in-memory cached projects and hydration status
+      State.projects = null;
+      State.projectsHydrated = false;
+      State.projectsLoading = false;
+      State.projectsError = null;
+
+      // 2. Reset active project selections across all workspaces
+      State.activeProjectId = null;
+      State.activePlanProjectId = null;
+      State.activePlanPhaseId = null;
+      State.activePlanSuiteId = null;
+      State.activeExecProjectId = null;
+      State.activeDefectsProjectId = null;
+      State.selectedCaseForDetails = null;
+
+      // 3. Clear persistence tracking and pending write queue
+      if (typeof ProjectsPersistence !== 'undefined') {
+        ProjectsPersistence.persistedProjectIds.clear();
+        if (ProjectsPersistence.inFlightSync) ProjectsPersistence.inFlightSync.clear();
+        if (ProjectsPersistence.pendingSync) ProjectsPersistence.pendingSync.clear();
+      }
+
+      // 4. Safely clear user-specific project & activity data from local storage
+      try {
+        safeStorageRemove(STORAGE_KEYS.PROJECTS);
+        safeStorageRemove(STORAGE_KEYS.ACTIVITIES);
+      } catch (e) {
+        console.warn('Qavora: Error clearing user data on logout', e);
+      }
+
+      // 5. Unrelated preferences (theme, density, default sorts) are preserved!
+      updateSyncStatusIndicator();
+    }
+
+    // Initialize Auth UI (Phase 4 — Step 5)
+    let authUIController = null;
+    if (typeof initAuthUI === 'function') {
+      authUIController = initAuthUI({
+        onAuthenticated: () => {
+          State.projects = null;
+          State.projectsHydrated = false;
+          hydrateProjectsFromBackend().catch(err => {
+            console.warn('Qavora: Background project hydration encountered an error', err);
+            updateSyncStatusIndicator();
+          });
+        },
+        onLogout: () => {
+          clearUserSessionData();
+        }
+      });
+    }
+
+    // Initialize Auth Controller & Session Restoration (Phase 4 - Step 4 & Step 5)
+    if (typeof authController !== 'undefined') {
+      authController.init().then(() => {
+        if (authController.isAuthenticated()) {
+          hydrateProjectsFromBackend().catch(err => {
+            console.warn('Qavora: Background project hydration encountered an error', err);
+            updateSyncStatusIndicator();
+          });
+        } else {
+          clearUserSessionData();
+        }
+      }).catch(err => {
+        console.warn('Qavora: Auth initialization error', err);
+        updateSyncStatusIndicator();
+      });
+
+      // Subscribe to auth state transitions
+      authController.onAuthStateChanged(snapshot => {
+        if (snapshot.isAuthenticated) {
+          State.projects = null;
+          State.projectsHydrated = false;
+          hydrateProjectsFromBackend().catch(err => {
+            console.warn('Qavora: Hydration error on auth change', err);
+            updateSyncStatusIndicator();
+          });
+        } else {
+          clearUserSessionData();
+        }
+      });
+    } else {
+      hydrateProjectsFromBackend().catch(err => {
+        console.warn('Qavora: Background project hydration encountered an error', err);
+        updateSyncStatusIndicator();
+      });
+    }
+
     if (typeof globalThis !== 'undefined') {
       globalThis.__qavoraApp = {
         State,
         DOM,
         Storage,
+        ProjectsAPI,
+        ProjectsPersistence,
+        Auth: authController,
+        authController,
+        AuthUI: authUIController,
+        hydrateProjectsFromBackend,
+        updateSyncStatusIndicator,
+        getSyncStatusInfo,
+        refreshActiveView,
         applyTheme,
         toggleTheme,
         applyPreferences,

@@ -1502,16 +1502,24 @@ export function findPromotedProjectForChecklist(checklistOrId, projectsArray = n
 
   let projects = projectsArray;
   if (!Array.isArray(projects)) {
-    const readRes = safeStorageRead(PROJECTS_STORAGE_KEY);
-    if (readRes.ok && readRes.value) {
+    if (typeof globalThis !== 'undefined' && typeof globalThis.__qavoraGetActiveProjects === 'function') {
       try {
-        const parsed = JSON.parse(readRes.value);
-        if (Array.isArray(parsed)) projects = parsed;
-      } catch (_e) {
+        const active = globalThis.__qavoraGetActiveProjects();
+        if (Array.isArray(active)) projects = active;
+      } catch (_e) {}
+    }
+    if (!Array.isArray(projects)) {
+      const readRes = safeStorageRead(PROJECTS_STORAGE_KEY);
+      if (readRes.ok && readRes.value) {
+        try {
+          const parsed = JSON.parse(readRes.value);
+          if (Array.isArray(parsed)) projects = parsed;
+        } catch (_e) {
+          projects = [];
+        }
+      } else {
         projects = [];
       }
-    } else {
-      projects = [];
     }
   }
 
@@ -1756,7 +1764,15 @@ export function promoteChecklistToProject(checklistId, options = {}) {
     }
 
     let existingProjects = [];
-    if (rawProjectsSnap.ok && rawProjectsSnap.value) {
+    if (Array.isArray(options.existingProjects)) {
+      existingProjects = options.existingProjects;
+    } else if (typeof globalThis !== 'undefined' && typeof globalThis.__qavoraGetActiveProjects === 'function') {
+      try {
+        const active = globalThis.__qavoraGetActiveProjects();
+        if (Array.isArray(active)) existingProjects = active;
+      } catch (_e) {}
+    }
+    if (existingProjects.length === 0 && rawProjectsSnap.ok && rawProjectsSnap.value) {
       try {
         const parsedProjects = JSON.parse(rawProjectsSnap.value);
         if (!Array.isArray(parsedProjects)) {
@@ -1840,6 +1856,17 @@ export function promoteChecklistToProject(checklistId, options = {}) {
         isSecurity: writeChkRes.isSecurity,
         error: writeChkRes.error || 'Failed to link promoted project to checklist; changes were rolled back.'
       };
+    }
+
+    // Notify persistence hook to ensure promoted project is saved to MongoDB Atlas
+    if (typeof options.onProjectSaved === 'function') {
+      try {
+        options.onProjectSaved(newProject);
+      } catch (_hookErr) {}
+    } else if (typeof globalThis !== 'undefined' && typeof globalThis.__qavoraOnProjectPromoted === 'function') {
+      try {
+        globalThis.__qavoraOnProjectPromoted(newProject);
+      } catch (_hookErr) {}
     }
 
     const preview = getChecklistPromotionPreview(updatedChecklist);
