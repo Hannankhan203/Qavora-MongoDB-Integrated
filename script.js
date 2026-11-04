@@ -52,7 +52,8 @@ import { initAuthUI } from './authUI.js';
     ACTIVITIES: 'qavora_activities_v1',
     THEME: 'qavora_theme_preference',
     PREFERENCES: 'qavora_preferences_v1',
-    NOTIFICATIONS: 'qavora_notifications_v1'
+    NOTIFICATIONS: 'qavora_notifications_v1',
+    ACTIVE_ROUTE: 'qavora_active_route_v1'
   };
 
   const LEGACY_STORAGE_KEYS = {
@@ -681,6 +682,9 @@ import { initAuthUI } from './authUI.js';
 
         // 3. Store an isolated clone in State.projects so subsequent caller mutations cannot alias internal state
         State.projects = cloneProjectData(normalizedProjects);
+        if (typeof updateSidebarProjectCounters === 'function') {
+          updateSidebarProjectCounters(normalizedProjects);
+        }
 
         // 4. Write-through to MongoDB Atlas unless explicitly skipped via meta.skipBackendSync
         let syncPromise = Promise.resolve({ ok: true, skipped: true });
@@ -1135,6 +1139,9 @@ import { initAuthUI } from './authUI.js';
         State.projects = cloneProjectData(normalized);
         State.projectsHydrated = true;
         State.projectsError = null;
+        if (typeof updateSidebarProjectCounters === 'function') {
+          updateSidebarProjectCounters(State.projects);
+        }
         if (typeof updateSyncStatusIndicator === 'function') {
           updateSyncStatusIndicator();
         }
@@ -2340,6 +2347,36 @@ import { initAuthUI } from './authUI.js';
   }
 
   // ==========================================================================
+  // Canonical Sidebar Counter Synchronization (QAVORA-PERSISTENCE-002)
+  // ==========================================================================
+  function updateSidebarProjectCounters(customProjects = null) {
+    const projects = Array.isArray(customProjects) ? customProjects : Storage.getProjects();
+    const totalProjects = Array.isArray(projects) ? projects.length : 0;
+    let totalCases = 0;
+    let totalOpenDefects = 0;
+
+    if (Array.isArray(projects)) {
+      projects.forEach(project => {
+        totalCases += Number(project.testCaseCount) || 0;
+        totalOpenDefects += Number(project.openDefects) || 0;
+      });
+    }
+
+    if (DOM.navProjectCount) {
+      DOM.navProjectCount.textContent = totalProjects.toString();
+    }
+    if (DOM.navCasesCount) {
+      DOM.navCasesCount.textContent = totalCases.toString();
+    }
+    if (DOM.navDefectsCount) {
+      DOM.navDefectsCount.textContent = totalOpenDefects.toString();
+    }
+    if (DOM.recentProjectsCounter) {
+      DOM.recentProjectsCounter.textContent = `${totalProjects} total`;
+    }
+  }
+
+  // ==========================================================================
   // Dashboard & Metrics Rendering
   // ==========================================================================
   function renderDashboard() {
@@ -2417,10 +2454,7 @@ import { initAuthUI } from './authUI.js';
     }
 
     // Sidebar Counters
-    if (DOM.navProjectCount) DOM.navProjectCount.textContent = totalProjects.toString();
-    if (DOM.navCasesCount) DOM.navCasesCount.textContent = totalCases.toString();
-    if (DOM.navDefectsCount) DOM.navDefectsCount.textContent = totalOpenDefects.toString();
-    if (DOM.recentProjectsCounter) DOM.recentProjectsCounter.textContent = `${totalProjects} total`;
+    updateSidebarProjectCounters(projects);
 
     renderRecentProjects(projects);
     renderRecentActivities(activities);
@@ -2578,6 +2612,9 @@ import { initAuthUI } from './authUI.js';
     if (DOM.myStatActive) DOM.myStatActive.textContent = activeCount.toString();
     if (DOM.myStatCompleted) DOM.myStatCompleted.textContent = completedCount.toString();
     if (DOM.myStatArchived) DOM.myStatArchived.textContent = archivedCount.toString();
+
+    // Synchronize sidebar project counter with canonical projects list
+    updateSidebarProjectCounters(projects);
 
     const hasActiveFilters = Boolean(
       (State.searchQuery && State.searchQuery.trim().length > 0) ||
@@ -2850,13 +2887,18 @@ import { initAuthUI } from './authUI.js';
     const project = projects.find(p => p.id === projectId);
 
     if (!project) {
+      if (State.projectsLoading || !State.projectsHydrated) {
+        State.currentDetailProjectId = projectId;
+        switchView('project-details', projectId);
+        return;
+      }
       showToast('Project could not be found.', 'error');
       switchView('projects');
       return;
     }
 
     State.currentDetailProjectId = projectId;
-    switchView('project-details');
+    switchView('project-details', projectId);
     renderProjectDetailsData(project);
   }
 
@@ -10259,10 +10301,185 @@ import { initAuthUI } from './authUI.js';
   }
 
   // ==========================================================================
-  // Navigation & View Routing
+  // Navigation & View Routing (QAVORA-PERSISTENCE-002)
   // ==========================================================================
-  function switchView(viewName, optArg = null) {
+  let _isHandlingPopState = false;
+
+  function formatRouteHash(viewName, optArg = null) {
+    if (!viewName || !VIEW_TITLES[viewName]) return '#dashboard';
+    let hash = `#${viewName}`;
+    if (optArg) {
+      if (viewName === 'project-details') {
+        hash += `?id=${encodeURIComponent(optArg)}`;
+      } else if (viewName === 'plans') {
+        hash += `?projectId=${encodeURIComponent(optArg)}`;
+        if (State.activeSuiteId) {
+          hash += `&suiteId=${encodeURIComponent(State.activeSuiteId)}`;
+        }
+      } else if (viewName === 'execution' || viewName === 'defects' || viewName === 'reports') {
+        hash += `?projectId=${encodeURIComponent(optArg)}`;
+      } else if (viewName === 'qa-runner') {
+        hash += `?checklistId=${encodeURIComponent(optArg)}`;
+      } else if (viewName === 'data') {
+        hash += `?tab=${encodeURIComponent(optArg)}`;
+      } else {
+        hash += `?arg=${encodeURIComponent(optArg)}`;
+      }
+    }
+    return hash;
+  }
+
+  function updateUrlForRoute(viewName, optArg = null) {
+    if (typeof window === 'undefined' || typeof history === 'undefined') return;
+    if (_isHandlingPopState) return;
+
+    const targetHash = formatRouteHash(viewName, optArg);
+    if (window.location && window.location.hash !== targetHash) {
+      try {
+        if (typeof history.replaceState === 'function') {
+          history.replaceState(null, '', targetHash);
+        } else {
+          window.location.hash = targetHash;
+        }
+      } catch (_) {
+        try {
+          window.location.hash = targetHash;
+        } catch (_) {}
+      }
+    }
+  }
+
+  function parseRouteFromUrl() {
+    if (typeof window === 'undefined' || !window.location) return null;
+
+    // 1. Try URL Hash (e.g. #projects, #project-details?id=xyz, #/plans?projectId=xyz)
+    const rawHash = (window.location.hash || '').replace(/^#\/?/, '').trim();
+    if (rawHash) {
+      const qIdx = rawHash.indexOf('?');
+      let pathPart = qIdx !== -1 ? rawHash.slice(0, qIdx) : rawHash;
+      let queryPart = qIdx !== -1 ? rawHash.slice(qIdx + 1) : '';
+
+      pathPart = pathPart.replace(/^\/+|\/+$/g, '');
+      const segments = pathPart.split('/').filter(Boolean);
+      const viewCandidate = segments[0];
+
+      if (viewCandidate && VIEW_TITLES[viewCandidate]) {
+        let optArg = segments[1] || null;
+        let params = {};
+        if (queryPart && typeof URLSearchParams !== 'undefined') {
+          const searchParams = new URLSearchParams(queryPart);
+          optArg = optArg || searchParams.get('projectId') || searchParams.get('id') || searchParams.get('checklistId') || searchParams.get('tab') || searchParams.get('arg') || null;
+          params = Object.fromEntries(searchParams.entries());
+        }
+        return {
+          view: viewCandidate,
+          optArg,
+          params
+        };
+      }
+    }
+
+    // 2. Try URL Search Params (e.g. ?view=projects&id=xyz)
+    if (window.location.search && typeof URLSearchParams !== 'undefined') {
+      const searchParams = new URLSearchParams(window.location.search);
+      const viewCandidate = searchParams.get('view');
+      if (viewCandidate && VIEW_TITLES[viewCandidate]) {
+        const optArg = searchParams.get('projectId') || searchParams.get('id') || searchParams.get('checklistId') || searchParams.get('tab') || searchParams.get('arg') || null;
+        return {
+          view: viewCandidate,
+          optArg,
+          params: Object.fromEntries(searchParams.entries())
+        };
+      }
+    }
+
+    // 3. Try URL Pathname (e.g. /projects, /plans/proj_123, /project-details/proj_123)
+    const rawPathname = window.location.pathname || '';
+    if (rawPathname && rawPathname !== '/' && rawPathname !== '/index.html') {
+      const segments = rawPathname.split('/').filter(s => s && s !== 'index.html');
+      for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        if (VIEW_TITLES[seg]) {
+          const optArg = segments[i + 1] || null;
+          return {
+            view: seg,
+            optArg,
+            params: {}
+          };
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function saveCurrentRoute(viewName, optArg = null) {
+    if (!viewName || !VIEW_TITLES[viewName]) return;
+    try {
+      const payload = {
+        view: viewName,
+        optArg: optArg || null,
+        projectId: (viewName === 'project-details' || viewName === 'plans' || viewName === 'execution' || viewName === 'defects' || viewName === 'reports') ? optArg : null,
+        updatedAt: new Date().toISOString()
+      };
+      safeStorageWrite(STORAGE_KEYS.ACTIVE_ROUTE, JSON.stringify(payload), 'saving current route');
+    } catch (_) {}
+  }
+
+  function getStoredRoute() {
+    try {
+      const { raw } = safeStorageRead(STORAGE_KEYS.ACTIVE_ROUTE);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.view === 'string' && VIEW_TITLES[parsed.view]) {
+          return {
+            view: parsed.view,
+            optArg: parsed.optArg || parsed.projectId || null,
+            params: parsed.params || {}
+          };
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function resolveInitialRoute() {
+    // 1. URL has highest priority
+    const urlRoute = parseRouteFromUrl();
+    if (urlRoute && VIEW_TITLES[urlRoute.view]) {
+      return urlRoute;
+    }
+
+    // 2. Persistent route from previous session / refresh
+    const storedRoute = getStoredRoute();
+    if (storedRoute && VIEW_TITLES[storedRoute.view]) {
+      return storedRoute;
+    }
+
+    // 3. QA Runner state (if runner checklist is active or lastQaView was recorded)
+    if (qaRunnerController && typeof qaRunnerController.getRestoredInitialView === 'function') {
+      const runnerView = qaRunnerController.getRestoredInitialView();
+      if (runnerView && VIEW_TITLES[runnerView]) {
+        return { view: runnerView, optArg: null, params: {} };
+      }
+    }
+
+    // 4. Default view
+    return { view: 'checklist-generator', optArg: null, params: {} };
+  }
+
+  function switchView(viewName, optArg = null, options = {}) {
+    if (!viewName || !VIEW_TITLES[viewName]) {
+      viewName = 'checklist-generator';
+    }
+
     State.currentView = viewName;
+
+    // Save and sync URL unless explicitly skipped
+    if (!options || !options.skipRouteSync) {
+      saveCurrentRoute(viewName, optArg);
+      updateUrlForRoute(viewName, optArg);
+    }
 
     DOM.navLinks.forEach(link => {
       const target = link.getAttribute('data-view');
@@ -10291,6 +10508,20 @@ import { initAuthUI } from './authUI.js';
       renderDashboard();
     } else if (viewName === 'projects') {
       renderMyProjects();
+    } else if (viewName === 'project-details') {
+      const targetId = optArg || State.currentDetailProjectId;
+      if (targetId) {
+        State.currentDetailProjectId = targetId;
+        const project = Storage.getProjects().find(p => p.id === targetId);
+        if (project) {
+          renderProjectDetailsData(project);
+        } else if (State.projectsHydrated && !State.projectsLoading) {
+          showToast('Project could not be found.', 'error');
+          switchView('projects');
+        }
+      } else if (State.projectsHydrated && !State.projectsLoading) {
+        switchView('projects');
+      }
     } else if (viewName === 'plans') {
       if (optArg) {
         if (State.activePlanProjectId !== optArg) {
@@ -10354,10 +10585,10 @@ import { initAuthUI } from './authUI.js';
           const p = Storage.getProjects().find(x => x.id === State.currentDetailProjectId);
           if (p) {
             renderProjectDetailsData(p);
-          } else {
+          } else if (State.projectsHydrated && !State.projectsLoading) {
             switchView('projects');
           }
-        } else {
+        } else if (State.projectsHydrated && !State.projectsLoading) {
           switchView('projects');
         }
         break;
@@ -10398,6 +10629,9 @@ import { initAuthUI } from './authUI.js';
         renderDashboard();
         break;
     }
+
+    // Ensure sidebar project and KPI counters remain synchronized
+    updateSidebarProjectCounters();
   }
 
   // ==========================================================================
@@ -12331,11 +12565,29 @@ import { initAuthUI } from './authUI.js';
         switchView('my-checklists');
       }
     });
+    // Render initial sidebar counters and dashboard metrics from available storage
+    updateSidebarProjectCounters();
     renderDashboard();
 
-    const restoredQaView = qaRunnerController.getRestoredInitialView();
-    if (restoredQaView) {
-      switchView(restoredQaView);
+    // Restore page route after browser refresh (QAVORA-PERSISTENCE-002)
+    const initialRoute = resolveInitialRoute();
+    if (initialRoute && initialRoute.view) {
+      switchView(initialRoute.view, initialRoute.optArg);
+    }
+
+    // Listen to hash changes (browser Back/Forward navigation)
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      window.addEventListener('hashchange', () => {
+        const route = parseRouteFromUrl();
+        if (route && route.view && (route.view !== State.currentView || (route.optArg && route.optArg !== State.currentDetailProjectId && route.optArg !== State.activePlanProjectId))) {
+          _isHandlingPopState = true;
+          try {
+            switchView(route.view, route.optArg, { skipRouteSync: true });
+          } finally {
+            _isHandlingPopState = false;
+          }
+        }
+      });
     }
 
     // Initialize MongoDB Sync Status Indicator (Phase 2 - Step 4)
@@ -12376,6 +12628,7 @@ import { initAuthUI } from './authUI.js';
       }
 
       // 5. Unrelated preferences (theme, density, default sorts) are preserved!
+      updateSidebarProjectCounters([]);
       updateSyncStatusIndicator();
     }
 
@@ -12453,6 +12706,8 @@ import { initAuthUI } from './authUI.js';
         updateSyncStatusIndicator,
         getSyncStatusInfo,
         refreshActiveView,
+        renderDashboard,
+        renderMyProjects,
         applyTheme,
         toggleTheme,
         applyPreferences,
@@ -12466,7 +12721,14 @@ import { initAuthUI } from './authUI.js';
         handleNotificationNavigation,
         updateNotificationUI,
         switchView,
+        formatRouteHash,
+        parseRouteFromUrl,
+        saveCurrentRoute,
+        getStoredRoute,
+        resolveInitialRoute,
+        updateSidebarProjectCounters,
         openProjectModal,
+        openProjectDetails,
         handleCreateOrEditProjectSubmit,
         handleSaveTestPlanSubmit,
         handleSavePhaseSubmit,

@@ -133,6 +133,9 @@ function createInMemoryDb() {
         },
         find(filter: any = {}) {
           return {
+            sort() { return this; },
+            limit() { return this; },
+            skip() { return this; },
             async toArray() {
               return store.filter((doc) => matchesFilter(doc, filter)).map((d) => ({ ...d }));
             }
@@ -142,11 +145,24 @@ function createInMemoryDb() {
           const found = store.find((doc) => matchesFilter(doc, filter));
           return found ? { ...found } : null;
         },
+        async countDocuments(filter: any = {}) {
+          return store.filter((doc) => matchesFilter(doc, filter)).length;
+        },
         async insertOne(doc: any) {
           const insertedId = doc._id || new ObjectId();
           const record = { ...doc, _id: insertedId };
           store.push(record);
           return { insertedId, acknowledged: true };
+        },
+        async insertMany(docs: any[]) {
+          const insertedIds: Record<number, any> = {};
+          docs.forEach((doc, idx) => {
+            const insertedId = doc._id || new ObjectId();
+            const record = { ...doc, _id: insertedId };
+            store.push(record);
+            insertedIds[idx] = insertedId;
+          });
+          return { insertedIds, insertedCount: docs.length, acknowledged: true };
         },
         async updateOne(filter: any, update: any, options: any = {}) {
           const idx = store.findIndex((doc) => matchesFilter(doc, filter));
@@ -165,6 +181,18 @@ function createInMemoryDb() {
           }
           return { matchedCount: 1, modifiedCount: 1, upsertedCount: 0 };
         },
+        async updateMany(filter: any, update: any) {
+          let count = 0;
+          for (let i = 0; i < store.length; i++) {
+            if (matchesFilter(store[i], filter)) {
+              if (update?.$set) {
+                store[i] = { ...store[i], ...update.$set };
+              }
+              count++;
+            }
+          }
+          return { matchedCount: count, modifiedCount: count, acknowledged: true };
+        },
         async findOneAndUpdate(filter: any, update: any, options: any = {}) {
           const idx = store.findIndex((doc) => matchesFilter(doc, filter));
           if (idx === -1) return null;
@@ -179,6 +207,16 @@ function createInMemoryDb() {
           if (idx === -1) return { deletedCount: 0 };
           store.splice(idx, 1);
           return { deletedCount: 1 };
+        },
+        async deleteMany(filter: any = {}) {
+          let count = 0;
+          for (let i = store.length - 1; i >= 0; i--) {
+            if (matchesFilter(store[i], filter)) {
+              store.splice(i, 1);
+              count++;
+            }
+          }
+          return { deletedCount: count, acknowledged: true };
         },
         async bulkWrite(operations: any[]) {
           let upsertedCount = 0;
