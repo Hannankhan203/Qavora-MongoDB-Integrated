@@ -215,6 +215,138 @@ let connectionPromise: Promise<any> | null = null;
 const uri = process.env.MONGODB_URI;
 const dbName = process.env.MONGODB_DB || 'qavora';
 
+function sanitizeDiagnosticText(input: unknown): string {
+  if (input === null || input === undefined) {
+    return '';
+  }
+  let text = typeof input === 'string' ? input : String(input);
+
+  // Redact explicit sensitive environment values if non-trivial and accidentally echoed
+  const sensitiveValues = [process.env.MONGODB_URI, process.env.JWT_SECRET];
+  for (const val of sensitiveValues) {
+    if (typeof val === 'string' && val.trim().length >= 4) {
+      text = text.split(val).join('[REDACTED]');
+      const trimmed = val.trim();
+      if (trimmed !== val) {
+        text = text.split(trimmed).join('[REDACTED]');
+      }
+    }
+  }
+
+  // Redact full MongoDB connection URIs and credentials
+  text = text.replace(
+    /mongodb(?:\+srv)?:\/\/[^\s"'<>]+/gi,
+    'mongodb+srv://[REDACTED]'
+  );
+
+  // Redact generic URI userinfo credentials (scheme://user:pass@host)
+  text = text.replace(
+    /([a-z][a-z0-9+.-]*:\/\/)([^/@\s]+:[^/@\s]+)@/gi,
+    '$1[credentials-hidden]@'
+  );
+
+  // Redact sensitive key=value or JSON parameters if present in driver/error strings
+  text = text.replace(
+    /((?:password|passwd|pwd|secret|token|jwt_secret|mongodb_uri|authsourcepassword)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,&;]+)/gi,
+    '$1[REDACTED]'
+  );
+
+  return text;
+}
+
+function extractSafeCauseChain(cause: any, depth = 0): any {
+  if (!cause || depth > 4) return undefined;
+  if (typeof cause !== 'object') {
+    return sanitizeDiagnosticText(cause);
+  }
+  const summary: Record<string, any> = {
+    name: sanitizeDiagnosticText(cause.name || 'Error'),
+    message: sanitizeDiagnosticText(cause.message || String(cause))
+  };
+  if (cause.code !== undefined) summary.code = sanitizeDiagnosticText(cause.code);
+  if (cause.codeName !== undefined) summary.codeName = sanitizeDiagnosticText(cause.codeName);
+  if (cause.syscall !== undefined) summary.syscall = sanitizeDiagnosticText(cause.syscall);
+  if (cause.hostname !== undefined) summary.hostname = sanitizeDiagnosticText(cause.hostname);
+  if (cause.address !== undefined) summary.address = sanitizeDiagnosticText(cause.address);
+  if (typeof cause.port === 'number') summary.port = cause.port;
+  if (cause.cause) {
+    summary.cause = extractSafeCauseChain(cause.cause, depth + 1);
+  }
+  return summary;
+}
+
+function buildMongoConnectionDiagnostics(error: any, client?: MongoClient | null): Record<string, any> {
+  const diagnostics: Record<string, any> = {
+    errorName: sanitizeDiagnosticText(error?.name || 'Error'),
+    message: sanitizeDiagnosticText(error?.message || 'Unknown error')
+  };
+
+  if (error?.code !== undefined) {
+    diagnostics.code = sanitizeDiagnosticText(error.code);
+  }
+  if (error?.codeName !== undefined) {
+    diagnostics.codeName = sanitizeDiagnosticText(error.codeName);
+  }
+  if (error?.errorLabels && Array.isArray(error.errorLabels) && error.errorLabels.length > 0) {
+    diagnostics.errorLabels = error.errorLabels.map((l: unknown) => sanitizeDiagnosticText(l));
+  }
+
+  const topologyDesc =
+    error?.reason && typeof error.reason === 'object'
+      ? error.reason
+      : (client as any)?.topology?.description;
+
+  if (topologyDesc && typeof topologyDesc === 'object') {
+    const topoSummary: Record<string, any> = {};
+    if (topologyDesc.type !== undefined) topoSummary.type = sanitizeDiagnosticText(topologyDesc.type);
+    if (topologyDesc.setName) topoSummary.setName = sanitizeDiagnosticText(topologyDesc.setName);
+    if (typeof topologyDesc.compatible === 'boolean') topoSummary.compatible = topologyDesc.compatible;
+    if (typeof topologyDesc.stale === 'boolean') topoSummary.stale = topologyDesc.stale;
+    if (typeof topologyDesc.heartbeatFrequencyMS === 'number') {
+      topoSummary.heartbeatFrequencyMS = topologyDesc.heartbeatFrequencyMS;
+    }
+
+    const serversMap = topologyDesc.servers;
+    if (serversMap && typeof serversMap.entries === 'function') {
+      topoSummary.totalKnownServers = typeof serversMap.size === 'number' ? serversMap.size : undefined;
+      const failedServers: Array<Record<string, any>> = [];
+
+      for (const [address, serverDesc] of serversMap.entries()) {
+        const srvErr = serverDesc?.error;
+        const srvType = serverDesc?.type ? sanitizeDiagnosticText(serverDesc.type) : 'Unknown';
+        if (srvErr || srvType === 'Unknown') {
+          const entry: Record<string, any> = {
+            address: sanitizeDiagnosticText(serverDesc?.address || address),
+            type: srvType
+          };
+          if (srvErr) {
+            entry.errorName = sanitizeDiagnosticText(srvErr.name || 'Error');
+            entry.errorMessage = sanitizeDiagnosticText(srvErr.message || String(srvErr));
+            if (srvErr.code !== undefined) entry.code = sanitizeDiagnosticText(srvErr.code);
+            if (srvErr.codeName !== undefined) entry.codeName = sanitizeDiagnosticText(srvErr.codeName);
+            if (srvErr.cause) entry.cause = extractSafeCauseChain(srvErr.cause, 1);
+          }
+          failedServers.push(entry);
+        }
+      }
+
+      if (failedServers.length > 0) {
+        diagnostics.failedServers = failedServers;
+      }
+    }
+
+    if (Object.keys(topoSummary).length > 0) {
+      diagnostics.topology = topoSummary;
+    }
+  }
+
+  if (error?.cause) {
+    diagnostics.cause = extractSafeCauseChain(error.cause, 0);
+  }
+
+  return diagnostics;
+}
+
 async function connectToDatabase(): Promise<any> {
   const currentUri = process.env.MONGODB_URI;
   const currentDbName = process.env.MONGODB_DB || 'qavora';
@@ -237,6 +369,7 @@ async function connectToDatabase(): Promise<any> {
   }
 
   const inFlightPromise = Promise.resolve().then(async () => {
+    let attemptedClient: MongoClient | null = null;
     try {
       if (!currentUri) {
         if (currentIsProd && !currentIsVercel) {
@@ -258,6 +391,7 @@ async function connectToDatabase(): Promise<any> {
         serverSelectionTimeoutMS: 10000,
         maxPoolSize: 20
       });
+      attemptedClient = client;
 
       await client.connect();
       mongoClientInstance = client;
@@ -268,7 +402,7 @@ async function connectToDatabase(): Promise<any> {
       try {
         await db.collection("projects").createIndex({ id: 1 }, { unique: true });
       } catch (idxErr: any) {
-        console.warn(`[Qavora Server] Warning creating unique index on projects.id: ${idxErr?.message}`);
+        console.warn(`[Qavora Server] Warning creating unique index on projects.id: ${sanitizeDiagnosticText(idxErr?.message)}`);
       }
       try {
         await db.collection("projects").createIndex({ userId: 1, id: 1 });
@@ -276,34 +410,39 @@ async function connectToDatabase(): Promise<any> {
         await db.collection("projects").createIndex({ userId: 1 });
         console.log(`[Qavora Server] Ensured tenant-isolation indexes on projects collection (userId, id, status).`);
       } catch (idxErr: any) {
-        console.warn(`[Qavora Server] Warning creating tenant isolation indexes on projects: ${idxErr?.message}`);
+        console.warn(`[Qavora Server] Warning creating tenant isolation indexes on projects: ${sanitizeDiagnosticText(idxErr?.message)}`);
       }
       try {
         await db.collection("tests").createIndex({ userId: 1 });
       } catch (idxErr: any) {
-        console.warn(`[Qavora Server] Warning creating index on tests: ${idxErr?.message}`);
+        console.warn(`[Qavora Server] Warning creating index on tests: ${sanitizeDiagnosticText(idxErr?.message)}`);
       }
       try {
         await db.collection("users").createIndex({ email: 1 }, { unique: true });
         await db.collection("users").createIndex({ userId: 1 }, { unique: true });
         console.log(`[Qavora Server] Ensured unique indexes on users collection (email, userId).`);
       } catch (idxErr: any) {
-        console.warn(`[Qavora Server] Warning creating unique index on users: ${idxErr?.message}`);
+        console.warn(`[Qavora Server] Warning creating unique index on users: ${sanitizeDiagnosticText(idxErr?.message)}`);
       }
 
       return db;
     } catch (error: any) {
-      const safeErrorMessage = (error?.message || "Unknown error").replace(
-        /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
-        "mongodb+srv://[credentials-hidden]@"
-      );
+      const safeErrorMessage = sanitizeDiagnosticText(error?.message || "Unknown error");
 
       if (currentIsProd && !currentIsVercel) {
         db = null;
-        console.error(`[Qavora Server FATAL] Production startup failed: Unable to connect to MongoDB Atlas (${safeErrorMessage}). In-memory fallback is strictly disabled in production.`);
+        const diagnostics = buildMongoConnectionDiagnostics(error, attemptedClient);
+        console.error(
+          `[Qavora Server FATAL] Production startup failed: Unable to connect to MongoDB Atlas (${safeErrorMessage}). In-memory fallback is strictly disabled in production.`,
+          JSON.stringify(diagnostics)
+        );
         process.exit(1);
       } else if (currentIsProd || currentIsVercel) {
         db = null;
+        const diagnostics = buildMongoConnectionDiagnostics(error, attemptedClient);
+        console.error(
+          `[Qavora Server] MongoDB connection failure diagnostics (serverless/production): ${JSON.stringify(diagnostics)}`
+        );
         console.warn(`[Qavora Server] MongoDB connection offline in serverless/production: ${safeErrorMessage}.`);
         return null;
       } else {
@@ -326,7 +465,7 @@ async function connectToDatabase(): Promise<any> {
 // Pre-warm database connection if credentials exist (or enforce standalone production fail-fast)
 if (uri || (isProduction && !isVercel)) {
   connectToDatabase().catch((err) => {
-    console.warn(`[Qavora Server] Initial connection pre-warm warning: ${err?.message}`);
+    console.warn(`[Qavora Server] Initial connection pre-warm warning: ${sanitizeDiagnosticText(err?.message)}`);
   });
 }
 
@@ -352,8 +491,8 @@ app.use(async (req: Request, res: Response, next: NextFunction) => {
   if ((!db || db.__isMock) && activeUri) {
     try {
       await connectToDatabase();
-    } catch (err) {
-      console.warn('[Qavora Server] Failed awaiting database connection in request middleware:', err);
+    } catch (err: any) {
+      console.warn(`[Qavora Server] Failed awaiting database connection in request middleware: ${sanitizeDiagnosticText(err?.message || err)}`);
     }
   }
 
