@@ -65,24 +65,79 @@ async function runStep5Verification() {
   });
   assert(missingUriRegRes.status === 503, 'POST /api/auth/register returns HTTP 503 when MONGODB_URI is missing on Vercel');
 
-  // Unreachable MongoDB URI on Vercel keeps db = null and returns HTTP 503
-  process.env.MONGODB_URI = 'mongodb://127.0.0.1:1/qavora_unreachable?serverSelectionTimeoutMS=250&connectTimeoutMS=250';
+  // Unreachable MongoDB URI on Vercel keeps db = null and returns HTTP 503 on DB routes, while /api/health invokes connectToDatabase() + NetDiag and returns 200 disconnected
+  process.env.MONGODB_URI = 'mongodb://healthUser:healthSecretPass@127.0.0.1:1/qavora_unreachable?serverSelectionTimeoutMS=250&connectTimeoutMS=250';
+  const healthOfflineLogs: string[] = [];
+  const origConsoleLog = console.log;
+  const origConsoleWarn = console.warn;
+  const origConsoleError = console.error;
+  const captureLog = (origFn: (...args: any[]) => void) => (...args: any[]) => {
+    const rendered = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+    healthOfflineLogs.push(rendered);
+    origFn(...args);
+  };
+  console.log = captureLog(origConsoleLog);
+  console.warn = captureLog(origConsoleWarn);
+  console.error = captureLog(origConsoleError);
+
+  let healthUnreachableRes: Response;
+  let healthUnreachableBody: any;
+  let healthUnreachableRaw = '';
+  try {
+    healthUnreachableRes = await fetch(`${baseUrl}/api/health`);
+    healthUnreachableRaw = await healthUnreachableRes.text();
+    healthUnreachableBody = JSON.parse(healthUnreachableRaw);
+  } finally {
+    console.log = origConsoleLog;
+    console.warn = origConsoleWarn;
+    console.error = origConsoleError;
+  }
+
+  const combinedOfflineLogs = healthOfflineLogs.join('\n');
+  assert(healthUnreachableRes.status === 200, 'GET /api/health returns HTTP 200 when MongoDB is unreachable on Vercel');
+  assert(healthUnreachableBody.database === 'disconnected', 'GET /api/health reports database: "disconnected" when MongoDB is unreachable on Vercel');
+  assert(
+    Object.keys(healthUnreachableBody).sort().join(',') === 'database,message,success',
+    'GET /api/health preserves exact public response schema without internal diagnostic fields'
+  );
+  assert(
+    combinedOfflineLogs.includes('[Qavora MongoDB NetDiag]') &&
+      combinedOfflineLogs.includes('Initializing MongoDB Atlas client'),
+    'GET /api/health invokes connectToDatabase() and executes DNS/TCP NetDiag in server-side logs'
+  );
+  assert(
+    !combinedOfflineLogs.includes('healthUser') &&
+      !combinedOfflineLogs.includes('healthSecretPass') &&
+      !healthUnreachableRaw.includes('127.0.0.1') &&
+      !healthUnreachableRaw.includes('ECONNREFUSED') &&
+      !healthUnreachableRaw.includes('healthSecretPass'),
+    'GET /api/health leaks zero credentials, URIs, IP diagnostics, or error codes in logs or HTTP response'
+  );
+
   const unreachableRes = await fetch(`${baseUrl}/api/projects`);
   assert(unreachableRes.status === 503, 'GET /api/projects returns HTTP 503 when MongoDB is unreachable on Vercel (db stays null)');
 
-  // Test 3: Warm Invocation Middleware Retry & Connection Caching
-  console.log('\n--- Test 3: Warm Serverless Middleware Retry & Connection Caching ---');
+  // Test 3: Warm Invocation Health Endpoint + Middleware Retry & Connection Caching
+  console.log('\n--- Test 3: Warm Serverless Health Initialization, Middleware Retry & Connection Caching ---');
   const mongod = await MongoMemoryServer.create();
   const uri = mongod.getUri();
   process.env.MONGODB_URI = uri;
 
-  // Without manually calling connectToDatabase(), hit /api/auth/register so API middleware retries connectToDatabase() on warm invocation
+  // Hit /api/health FIRST before any other route to verify /api/health itself establishes and awaits MongoDB connection
+  const warmHealthRes = await fetch(`${baseUrl}/api/health`);
+  const warmHealthBody = await warmHealthRes.json();
+  assert(
+    warmHealthRes.status === 200 && warmHealthBody.database === 'connected',
+    'GET /api/health invokes and awaits connectToDatabase() on Vercel and reports database: "connected"'
+  );
+
+  // Subsequent API request reuses established connection seamlessly
   const warmRegRes = await fetch(`${baseUrl}/api/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: 'Serverless User', email: 'serverless@example.com', password: 'password123' })
   });
-  assert(warmRegRes.status === 201, 'Warm Vercel API request automatically retries connectToDatabase() via middleware and succeeds');
+  assert(warmRegRes.status === 201, 'Warm Vercel API request succeeds using established MongoDB connection');
   const warmRegBody = await warmRegRes.json();
 
   const db1 = await connectToDatabase();

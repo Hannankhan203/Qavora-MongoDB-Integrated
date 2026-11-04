@@ -559,7 +559,7 @@ async function runMongoNetworkDiagnostics(connectionUri: string): Promise<void> 
 }
 
 async function connectToDatabase(): Promise<any> {
-  const currentUri = process.env.MONGODB_URI;
+  const currentUri = process.env.MONGODB_URI?.trim();
   const currentDbName = process.env.MONGODB_DB || 'qavora';
   const currentIsProd = process.env.NODE_ENV === 'production';
   const currentIsVercel = Boolean(process.env.VERCEL || process.env.NOW_REGION);
@@ -689,7 +689,7 @@ app.use(async (req: Request, res: Response, next: NextFunction) => {
     return next();
   }
 
-  // Health endpoint can be accessed without blocking
+  // Health endpoint invokes and awaits connectToDatabase() directly before reporting status
   if (req.path === '/api/health') {
     return next();
   }
@@ -700,7 +700,7 @@ app.use(async (req: Request, res: Response, next: NextFunction) => {
     db = null;
   }
 
-  const activeUri = process.env.MONGODB_URI;
+  const activeUri = process.env.MONGODB_URI?.trim();
   if ((!db || db.__isMock) && activeUri) {
     try {
       await connectToDatabase();
@@ -725,13 +725,29 @@ const mockTests = [
 const inMemoryProjects: any[] = [];
 
 // Health check endpoint
-app.get("/api/health", (req: Request, res: Response) => {
+app.get("/api/health", async (req: Request, res: Response) => {
   const currentIsProd = process.env.NODE_ENV === 'production';
   const currentIsVercel = Boolean(process.env.VERCEL || process.env.NOW_REGION);
+
+  if (db?.__isMock && (currentIsProd || currentIsVercel)) {
+    db = null;
+  }
+
+  if (!db || (db.__isMock && Boolean(process.env.MONGODB_URI?.trim()))) {
+    try {
+      await connectToDatabase();
+    } catch (err: any) {
+      console.warn(
+        `[Qavora Server] Health check database connection attempt failed: ${sanitizeDiagnosticText(err?.message || err)}`
+      );
+    }
+  }
+
   const databaseStatus = db && !db.__isMock
     ? "connected"
     : (currentIsProd || currentIsVercel ? "disconnected" : "mock-active");
-  res.json({
+
+  return res.json({
     success: true,
     message: "Qavora backend is running successfully.",
     database: databaseStatus
