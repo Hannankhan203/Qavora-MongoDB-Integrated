@@ -330,15 +330,284 @@ import { initAuthUI } from './authUI.js';
     }
   }
 
+  function cloneProjectData(value) {
+    if (value === null || value === undefined || typeof value !== 'object') {
+      return value;
+    }
+    try {
+      if (typeof structuredClone === 'function') {
+        return structuredClone(value);
+      }
+    } catch (_) {
+      // Fall back to JSON deep clone if structuredClone encounters non-cloneable properties
+    }
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  function normalizeProjectRecord(rawP, pIdx = 0) {
+    const p = (rawP && typeof rawP === 'object') ? rawP : {};
+    let generatedId = false;
+    let projId = (p.id !== undefined && p.id !== null && String(p.id).trim() !== '')
+      ? String(p.id).trim()
+      : null;
+    if (!projId) {
+      projId = 'proj_' + Date.now() + '_' + pIdx + '_' + Math.random().toString(36).substring(2, 7);
+      generatedId = true;
+    }
+
+    const createdAt = p.createdAt || new Date().toISOString();
+    const updatedAt = p.updatedAt || createdAt;
+
+    // Normalize Test Plan (preserve custom/checklist metadata fields via spread)
+    const rawPlan = (p.testPlan && typeof p.testPlan === 'object') ? p.testPlan : {};
+    const planPhases = Array.isArray(rawPlan.phases) ? rawPlan.phases.map((rawPh, phIdx) => {
+      const ph = (rawPh && typeof rawPh === 'object') ? rawPh : {};
+      return {
+        ...ph,
+        id: ph.id || ('phase_' + Date.now() + '_' + phIdx),
+        name: (ph.name !== undefined && ph.name !== null && String(ph.name).trim() !== '') ? String(ph.name).trim() : 'Phase ' + (phIdx + 1),
+        phaseNumber: (ph.phaseNumber !== undefined && ph.phaseNumber !== null && String(ph.phaseNumber).trim() !== '') ? String(ph.phaseNumber).trim() : '',
+        description: typeof ph.description === 'string' ? ph.description.trim() : '',
+        order: typeof ph.order === 'number' ? ph.order : phIdx
+      };
+    }) : [];
+
+    const testPlan = {
+      ...rawPlan,
+      id: rawPlan.id || ('plan_' + projId),
+      name: rawPlan.name || (p.name ? `${p.name} Master Test Plan` : 'Master Manual QA Plan'),
+      description: typeof rawPlan.description === 'string' ? rawPlan.description.trim() : '',
+      objective: typeof rawPlan.objective === 'string' ? rawPlan.objective.trim() : '',
+      scope: typeof rawPlan.scope === 'string' ? rawPlan.scope.trim() : '',
+      notes: typeof rawPlan.notes === 'string' ? rawPlan.notes.trim() : '',
+      createdAt: rawPlan.createdAt || createdAt,
+      updatedAt: rawPlan.updatedAt || updatedAt,
+      phases: planPhases
+    };
+
+    // Normalize Test Suites & Test Cases
+    const testSuites = Array.isArray(p.testSuites) ? p.testSuites.map((rawS, sIdx) => {
+      const s = (rawS && typeof rawS === 'object') ? rawS : {};
+      const rawCases = Array.isArray(s.testCases) ? s.testCases : [];
+      const testCases = rawCases.map((rawTc, tcIdx) => {
+        const tc = (rawTc && typeof rawTc === 'object') ? rawTc : {};
+        const rawSteps = Array.isArray(tc.steps) ? tc.steps : [];
+        const steps = rawSteps.map((rawSt, stIdx) => {
+          const st = (rawSt && typeof rawSt === 'object') ? rawSt : {};
+          return {
+            ...st,
+            id: st.id || ('step_' + Date.now() + '_' + stIdx),
+            action: typeof st.action === 'string' ? st.action.trim() : '',
+            testData: typeof st.testData === 'string' ? st.testData.trim() : (typeof st.testData === 'number' ? String(st.testData) : ''),
+            order: typeof st.order === 'number' ? st.order : stIdx
+          };
+        });
+
+        const validStatuses = ['Pass', 'Fail', 'Blocked', 'Skipped', 'Not Run'];
+        const caseStatus = validStatuses.includes(tc.status) ? tc.status : 'Not Run';
+
+        return {
+          ...tc,
+          id: (tc.id !== undefined && tc.id !== null && String(tc.id).trim() !== '') ? String(tc.id).trim() : `TC-${String(tcIdx + 1).padStart(3, '0')}`,
+          title: tc.title || 'Untitled Test Case',
+          description: typeof tc.description === 'string' ? tc.description.trim() : '',
+          preconditions: typeof tc.preconditions === 'string' ? tc.preconditions.trim() : '',
+          steps: steps,
+          expectedResult: typeof tc.expectedResult === 'string' ? tc.expectedResult.trim() : '',
+          priority: ['Critical', 'High', 'Medium', 'Low'].includes(tc.priority) ? tc.priority : (classifyPriority(tc.priority) || 'High'),
+          category: tc.category || s.category || 'Functional',
+          tags: Array.isArray(tc.tags) ? [...tc.tags] : [],
+          status: caseStatus,
+          lastExecutedAt: tc.lastExecutedAt || null,
+          lastExecutionId: tc.lastExecutionId || null,
+          executions: Array.isArray(tc.executions) ? [...tc.executions] : [],
+          defectIds: Array.isArray(tc.defectIds) ? [...tc.defectIds] : [],
+          createdAt: tc.createdAt || createdAt,
+          updatedAt: tc.updatedAt || updatedAt
+        };
+      });
+
+      return {
+        ...s,
+        id: s.id || ('suite_' + Date.now() + '_' + sIdx),
+        phaseId: s.phaseId || (planPhases[0] ? planPhases[0].id : ''),
+        name: s.name || 'Test Suite ' + (sIdx + 1),
+        description: typeof s.description === 'string' ? s.description.trim() : '',
+        category: s.category || 'Functional',
+        tags: Array.isArray(s.tags) ? [...s.tags] : [],
+        order: typeof s.order === 'number' ? s.order : sIdx,
+        createdAt: s.createdAt || createdAt,
+        updatedAt: s.updatedAt || updatedAt,
+        testCases: testCases
+      };
+    }) : [];
+
+    // Normalize Executions Array (Prompt 4)
+    const executions = Array.isArray(p.executions) ? p.executions.map((rawEx, exIdx) => {
+      const ex = (rawEx && typeof rawEx === 'object') ? rawEx : {};
+      return {
+        ...ex,
+        id: ex.id || ('exec_' + Date.now() + '_' + exIdx + '_' + Math.random().toString(36).substring(2, 7)),
+        testCaseId: (ex.testCaseId !== undefined && ex.testCaseId !== null) ? String(ex.testCaseId) : '',
+        testCaseTitle: ex.testCaseTitle || '',
+        suiteId: ex.suiteId || '',
+        phaseId: ex.phaseId || '',
+        status: ['Pass', 'Fail', 'Blocked', 'Skipped'].includes(ex.status) ? ex.status : 'Pass',
+        actualResult: typeof ex.actualResult === 'string' ? ex.actualResult.trim() : '',
+        notes: typeof ex.notes === 'string' ? ex.notes.trim() : '',
+        tester: typeof ex.tester === 'string' ? ex.tester.trim() : '',
+        environment: typeof ex.environment === 'string' ? ex.environment.trim() : '',
+        browserDevice: typeof ex.browserDevice === 'string' ? ex.browserDevice.trim() : '',
+        buildVersion: typeof ex.buildVersion === 'string' ? ex.buildVersion.trim() : '',
+        stepResults: Array.isArray(ex.stepResults) ? cloneProjectData(ex.stepResults) : [],
+        defectIds: Array.isArray(ex.defectIds) ? [...ex.defectIds] : [],
+        executedAt: ex.executedAt || createdAt
+      };
+    }) : [];
+
+    // Normalize Defects Array (Prompt 4 & ISSUE-007 Fix)
+    const defects = Array.isArray(p.defects) ? p.defects.map((rawDf, dfIdx) => {
+      const df = (rawDf && typeof rawDf === 'object') ? rawDf : {};
+      const rawPriority = df.priority;
+      const rawSeverity = df.severity;
+      const classified = classifyDefectPriority(df);
+
+      return {
+        ...df,
+        id: df.id || `DEF-${String(dfIdx + 1).padStart(3, '0')}`,
+        testCaseId: (df.testCaseId !== undefined && df.testCaseId !== null) ? String(df.testCaseId) : '',
+        executionId: df.executionId || '',
+        title: df.title || 'Untitled Defect',
+        description: typeof df.description === 'string' ? df.description.trim() : '',
+        priority: rawPriority !== undefined ? rawPriority : (classified || rawSeverity || ''),
+        severity: classified || (typeof rawSeverity === 'string' && rawSeverity.trim() ? rawSeverity.trim() : (typeof rawPriority === 'string' && rawPriority.trim() ? rawPriority.trim() : '')),
+        status: ['Open', 'In Progress', 'Resolved', 'Closed', 'Reopened'].includes(df.status) ? df.status : 'Open',
+        stepsToReproduce: typeof df.stepsToReproduce === 'string' ? df.stepsToReproduce.trim() : '',
+        expectedResult: typeof df.expectedResult === 'string' ? df.expectedResult.trim() : '',
+        actualResult: typeof df.actualResult === 'string' ? df.actualResult.trim() : '',
+        externalIssueUrl: typeof df.externalIssueUrl === 'string' ? df.externalIssueUrl.trim() : '',
+        createdAt: df.createdAt || createdAt,
+        updatedAt: df.updatedAt || updatedAt
+      };
+    }) : [];
+
+    // Compute aggregated testing statistics (Prompt 4 strict formulas)
+    let totalCases = 0;
+    let passedCases = 0;
+    let failedCases = 0;
+    let blockedCases = 0;
+    let skippedCases = 0;
+
+    testSuites.forEach(suite => {
+      suite.testCases.forEach(tc => {
+        totalCases++;
+        if (tc.status === 'Pass') passedCases++;
+        else if (tc.status === 'Fail') failedCases++;
+        else if (tc.status === 'Blocked') blockedCases++;
+        else if (tc.status === 'Skipped') skippedCases++;
+      });
+    });
+
+    const executedCases = passedCases + failedCases + blockedCases + skippedCases;
+    const notRunCases = Math.max(0, totalCases - executedCases);
+    const completionPercent = totalCases > 0 ? Math.round((executedCases / totalCases) * 100) : 0;
+    const passRate = executedCases > 0 ? Math.round((passedCases / executedCases) * 100) : 0;
+    const openDefectsCount = defects.filter(d => ['Open', 'In Progress', 'Reopened'].includes(d.status)).length;
+
+    const normalizedProject = {
+      ...p,
+      id: projId,
+      name: p.name || 'Untitled Project',
+      type: VALID_PROJECT_TYPES.includes(p.type) ? p.type : 'Other',
+      status: VALID_STATUSES.includes(p.status) ? p.status : 'Active',
+      version: typeof p.version === 'string' ? p.version.trim() : (typeof p.version === 'number' ? String(p.version) : ''),
+      description: typeof p.description === 'string' ? p.description.trim() : '',
+      sourceChecklistId: typeof p.sourceChecklistId === 'string' && p.sourceChecklistId.trim() ? p.sourceChecklistId.trim() : null,
+      promotedFromChecklistTitle: typeof p.promotedFromChecklistTitle === 'string' && p.promotedFromChecklistTitle.trim() ? p.promotedFromChecklistTitle.trim() : null,
+      promotedAt: typeof p.promotedAt === 'string' && p.promotedAt.trim() ? p.promotedAt.trim() : null,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+      testCaseCount: totalCases,
+      passedTests: passedCases,
+      failedTests: failedCases,
+      blockedTests: blockedCases,
+      skippedTests: skippedCases,
+      notRunTests: notRunCases,
+      executedTests: executedCases,
+      completionRate: completionPercent,
+      passRate: passRate,
+      totalDefects: defects.length,
+      openDefects: openDefectsCount,
+      testPlan: testPlan,
+      testSuites: testSuites,
+      executions: executions,
+      defects: defects
+    };
+
+    return {
+      project: normalizedProject,
+      generatedId
+    };
+  }
+
+  function normalizeProjectsList(rawList) {
+    if (!Array.isArray(rawList)) {
+      return { projects: [], needsPersistence: false };
+    }
+    let needsPersistence = false;
+    const projects = rawList.map((rawP, idx) => {
+      const { project, generatedId } = normalizeProjectRecord(rawP, idx);
+      if (generatedId) needsPersistence = true;
+      return project;
+    });
+    return { projects, needsPersistence };
+  }
+
+  function canonicalizeForDiff(val, isTopLevelProject = false) {
+    if (val === null || val === undefined || typeof val !== 'object') {
+      return val;
+    }
+    if (Array.isArray(val)) {
+      return val.map(item => canonicalizeForDiff(item, false));
+    }
+    const sorted = {};
+    const keys = Object.keys(val).sort();
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      if (isTopLevelProject && (k === '_id' || k === 'userId')) {
+        continue;
+      }
+      if (val[k] !== undefined) {
+        sorted[k] = canonicalizeForDiff(val[k], false);
+      }
+    }
+    return sorted;
+  }
+
+  function hasProjectChanged(prevProj, nextProj) {
+    if (!prevProj || !nextProj) return true;
+    try {
+      const prevNorm = normalizeProjectRecord(prevProj, 0).project;
+      const nextNorm = normalizeProjectRecord(nextProj, 0).project;
+      return JSON.stringify(canonicalizeForDiff(prevNorm, true)) !== JSON.stringify(canonicalizeForDiff(nextNorm, true));
+    } catch (_) {
+      return true;
+    }
+  }
+
   const Storage = {
     isHydrated() {
       return Boolean(State.projectsHydrated && Array.isArray(State.projects));
     },
 
+    normalizeProject(rawProject, index = 0) {
+      return cloneProjectData(normalizeProjectRecord(rawProject, index).project);
+    },
+
     getProjects() {
-      // Return in-memory cache if hydrated
+      // Return independent deep clone of in-memory cache if hydrated (prevents shared reference aliasing)
       if (State.projectsHydrated && Array.isArray(State.projects)) {
-        return State.projects;
+        return cloneProjectData(State.projects);
       }
 
       // Pre-hydration fallback: read and normalize from localStorage
@@ -358,197 +627,17 @@ import { initAuthUI } from './authUI.js';
         }
         if (!Array.isArray(parsed)) return [];
 
-        let needsPersistence = false;
-
-        const normalizedProjects = parsed.map((rawP, pIdx) => {
-          const p = (rawP && typeof rawP === 'object') ? rawP : {};
-          let projId = (p.id !== undefined && p.id !== null && String(p.id).trim() !== '')
-            ? String(p.id).trim()
-            : null;
-          if (!projId) {
-            projId = 'proj_' + Date.now() + '_' + pIdx + '_' + Math.random().toString(36).substring(2, 7);
-            needsPersistence = true;
-          }
-
-          const createdAt = p.createdAt || new Date().toISOString();
-          const updatedAt = p.updatedAt || createdAt;
-
-          // Normalize Test Plan
-          const rawPlan = p.testPlan || {};
-          const planPhases = Array.isArray(rawPlan.phases) ? rawPlan.phases.map((ph, phIdx) => ({
-            id: ph.id || ('phase_' + Date.now() + '_' + phIdx),
-            name: (ph.name !== undefined && ph.name !== null && String(ph.name).trim() !== '') ? String(ph.name).trim() : 'Phase ' + (phIdx + 1),
-            phaseNumber: (ph.phaseNumber !== undefined && ph.phaseNumber !== null && String(ph.phaseNumber).trim() !== '') ? String(ph.phaseNumber).trim() : '',
-            description: typeof ph.description === 'string' ? ph.description.trim() : '',
-            order: typeof ph.order === 'number' ? ph.order : phIdx
-          })) : [];
-
-          const testPlan = {
-            id: rawPlan.id || ('plan_' + projId),
-            name: rawPlan.name || (p.name ? `${p.name} Master Test Plan` : 'Master Manual QA Plan'),
-            description: typeof rawPlan.description === 'string' ? rawPlan.description.trim() : '',
-            objective: typeof rawPlan.objective === 'string' ? rawPlan.objective.trim() : '',
-            scope: typeof rawPlan.scope === 'string' ? rawPlan.scope.trim() : '',
-            notes: typeof rawPlan.notes === 'string' ? rawPlan.notes.trim() : '',
-            createdAt: rawPlan.createdAt || createdAt,
-            updatedAt: rawPlan.updatedAt || updatedAt,
-            phases: planPhases
-          };
-
-          // Normalize Test Suites & Test Cases
-          const testSuites = Array.isArray(p.testSuites) ? p.testSuites.map((s, sIdx) => {
-            const rawCases = Array.isArray(s.testCases) ? s.testCases : [];
-            const testCases = rawCases.map((tc, tcIdx) => {
-              const rawSteps = Array.isArray(tc.steps) ? tc.steps : [];
-              const steps = rawSteps.map((st, stIdx) => ({
-                id: st.id || ('step_' + Date.now() + '_' + stIdx),
-                action: typeof st.action === 'string' ? st.action.trim() : '',
-                testData: typeof st.testData === 'string' ? st.testData.trim() : (typeof st.testData === 'number' ? String(st.testData) : ''),
-                order: typeof st.order === 'number' ? st.order : stIdx
-              }));
-
-              const validStatuses = ['Pass', 'Fail', 'Blocked', 'Skipped', 'Not Run'];
-              const caseStatus = validStatuses.includes(tc.status) ? tc.status : 'Not Run';
-
-              return {
-                id: (tc.id !== undefined && tc.id !== null && String(tc.id).trim() !== '') ? String(tc.id).trim() : `TC-${String(tcIdx + 1).padStart(3, '0')}`,
-                title: tc.title || 'Untitled Test Case',
-                description: typeof tc.description === 'string' ? tc.description.trim() : '',
-                preconditions: typeof tc.preconditions === 'string' ? tc.preconditions.trim() : '',
-                steps: steps,
-                expectedResult: typeof tc.expectedResult === 'string' ? tc.expectedResult.trim() : '',
-                priority: ['Critical', 'High', 'Medium', 'Low'].includes(tc.priority) ? tc.priority : (classifyPriority(tc.priority) || 'High'),
-                category: tc.category || s.category || 'Functional',
-                tags: Array.isArray(tc.tags) ? tc.tags : [],
-                status: caseStatus,
-                lastExecutedAt: tc.lastExecutedAt || null,
-                lastExecutionId: tc.lastExecutionId || null,
-                executions: Array.isArray(tc.executions) ? tc.executions : [],
-                defectIds: Array.isArray(tc.defectIds) ? tc.defectIds : [],
-                createdAt: tc.createdAt || createdAt,
-                updatedAt: tc.updatedAt || updatedAt
-              };
-            });
-
-            return {
-              id: s.id || ('suite_' + Date.now() + '_' + sIdx),
-              phaseId: s.phaseId || (planPhases[0] ? planPhases[0].id : ''),
-              name: s.name || 'Test Suite ' + (sIdx + 1),
-              description: typeof s.description === 'string' ? s.description.trim() : '',
-              category: s.category || 'Functional',
-              tags: Array.isArray(s.tags) ? s.tags : [],
-              order: typeof s.order === 'number' ? s.order : sIdx,
-              createdAt: s.createdAt || createdAt,
-              updatedAt: s.updatedAt || updatedAt,
-              testCases: testCases
-            };
-          }) : [];
-
-          // Normalize Executions Array (Prompt 4)
-          const executions = Array.isArray(p.executions) ? p.executions.map(ex => ({
-            id: ex.id || ('exec_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7)),
-            testCaseId: (ex.testCaseId !== undefined && ex.testCaseId !== null) ? String(ex.testCaseId) : '',
-            testCaseTitle: ex.testCaseTitle || '',
-            suiteId: ex.suiteId || '',
-            phaseId: ex.phaseId || '',
-            status: ['Pass', 'Fail', 'Blocked', 'Skipped'].includes(ex.status) ? ex.status : 'Pass',
-            actualResult: typeof ex.actualResult === 'string' ? ex.actualResult.trim() : '',
-            notes: typeof ex.notes === 'string' ? ex.notes.trim() : '',
-            tester: typeof ex.tester === 'string' ? ex.tester.trim() : '',
-            environment: typeof ex.environment === 'string' ? ex.environment.trim() : '',
-            browserDevice: typeof ex.browserDevice === 'string' ? ex.browserDevice.trim() : '',
-            buildVersion: typeof ex.buildVersion === 'string' ? ex.buildVersion.trim() : '',
-            stepResults: Array.isArray(ex.stepResults) ? ex.stepResults : [],
-            defectIds: Array.isArray(ex.defectIds) ? ex.defectIds : [],
-            executedAt: ex.executedAt || new Date().toISOString()
-          })) : [];
-
-          // Normalize Defects Array (Prompt 4 & ISSUE-007 Fix)
-          const defects = Array.isArray(p.defects) ? p.defects.map((df, dfIdx) => {
-            const rawPriority = df.priority;
-            const rawSeverity = df.severity;
-            const classified = classifyDefectPriority(df);
-
-            return {
-              id: df.id || `DEF-${String(dfIdx + 1).padStart(3, '0')}`,
-              testCaseId: (df.testCaseId !== undefined && df.testCaseId !== null) ? String(df.testCaseId) : '',
-              executionId: df.executionId || '',
-              title: df.title || 'Untitled Defect',
-              description: typeof df.description === 'string' ? df.description.trim() : '',
-              priority: rawPriority !== undefined ? rawPriority : (classified || rawSeverity || ''),
-              severity: classified || (typeof rawSeverity === 'string' && rawSeverity.trim() ? rawSeverity.trim() : (typeof rawPriority === 'string' && rawPriority.trim() ? rawPriority.trim() : '')),
-              status: ['Open', 'In Progress', 'Resolved', 'Closed', 'Reopened'].includes(df.status) ? df.status : 'Open',
-              stepsToReproduce: typeof df.stepsToReproduce === 'string' ? df.stepsToReproduce.trim() : '',
-              expectedResult: typeof df.expectedResult === 'string' ? df.expectedResult.trim() : '',
-              actualResult: typeof df.actualResult === 'string' ? df.actualResult.trim() : '',
-              externalIssueUrl: typeof df.externalIssueUrl === 'string' ? df.externalIssueUrl.trim() : '',
-              createdAt: df.createdAt || createdAt,
-              updatedAt: df.updatedAt || updatedAt
-            };
-          }) : [];
-
-          // Compute aggregated testing statistics (Prompt 4 strict formulas)
-          let totalCases = 0;
-          let passedCases = 0;
-          let failedCases = 0;
-          let blockedCases = 0;
-          let skippedCases = 0;
-
-          testSuites.forEach(suite => {
-            suite.testCases.forEach(tc => {
-              totalCases++;
-              if (tc.status === 'Pass') passedCases++;
-              else if (tc.status === 'Fail') failedCases++;
-              else if (tc.status === 'Blocked') blockedCases++;
-              else if (tc.status === 'Skipped') skippedCases++;
-            });
-          });
-
-          const notRunCases = Math.max(0, totalCases - (passedCases + failedCases + blockedCases + skippedCases));
-          const executedCases = passedCases + failedCases + blockedCases + skippedCases;
-          const completionPercent = totalCases > 0 ? Math.round((executedCases / totalCases) * 100) : 0;
-          const passRate = executedCases > 0 ? Math.round((passedCases / executedCases) * 100) : 0;
-          const openDefectsCount = defects.filter(d => ['Open', 'In Progress', 'Reopened'].includes(d.status)).length;
-
-          return {
-            id: projId,
-            name: p.name || 'Untitled Project',
-            type: VALID_PROJECT_TYPES.includes(p.type) ? p.type : 'Other',
-            status: VALID_STATUSES.includes(p.status) ? p.status : 'Active',
-            version: typeof p.version === 'string' ? p.version.trim() : (typeof p.version === 'number' ? String(p.version) : ''),
-            description: typeof p.description === 'string' ? p.description.trim() : '',
-            sourceChecklistId: typeof p.sourceChecklistId === 'string' && p.sourceChecklistId.trim() ? p.sourceChecklistId.trim() : null,
-            promotedFromChecklistTitle: typeof p.promotedFromChecklistTitle === 'string' && p.promotedFromChecklistTitle.trim() ? p.promotedFromChecklistTitle.trim() : null,
-            promotedAt: typeof p.promotedAt === 'string' && p.promotedAt.trim() ? p.promotedAt.trim() : null,
-            createdAt: createdAt,
-            updatedAt: updatedAt,
-            testCaseCount: totalCases,
-            passedTests: passedCases,
-            failedTests: failedCases,
-            blockedTests: blockedCases,
-            skippedTests: skippedCases,
-            notRunTests: notRunCases,
-            executedTests: executedCases,
-            completionRate: completionPercent,
-            passRate: passRate,
-            totalDefects: defects.length,
-            openDefects: openDefectsCount,
-            testPlan: testPlan,
-            testSuites: testSuites,
-            executions: executions,
-            defects: defects
-          };
-        });
+        const { projects: normalizedProjects, needsPersistence } = normalizeProjectsList(parsed);
 
         if (needsPersistence) {
           try {
-            Storage.saveProjects(normalizedProjects);
+            Storage.saveProjects(normalizedProjects, { skipBackendSync: true });
           } catch (persistErr) {
             console.error('Qavora: Failed to auto-persist generated project IDs', persistErr);
           }
         }
 
-        return normalizedProjects;
+        return cloneProjectData(normalizedProjects);
       } catch (err) {
         console.error('Qavora: Failed to read projects from memory store', err);
         return [];
@@ -556,30 +645,60 @@ import { initAuthUI } from './authUI.js';
     },
 
     saveProjects(projects, meta = {}) {
-      // Keep in-memory State cache synchronized
-      const prevProjects = Array.isArray(State.projects) ? [...State.projects] : null;
-      if (Array.isArray(projects)) {
-        State.projects = projects;
+      // 1. Capture an independent snapshot of previous projects BEFORE mutating State or localStorage
+      let prevProjects = null;
+      if (Array.isArray(State.projects)) {
+        prevProjects = cloneProjectData(State.projects);
+      } else {
+        try {
+          const prevRaw = safeStorageRead(STORAGE_KEYS.PROJECTS).raw;
+          if (prevRaw) {
+            const parsedPrev = JSON.parse(prevRaw);
+            if (Array.isArray(parsedPrev)) {
+              prevProjects = normalizeProjectsList(parsedPrev).projects;
+            }
+          }
+        } catch (_) {
+          prevProjects = null;
+        }
       }
+
+      // 2. Normalize and deep-clone incoming projects so derived KPI metrics & nested data are always consistent
+      const normalizedProjects = Array.isArray(projects)
+        ? normalizeProjectsList(projects).projects
+        : [];
+
       try {
-        const payload = JSON.stringify(projects);
+        const payload = JSON.stringify(normalizedProjects);
         const res = safeStorageWrite(STORAGE_KEYS.PROJECTS, payload, 'saving projects');
         if (!res.ok) {
-          if (typeof showToast === 'function') {
+          if (typeof showToast === 'function' && !meta.suppressStorageErrorToast) {
             showToast(res.error, 'error');
           }
+          res.syncPromise = Promise.resolve({ ok: false, error: res.error });
+          return res;
         }
-        // Write-through to MongoDB Atlas if not in hydration or skip sync
-        if (res.ok && !meta.skipBackendSync && !State.projectsLoading && typeof ProjectsPersistence !== 'undefined') {
-          ProjectsPersistence.onProjectsSaved(projects, prevProjects, meta);
+
+        // 3. Store an isolated clone in State.projects so subsequent caller mutations cannot alias internal state
+        State.projects = cloneProjectData(normalizedProjects);
+
+        // 4. Write-through to MongoDB Atlas unless explicitly skipped via meta.skipBackendSync
+        let syncPromise = Promise.resolve({ ok: true, skipped: true });
+        if (!meta.skipBackendSync && typeof ProjectsPersistence !== 'undefined') {
+          syncPromise = ProjectsPersistence.onProjectsSaved(
+            cloneProjectData(normalizedProjects),
+            prevProjects,
+            meta
+          );
         }
+        res.syncPromise = syncPromise;
         return res;
       } catch (err) {
         const isQuota = isQuotaExceededError(err);
         const isSecurity = isSecurityError(err);
         const errorMsg = getStorageErrorMessage(err, 'saving projects');
         console.error('Qavora: Failed to persist projects to storage', err);
-        if (typeof showToast === 'function') {
+        if (typeof showToast === 'function' && !meta.suppressStorageErrorToast) {
           showToast(errorMsg, 'error');
         }
         return {
@@ -587,6 +706,7 @@ import { initAuthUI } from './authUI.js';
           error: errorMsg,
           isQuota,
           isSecurity,
+          syncPromise: Promise.resolve({ ok: false, error: errorMsg }),
           valueOf() { return false; }
         };
       }
@@ -823,6 +943,7 @@ import { initAuthUI } from './authUI.js';
 
       try {
         const response = await fetch(url, {
+          cache: 'no-store',
           ...options,
           headers
         });
@@ -1002,26 +1123,24 @@ import { initAuthUI } from './authUI.js';
      */
     hydrateCache(projects) {
       if (Array.isArray(projects)) {
-        State.projects = projects.map(p => {
-          if (!p || typeof p !== 'object') return p;
-          if (p.id && typeof ProjectsPersistence !== 'undefined') {
+        if (typeof ProjectsPersistence !== 'undefined') {
+          ProjectsPersistence.persistedProjectIds.clear();
+        }
+        const { projects: normalized } = normalizeProjectsList(projects);
+        normalized.forEach(p => {
+          if (p && p.id && typeof ProjectsPersistence !== 'undefined') {
             ProjectsPersistence.markPersisted(p.id);
           }
-          return {
-            ...p,
-            testPlan: p.testPlan || { phases: [] },
-            testSuites: Array.isArray(p.testSuites) ? p.testSuites : [],
-            executions: Array.isArray(p.executions) ? p.executions : [],
-            defects: Array.isArray(p.defects) ? p.defects : []
-          };
         });
+        State.projects = cloneProjectData(normalized);
         State.projectsHydrated = true;
         State.projectsError = null;
         if (typeof updateSyncStatusIndicator === 'function') {
           updateSyncStatusIndicator();
         }
+        return cloneProjectData(State.projects);
       }
-      return State.projects;
+      return Array.isArray(State.projects) ? cloneProjectData(State.projects) : State.projects;
     },
 
     /**
@@ -1082,6 +1201,17 @@ import { initAuthUI } from './authUI.js';
     },
 
     /**
+     * Await all currently in-flight and queued project sync operations
+     */
+    async flushAll() {
+      while (this.inFlightSync.size > 0 || this.pendingSync.size > 0) {
+        const active = Array.from(this.inFlightSync.values());
+        if (active.length === 0) break;
+        await Promise.allSettled(active);
+      }
+    },
+
+    /**
      * Synchronize a project to MongoDB Atlas.
      * Uses POST for newly created projects and PATCH /api/projects/:id/data for existing projects.
      * Queues pending writes if an existing write is currently in-flight.
@@ -1097,11 +1227,32 @@ import { initAuthUI } from './authUI.js';
       }
 
       const projectId = String(project.id).trim();
+      const payload = cloneProjectData(project);
 
-      // If a sync is already in flight for this specific project, queue this latest version
+      // If a sync is already in flight for this specific project, queue this latest snapshot
+      // and return a promise that resolves when the queued snapshot itself finishes syncing.
       if (this.inFlightSync.has(projectId)) {
-        this.pendingSync.set(projectId, { project: { ...project }, options });
-        return this.inFlightSync.get(projectId);
+        const existingPending = this.pendingSync.get(projectId);
+        if (existingPending) {
+          existingPending.project = payload;
+          existingPending.options = {
+            ...existingPending.options,
+            ...options,
+            isNew: Boolean(existingPending.options.isNew && options.isNew)
+          };
+          return existingPending.promise;
+        }
+        let resolvePending;
+        const deferredPromise = new Promise(resolve => {
+          resolvePending = resolve;
+        });
+        this.pendingSync.set(projectId, {
+          project: payload,
+          options: { ...options },
+          promise: deferredPromise,
+          resolve: resolvePending
+        });
+        return deferredPromise;
       }
 
       const syncPromise = (async () => {
@@ -1111,57 +1262,68 @@ import { initAuthUI } from './authUI.js';
 
           if (isKnownOnServer) {
             // Update existing project using full project data PATCH
-            result = await ProjectsAPI.updateData(projectId, project);
+            result = await ProjectsAPI.updateData(projectId, payload);
 
             // If 404 on server (e.g. wiped or remote sync missing), seamlessly fall back to POST
             if (!result.ok && result.status === 404) {
               console.info(`Qavora: Project "${projectId}" not found on MongoDB Atlas (404). Falling back to POST create.`);
-              result = await ProjectsAPI.create(project);
+              result = await ProjectsAPI.create(payload);
             }
           } else {
             // New project: POST /api/projects
-            result = await ProjectsAPI.create(project);
+            result = await ProjectsAPI.create(payload);
 
             // If 409 conflict (already exists on server with this ID), gracefully update it
             if (!result.ok && (result.status === 409 || (result.error && result.error.includes('already exists')))) {
               console.info(`Qavora: Project "${projectId}" already exists on MongoDB Atlas (409). Falling back to PATCH /data.`);
-              result = await ProjectsAPI.updateData(projectId, project);
+              result = await ProjectsAPI.updateData(projectId, payload);
             }
           }
 
           if (result && result.ok) {
             this.markPersisted(projectId);
 
-            // If MongoDB returned canonical document with genuine BSON _id, attach it to local object
+            // Attach genuine MongoDB _id / userId to in-memory State.projects entry if present
             const serverDoc = result.data;
-            if (serverDoc && serverDoc._id) {
-              project._id = serverDoc._id;
-              // Also update in State.projects if present
-              if (Array.isArray(State.projects)) {
-                const inMemory = State.projects.find(p => p && p.id === projectId);
-                if (inMemory && !inMemory._id) {
-                  inMemory._id = serverDoc._id;
-                }
+            if (serverDoc && Array.isArray(State.projects)) {
+              const inMemory = State.projects.find(p => p && p.id === projectId);
+              if (inMemory) {
+                if (serverDoc._id) inMemory._id = serverDoc._id;
+                if (serverDoc.userId) inMemory.userId = serverDoc.userId;
               }
             }
 
-            // If State was not marked hydrated yet, mark it now since server communication succeeded
-            if (!State.projectsHydrated && !State.projectsLoading) {
+            State.projectsError = null;
+            if (!State.projectsLoading) {
               State.projectsHydrated = true;
-              State.projectsError = null;
-              if (typeof updateSyncStatusIndicator === 'function') {
-                updateSyncStatusIndicator();
-              }
+            }
+            if (typeof updateSyncStatusIndicator === 'function') {
+              updateSyncStatusIndicator();
             }
           } else {
-            // Log warning without failing UI operations — local storage backup guarantees offline safety
-            console.warn(`Qavora: Atlas sync for project "${projectId}" returned:`, result ? result.status : 'no-result', result ? result.error : '');
+            const errMsg = (result && (result.error || result.message)) || 'Failed to synchronize project with MongoDB.';
+            State.projectsError = errMsg;
+            if (typeof updateSyncStatusIndicator === 'function') {
+              updateSyncStatusIndicator();
+            }
+            console.warn(`Qavora: Atlas sync for project "${projectId}" returned:`, result ? result.status : 'no-result', errMsg);
+            if (!options.suppressErrorToast && typeof showToast === 'function') {
+              showToast(`Failed to save project "${payload.name || projectId}" to server: ${errMsg}`, 'error');
+            }
           }
 
           return result;
         } catch (err) {
+          const errMsg = err?.message || 'Sync failed';
+          State.projectsError = errMsg;
+          if (typeof updateSyncStatusIndicator === 'function') {
+            updateSyncStatusIndicator();
+          }
           console.warn(`Qavora: Atlas sync error for project "${projectId}":`, err);
-          return { ok: false, error: err?.message || 'Sync failed' };
+          if (!options.suppressErrorToast && typeof showToast === 'function') {
+            showToast(`Failed to save project "${payload.name || projectId}" to server: ${errMsg}`, 'error');
+          }
+          return { ok: false, error: errMsg };
         } finally {
           this.inFlightSync.delete(projectId);
 
@@ -1169,7 +1331,7 @@ import { initAuthUI } from './authUI.js';
           if (this.pendingSync.has(projectId)) {
             const next = this.pendingSync.get(projectId);
             this.pendingSync.delete(projectId);
-            this.syncProject(next.project, next.options);
+            this.syncProject(next.project, next.options).then(next.resolve);
           }
         }
       })();
@@ -1181,9 +1343,10 @@ import { initAuthUI } from './authUI.js';
     /**
      * Delete a project from MongoDB Atlas
      */
-    async deleteProject(projectId) {
+    async deleteProject(projectId, options = {}) {
       if (!projectId) return { ok: false, error: 'Project ID required' };
       const pId = String(projectId).trim();
+      const wasPersisted = this.isPersisted(pId);
 
       this.unmarkPersisted(pId);
       this.inFlightSync.delete(pId);
@@ -1196,64 +1359,193 @@ import { initAuthUI } from './authUI.js';
       try {
         const res = await ProjectsAPI.delete(pId);
         if (!res.ok && res.status !== 404) {
-          console.warn(`Qavora: Delete project "${pId}" on Atlas returned:`, res.status, res.error);
+          if (wasPersisted) {
+            this.markPersisted(pId);
+          }
+          const errMsg = res.error || res.message || 'Failed to delete project on server.';
+          State.projectsError = errMsg;
+          if (typeof updateSyncStatusIndicator === 'function') {
+            updateSyncStatusIndicator();
+          }
+          console.warn(`Qavora: Delete project "${pId}" on Atlas returned:`, res.status, errMsg);
+          if (!options.suppressErrorToast && typeof showToast === 'function') {
+            showToast(`Failed to delete project on server: ${errMsg}`, 'error');
+          }
+          return res;
         }
-        return res;
+        State.projectsError = null;
+        if (typeof updateSyncStatusIndicator === 'function') {
+          updateSyncStatusIndicator();
+        }
+        return { ...res, ok: true };
       } catch (err) {
+        if (wasPersisted) {
+          this.markPersisted(pId);
+        }
+        const errMsg = err?.message || 'Delete failed';
+        State.projectsError = errMsg;
+        if (typeof updateSyncStatusIndicator === 'function') {
+          updateSyncStatusIndicator();
+        }
         console.warn(`Qavora: Delete project "${pId}" network error:`, err);
-        return { ok: false, error: err?.message || 'Delete failed' };
+        if (!options.suppressErrorToast && typeof showToast === 'function') {
+          showToast(`Failed to delete project on server: ${errMsg}`, 'error');
+        }
+        return { ok: false, error: errMsg };
       }
     },
 
     /**
-     * Centralized hook called whenever projects are saved to Storage
+     * Centralized hook called whenever projects are saved to Storage.
+     * Combines explicit mutation metadata with content-based delta detection so
+     * unchanged projects are never unnecessarily updated while multi-project
+     * mutations (e.g., cross-project defect moves/unlinks, imports, resets) stay in sync.
      */
-    onProjectsSaved(newProjects, prevProjects = null, meta = {}) {
-      if (!Array.isArray(newProjects)) return;
-
-      // If a specific project was targeted
-      if (meta && meta.projectId) {
-        const target = newProjects.find(p => p && p.id === meta.projectId);
-        if (target) {
-          this.syncProject(target, { isNew: Boolean(meta.isNew) });
-        }
-        return;
+    async onProjectsSaved(newProjects, prevProjects = null, meta = {}) {
+      if (!Array.isArray(newProjects)) {
+        return { ok: true, results: [] };
       }
 
-      // If a project was explicitly deleted
+      const suppressErrorToast = Boolean(meta && meta.suppressSyncErrorToast);
+      const ops = [];
+      const handledIds = new Set();
+
+      // 1. Explicit project deletion metadata
       if (meta && meta.deletedProjectId) {
-        this.deleteProject(meta.deletedProjectId);
-        return;
+        const delId = String(meta.deletedProjectId).trim();
+        if (delId) {
+          handledIds.add(delId);
+          ops.push(this.deleteProject(delId, { suppressErrorToast }));
+        }
       }
 
-      // General delta detection
-      const prevList = Array.isArray(prevProjects) ? prevProjects : [];
-      const prevMap = new Map(prevList.map(p => [p.id, p]));
-
-      // Detect deletions
-      const newIds = new Set(newProjects.map(p => p.id));
-      prevList.forEach(p => {
-        if (!newIds.has(p.id)) {
-          this.deleteProject(p.id);
-        }
-      });
-
-      // Detect additions and modifications
-      newProjects.forEach(p => {
-        if (!p || !p.id) return;
-        const prev = prevMap.get(p.id);
-        if (!prev) {
-          // Brand new project
-          this.syncProject(p, { isNew: !this.isPersisted(p.id) });
-        } else {
-          // Check if modified (by reference or updatedAt)
-          if (prev !== p || prev.updatedAt !== p.updatedAt) {
-            this.syncProject(p, { isNew: false });
+      // 2. Explicit target project metadata (create or update)
+      if (meta && meta.projectId) {
+        const targetId = String(meta.projectId).trim();
+        if (targetId) {
+          handledIds.add(targetId);
+          const target = newProjects.find(p => p && p.id === targetId);
+          if (target) {
+            ops.push(this.syncProject(target, {
+              isNew: Boolean(meta.isNew),
+              suppressErrorToast
+            }));
           }
         }
-      });
+      }
+
+      // 3. Content-based delta detection for any remaining added, modified, or deleted projects
+      if (Array.isArray(prevProjects)) {
+        const prevMap = new Map();
+        prevProjects.forEach(p => {
+          if (p && p.id) prevMap.set(String(p.id), p);
+        });
+        const newIds = new Set(newProjects.filter(p => p && p.id).map(p => String(p.id)));
+
+        // Detect deletions
+        prevProjects.forEach(prev => {
+          if (!prev || !prev.id) return;
+          const pid = String(prev.id);
+          if (handledIds.has(pid)) return;
+          if (!newIds.has(pid)) {
+            handledIds.add(pid);
+            ops.push(this.deleteProject(pid, { suppressErrorToast }));
+          }
+        });
+
+        // Detect additions and genuine content modifications (never triggered merely by object cloning)
+        newProjects.forEach(next => {
+          if (!next || !next.id) return;
+          const pid = String(next.id);
+          if (handledIds.has(pid)) return;
+          const prev = prevMap.get(pid);
+          if (!prev) {
+            handledIds.add(pid);
+            ops.push(this.syncProject(next, {
+              isNew: !this.isPersisted(pid),
+              suppressErrorToast
+            }));
+          } else if (hasProjectChanged(prev, next)) {
+            handledIds.add(pid);
+            ops.push(this.syncProject(next, {
+              isNew: false,
+              suppressErrorToast
+            }));
+          }
+        });
+      } else if (!meta?.projectId && !meta?.deletedProjectId) {
+        newProjects.forEach(next => {
+          if (!next || !next.id) return;
+          const pid = String(next.id);
+          if (handledIds.has(pid)) return;
+          handledIds.add(pid);
+          ops.push(this.syncProject(next, {
+            isNew: !this.isPersisted(pid),
+            suppressErrorToast
+          }));
+        });
+      }
+
+      if (ops.length === 0) {
+        return { ok: true, results: [] };
+      }
+
+      const results = await Promise.all(ops);
+      const failed = results.find(r => !r || !r.ok);
+      if (failed) {
+        return {
+          ok: false,
+          error: failed.error || failed.message || 'Failed to synchronize changes with MongoDB.',
+          status: failed.status,
+          results
+        };
+      }
+      return { ok: true, results };
     }
   };
+
+  function isBackendPersistenceRequired() {
+    return typeof authController !== 'undefined' && authController.isAuthenticated();
+  }
+
+  async function persistProjectsMutation(nextProjects, preMutationSnapshot, meta = {}) {
+    const effectiveMeta = {
+      ...meta,
+      suppressSyncErrorToast: meta.suppressSyncErrorToast !== undefined ? meta.suppressSyncErrorToast : true
+    };
+    const saveRes = Storage.saveProjects(nextProjects, effectiveMeta);
+    if (!saveRes.ok) {
+      return {
+        ok: false,
+        error: saveRes.error || 'Failed to save changes to local storage.',
+        localError: true
+      };
+    }
+
+    if (isBackendPersistenceRequired() && saveRes.syncPromise) {
+      const syncRes = await saveRes.syncPromise;
+      if (!syncRes || !syncRes.ok) {
+        const errMsg = (syncRes && syncRes.error) || 'Failed to save changes to MongoDB.';
+        const savedErr = State.projectsError || errMsg;
+        Storage.saveProjects(preMutationSnapshot, {
+          skipBackendSync: true,
+          suppressStorageErrorToast: true
+        });
+        State.projectsError = savedErr;
+        if (typeof updateSyncStatusIndicator === 'function') {
+          updateSyncStatusIndicator();
+        }
+        return {
+          ok: false,
+          error: errMsg,
+          backendError: true,
+          status: syncRes ? syncRes.status : 0
+        };
+      }
+    }
+
+    return { ok: true, saveRes };
+  }
 
   // ==========================================================================
   // DOM Elements Cache
@@ -3435,7 +3727,7 @@ import { initAuthUI } from './authUI.js';
     DOM.testplanModal.setAttribute('aria-hidden', 'true');
   }
 
-  function handleSaveTestPlanSubmit(e) {
+  async function handleSaveTestPlanSubmit(e) {
     e.preventDefault();
 
     const name = DOM.planNameInput ? DOM.planNameInput.value.trim() : '';
@@ -3444,10 +3736,12 @@ import { initAuthUI } from './authUI.js';
       return;
     }
 
-    const projects = Storage.getProjects();
+    const preMutationSnapshot = Storage.getProjects();
+    const projects = cloneProjectData(preMutationSnapshot);
     const project = projects.find(p => p.id === State.activePlanProjectId);
     if (!project) return;
 
+    const nowIso = new Date().toISOString();
     if (!project.testPlan) {
       project.testPlan = { id: 'plan_' + Date.now(), phases: [] };
     }
@@ -3457,11 +3751,15 @@ import { initAuthUI } from './authUI.js';
     project.testPlan.scope = DOM.planScopeInput ? DOM.planScopeInput.value.trim() : '';
     project.testPlan.description = DOM.planDescInput ? DOM.planDescInput.value.trim() : '';
     project.testPlan.notes = project.testPlan.description;
-    project.testPlan.updatedAt = new Date().toISOString();
-    project.updatedAt = new Date().toISOString();
+    project.testPlan.updatedAt = nowIso;
+    project.updatedAt = nowIso;
 
-    const saveRes = Storage.saveProjects(projects);
-    if (!saveRes.ok) {
+    const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+      projectId: project.id,
+      isNew: false
+    });
+    if (!persistRes.ok) {
+      showToast(persistRes.error || 'Failed to save test plan.', 'error');
       return;
     }
     Storage.addActivity('Updated test plan', name);
@@ -3471,7 +3769,8 @@ import { initAuthUI } from './authUI.js';
     renderTestPlansWorkspace();
     renderDashboard();
     if (State.currentView === 'project-details' && State.currentDetailProjectId === project.id) {
-      renderProjectDetailsData(project);
+      const updatedProj = Storage.getProjects().find(x => x.id === project.id);
+      if (updatedProj) renderProjectDetailsData(updatedProj);
     }
   }
 
@@ -3532,7 +3831,7 @@ import { initAuthUI } from './authUI.js';
     if (DOM.phaseErrorAlert) DOM.phaseErrorAlert.style.display = 'none';
   }
 
-  function handleSavePhaseSubmit(e) {
+  async function handleSavePhaseSubmit(e) {
     e.preventDefault();
 
     const phaseId = DOM.phaseIdInput ? DOM.phaseIdInput.value.trim() : '';
@@ -3545,7 +3844,8 @@ import { initAuthUI } from './authUI.js';
       return;
     }
 
-    const projects = Storage.getProjects();
+    const preMutationSnapshot = Storage.getProjects();
+    const projects = cloneProjectData(preMutationSnapshot);
     const project = projects.find(p => p.id === State.activePlanProjectId);
     if (!project) return;
 
@@ -3556,6 +3856,8 @@ import { initAuthUI } from './authUI.js';
       project.testPlan.phases = [];
     }
 
+    const nowIso = new Date().toISOString();
+
     if (phaseId) {
       // Edit Phase
       const phase = project.testPlan.phases.find(ph => ph.id === phaseId);
@@ -3563,19 +3865,18 @@ import { initAuthUI } from './authUI.js';
         showPhaseError('Phase not found.');
         return;
       }
-      const prevName = phase.name;
-      const prevDesc = phase.description;
       phase.name = name;
       phase.description = description;
+      project.testPlan.updatedAt = nowIso;
+      project.updatedAt = nowIso;
 
-      project.testPlan.updatedAt = new Date().toISOString();
-      project.updatedAt = new Date().toISOString();
-
-      const saveRes = Storage.saveProjects(projects);
-      if (!saveRes.ok) {
-        phase.name = prevName;
-        phase.description = prevDesc;
-        showPhaseError(saveRes.error || 'Failed to save phase to storage.');
+      const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+        projectId: project.id,
+        isNew: false,
+        suppressStorageErrorToast: true
+      });
+      if (!persistRes.ok) {
+        showPhaseError(persistRes.error || 'Failed to save phase.');
         return;
       }
 
@@ -3591,14 +3892,16 @@ import { initAuthUI } from './authUI.js';
         order: project.testPlan.phases.length
       };
       project.testPlan.phases.push(newPhase);
+      project.testPlan.updatedAt = nowIso;
+      project.updatedAt = nowIso;
 
-      project.testPlan.updatedAt = new Date().toISOString();
-      project.updatedAt = new Date().toISOString();
-
-      const saveRes = Storage.saveProjects(projects);
-      if (!saveRes.ok) {
-        project.testPlan.phases.pop();
-        showPhaseError(saveRes.error || 'Failed to save phase to storage.');
+      const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+        projectId: project.id,
+        isNew: false,
+        suppressStorageErrorToast: true
+      });
+      if (!persistRes.ok) {
+        showPhaseError(persistRes.error || 'Failed to save phase.');
         return;
       }
 
@@ -3613,12 +3916,14 @@ import { initAuthUI } from './authUI.js';
     renderTestExecutionWorkspace();
     renderReportsWorkspace();
     if (State.currentView === 'project-details' && State.currentDetailProjectId === project.id) {
-      renderProjectDetailsData(project);
+      const updatedProj = Storage.getProjects().find(x => x.id === project.id);
+      if (updatedProj) renderProjectDetailsData(updatedProj);
     }
   }
 
-  function movePhase(projectId, phaseId, direction) {
-    const projects = Storage.getProjects();
+  async function movePhase(projectId, phaseId, direction) {
+    const preMutationSnapshot = Storage.getProjects();
+    const projects = cloneProjectData(preMutationSnapshot);
     const project = projects.find(p => p.id === projectId);
     if (!project || !project.testPlan?.phases) return;
 
@@ -3631,24 +3936,32 @@ import { initAuthUI } from './authUI.js';
     const targetIdx = idx + direction;
     if (targetIdx < 0 || targetIdx >= phases.length) return;
 
-    // Swap orders
-    const prevIdxOrder = phases[idx].order;
-    const prevTargetOrder = phases[targetIdx].order;
-    phases[idx].order = prevTargetOrder;
-    phases[targetIdx].order = prevIdxOrder;
+    // Swap phase positions and assign deterministic sequential order values
+    const moved = phases[idx];
+    phases[idx] = phases[targetIdx];
+    phases[targetIdx] = moved;
+    phases.forEach((ph, i) => {
+      ph.order = i;
+    });
 
-    project.testPlan.updatedAt = new Date().toISOString();
-    const saveRes = Storage.saveProjects(projects);
-    if (!saveRes.ok) {
-      phases[idx].order = prevIdxOrder;
-      phases[targetIdx].order = prevTargetOrder;
+    const nowIso = new Date().toISOString();
+    project.testPlan.updatedAt = nowIso;
+    project.updatedAt = nowIso;
+
+    const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+      projectId: project.id,
+      isNew: false
+    });
+    if (!persistRes.ok) {
+      showToast(persistRes.error || 'Failed to reorder testing phases.', 'error');
       return;
     }
 
     renderTestPlansWorkspace();
     renderTestExecutionWorkspace();
     if (State.currentView === 'project-details' && State.currentDetailProjectId === project.id) {
-      renderProjectDetailsData(project);
+      const updatedProj = Storage.getProjects().find(x => x.id === project.id);
+      if (updatedProj) renderProjectDetailsData(updatedProj);
     }
   }
 
@@ -3744,7 +4057,7 @@ import { initAuthUI } from './authUI.js';
     if (DOM.suiteErrorAlert) DOM.suiteErrorAlert.style.display = 'none';
   }
 
-  function handleSaveSuiteSubmit(e) {
+  async function handleSaveSuiteSubmit(e) {
     e.preventDefault();
 
     const suiteId = DOM.suiteIdInput ? DOM.suiteIdInput.value.trim() : '';
@@ -3772,13 +4085,16 @@ import { initAuthUI } from './authUI.js';
       return;
     }
 
-    const projects = Storage.getProjects();
+    const preMutationSnapshot = Storage.getProjects();
+    const projects = cloneProjectData(preMutationSnapshot);
     const project = projects.find(p => p.id === State.activePlanProjectId);
     if (!project) return;
 
     if (!Array.isArray(project.testSuites)) {
       project.testSuites = [];
     }
+
+    const nowIso = new Date().toISOString();
 
     if (suiteId) {
       // Edit Suite (Preserve existing testCases array!)
@@ -3787,27 +4103,22 @@ import { initAuthUI } from './authUI.js';
         showSuiteError('Test suite could not be found.');
         return;
       }
-      const prevSuiteState = {
-        phaseId: suite.phaseId,
-        name: suite.name,
-        category: suite.category,
-        tags: [...(suite.tags || [])],
-        description: suite.description,
-        updatedAt: suite.updatedAt
-      };
 
       suite.phaseId = phaseId;
       suite.name = name;
       suite.category = category;
       suite.tags = tags;
       suite.description = description;
-      suite.updatedAt = new Date().toISOString();
-      project.updatedAt = new Date().toISOString();
+      suite.updatedAt = nowIso;
+      project.updatedAt = nowIso;
 
-      const saveRes = Storage.saveProjects(projects);
-      if (!saveRes.ok) {
-        Object.assign(suite, prevSuiteState);
-        showSuiteError(saveRes.error || 'Failed to save suite to storage.');
+      const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+        projectId: project.id,
+        isNew: false,
+        suppressStorageErrorToast: true
+      });
+      if (!persistRes.ok) {
+        showSuiteError(persistRes.error || 'Failed to save suite.');
         return;
       }
 
@@ -3824,17 +4135,20 @@ import { initAuthUI } from './authUI.js';
         tags: tags,
         description: description,
         order: project.testSuites.length,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        createdAt: nowIso,
+        updatedAt: nowIso,
         testCases: []
       };
       project.testSuites.push(newSuite);
-      project.updatedAt = new Date().toISOString();
+      project.updatedAt = nowIso;
 
-      const saveRes = Storage.saveProjects(projects);
-      if (!saveRes.ok) {
-        project.testSuites.pop();
-        showSuiteError(saveRes.error || 'Failed to save suite to storage.');
+      const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+        projectId: project.id,
+        isNew: false,
+        suppressStorageErrorToast: true
+      });
+      if (!persistRes.ok) {
+        showSuiteError(persistRes.error || 'Failed to save suite.');
         return;
       }
 
@@ -3850,7 +4164,8 @@ import { initAuthUI } from './authUI.js';
     renderReportsWorkspace();
 
     if (State.currentView === 'project-details' && State.currentDetailProjectId === project.id) {
-      renderProjectDetailsData(project);
+      const updatedProj = Storage.getProjects().find(x => x.id === project.id);
+      if (updatedProj) renderProjectDetailsData(updatedProj);
     }
   }
 
@@ -4052,7 +4367,7 @@ import { initAuthUI } from './authUI.js';
     });
   }
 
-  function handleSaveTestCaseSubmit(e) {
+  async function handleSaveTestCaseSubmit(e) {
     e.preventDefault();
 
     const caseId = DOM.caseIdInput ? DOM.caseIdInput.value.trim() : '';
@@ -4093,7 +4408,8 @@ import { initAuthUI } from './authUI.js';
       return;
     }
 
-    const projects = Storage.getProjects();
+    const preMutationSnapshot = Storage.getProjects();
+    const projects = cloneProjectData(preMutationSnapshot);
     const project = projects.find(p => p.id === State.activePlanProjectId);
     if (!project) return;
 
@@ -4107,6 +4423,8 @@ import { initAuthUI } from './authUI.js';
       suite.testCases = [];
     }
 
+    const nowIso = new Date().toISOString();
+
     if (caseId) {
       // Edit Case
       const tc = suite.testCases.find(c => c.id === caseId);
@@ -4114,18 +4432,6 @@ import { initAuthUI } from './authUI.js';
         showCaseError('Test case not found.');
         return;
       }
-
-      const prevCaseState = {
-        title: tc.title,
-        priority: tc.priority,
-        category: tc.category,
-        tags: [...(tc.tags || [])],
-        description: tc.description,
-        preconditions: tc.preconditions,
-        steps: [...(tc.steps || [])],
-        expectedResult: tc.expectedResult,
-        updatedAt: tc.updatedAt
-      };
 
       tc.title = title;
       tc.priority = priority;
@@ -4135,14 +4441,17 @@ import { initAuthUI } from './authUI.js';
       tc.preconditions = preconditions;
       tc.steps = cleanedSteps;
       tc.expectedResult = expectedResult;
-      tc.updatedAt = new Date().toISOString();
-      suite.updatedAt = new Date().toISOString();
-      project.updatedAt = new Date().toISOString();
+      tc.updatedAt = nowIso;
+      suite.updatedAt = nowIso;
+      project.updatedAt = nowIso;
 
-      const saveRes = Storage.saveProjects(projects);
-      if (!saveRes.ok) {
-        Object.assign(tc, prevCaseState);
-        showCaseError(saveRes.error || 'Failed to save test case to storage.');
+      const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+        projectId: project.id,
+        isNew: false,
+        suppressStorageErrorToast: true
+      });
+      if (!persistRes.ok) {
+        showCaseError(persistRes.error || 'Failed to save test case.');
         return;
       }
 
@@ -4164,18 +4473,21 @@ import { initAuthUI } from './authUI.js';
         steps: cleanedSteps,
         expectedResult: expectedResult,
         status: 'Not Run',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
+        createdAt: nowIso,
+        updatedAt: nowIso
       };
 
       suite.testCases.push(newCase);
-      suite.updatedAt = new Date().toISOString();
-      project.updatedAt = new Date().toISOString();
+      suite.updatedAt = nowIso;
+      project.updatedAt = nowIso;
 
-      const saveRes = Storage.saveProjects(projects);
-      if (!saveRes.ok) {
-        suite.testCases.pop();
-        showCaseError(saveRes.error || 'Failed to save test case to storage.');
+      const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+        projectId: project.id,
+        isNew: false,
+        suppressStorageErrorToast: true
+      });
+      if (!persistRes.ok) {
+        showCaseError(persistRes.error || 'Failed to save test case.');
         return;
       }
 
@@ -4191,7 +4503,8 @@ import { initAuthUI } from './authUI.js';
     renderReportsWorkspace();
 
     if (State.currentView === 'project-details' && State.currentDetailProjectId === project.id) {
-      renderProjectDetailsData(project);
+      const updatedProj = Storage.getProjects().find(x => x.id === project.id);
+      if (updatedProj) renderProjectDetailsData(updatedProj);
     }
   }
 
@@ -4213,8 +4526,9 @@ import { initAuthUI } from './authUI.js';
     return `TC-${String(nextNum).padStart(3, '0')}`;
   }
 
-  function duplicateTestCase(projectId, suiteId, caseId) {
-    const projects = Storage.getProjects();
+  async function duplicateTestCase(projectId, suiteId, caseId) {
+    const preMutationSnapshot = Storage.getProjects();
+    const projects = cloneProjectData(preMutationSnapshot);
     const project = projects.find(p => p.id === projectId);
     if (!project) return;
 
@@ -4224,14 +4538,20 @@ import { initAuthUI } from './authUI.js';
     const original = (suite.testCases || []).find(c => c.id === caseId);
     if (!original) return;
 
+    const nowIso = new Date().toISOString();
     const newId = generateUniqueCaseId(projects);
     const cloned = {
-      ...original,
+      ...cloneProjectData(original),
       id: newId,
       title: `${original.title} (Copy)`,
-      steps: original.steps.map((st, idx) => ({ ...st, id: 'step_' + Date.now() + '_' + idx })),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      steps: (original.steps || []).map((st, idx) => ({ ...st, id: 'step_' + Date.now() + '_' + idx })),
+      status: 'Not Run',
+      lastExecutedAt: null,
+      lastExecutionId: null,
+      executions: [],
+      defectIds: [],
+      createdAt: nowIso,
+      updatedAt: nowIso
     };
 
     const origIdx = suite.testCases.findIndex(c => c.id === caseId);
@@ -4241,15 +4561,15 @@ import { initAuthUI } from './authUI.js';
       suite.testCases.push(cloned);
     }
 
-    suite.updatedAt = new Date().toISOString();
-    project.updatedAt = new Date().toISOString();
+    suite.updatedAt = nowIso;
+    project.updatedAt = nowIso;
 
-    const saveRes = Storage.saveProjects(projects);
-    if (!saveRes.ok) {
-      const idxToRemove = suite.testCases.findIndex(c => c.id === newId);
-      if (idxToRemove !== -1) {
-        suite.testCases.splice(idxToRemove, 1);
-      }
+    const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+      projectId: project.id,
+      isNew: false
+    });
+    if (!persistRes.ok) {
+      showToast(persistRes.error || 'Failed to duplicate test case.', 'error');
       return;
     }
 
@@ -4258,6 +4578,9 @@ import { initAuthUI } from './authUI.js';
 
     renderTestPlansWorkspace();
     renderDashboard();
+    renderMyProjects();
+    renderTestExecutionWorkspace();
+    renderReportsWorkspace();
   }
 
   // ==========================================================================
@@ -5108,7 +5431,7 @@ import { initAuthUI } from './authUI.js';
     }
   }
 
-  function handleSaveExecutionSubmit(e) {
+  async function handleSaveExecutionSubmit(e) {
     e.preventDefault();
 
     const caseId = DOM.execCaseIdInput ? DOM.execCaseIdInput.value.trim() : '';
@@ -5139,7 +5462,8 @@ import { initAuthUI } from './authUI.js';
       return;
     }
 
-    const projects = Storage.getProjects();
+    const preMutationSnapshot = Storage.getProjects();
+    const projects = cloneProjectData(preMutationSnapshot);
     const project = projects.find(p => p.id === projectId);
     if (!project) return;
 
@@ -5163,6 +5487,8 @@ import { initAuthUI } from './authUI.js';
     if (tester) {
       State.cachedTesterName = tester;
     }
+
+    const nowIso = new Date().toISOString();
 
     // Optional Quick Defect Creation on Fail
     let defectId = null;
@@ -5195,8 +5521,8 @@ import { initAuthUI } from './authUI.js';
         expectedResult: targetCase.expectedResult,
         actualResult: actualResult,
         externalIssueUrl: defectUrl,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
+        createdAt: nowIso,
+        updatedAt: nowIso
       };
 
       if (!Array.isArray(project.defects)) project.defects = [];
@@ -5237,16 +5563,8 @@ import { initAuthUI } from './authUI.js';
         note: st.note
       })),
       defectIds: defectId ? [defectId] : [],
-      executedAt: new Date().toISOString()
+      executedAt: nowIso
     };
-
-    const prevCaseStatus = targetCase.status;
-    const prevLastExecutedAt = targetCase.lastExecutedAt;
-    const prevLastExecutionId = targetCase.lastExecutionId;
-    const prevCaseExecs = Array.isArray(targetCase.executions) ? [...targetCase.executions] : [];
-    const prevCaseDefects = Array.isArray(targetCase.defectIds) ? [...targetCase.defectIds] : [];
-    const prevProjectExecs = Array.isArray(project.executions) ? [...project.executions] : [];
-    const prevProjectDefects = Array.isArray(project.defects) ? [...project.defects] : [];
 
     if (!Array.isArray(project.executions)) project.executions = [];
     project.executions.unshift(executionRecord);
@@ -5262,16 +5580,13 @@ import { initAuthUI } from './authUI.js';
     project.updatedAt = executionRecord.executedAt;
     targetSuite.updatedAt = executionRecord.executedAt;
 
-    const saveRes = Storage.saveProjects(projects);
-    if (!saveRes.ok) {
-      project.executions = prevProjectExecs;
-      project.defects = prevProjectDefects;
-      targetCase.status = prevCaseStatus;
-      targetCase.lastExecutedAt = prevLastExecutedAt;
-      targetCase.lastExecutionId = prevLastExecutionId;
-      targetCase.executions = prevCaseExecs;
-      targetCase.defectIds = prevCaseDefects;
-      showExecError(saveRes.error || 'Failed to save test execution to storage.');
+    const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+      projectId: project.id,
+      isNew: false,
+      suppressStorageErrorToast: true
+    });
+    if (!persistRes.ok) {
+      showExecError(persistRes.error || 'Failed to save test execution.');
       return;
     }
 
@@ -5296,7 +5611,8 @@ import { initAuthUI } from './authUI.js';
     renderReportsWorkspace();
 
     if (State.currentView === 'project-details' && State.currentDetailProjectId === project.id) {
-      renderProjectDetailsData(project);
+      const updatedProj = Storage.getProjects().find(x => x.id === project.id);
+      if (updatedProj) renderProjectDetailsData(updatedProj);
     }
   }
 
@@ -5936,7 +6252,7 @@ import { initAuthUI } from './authUI.js';
     snapshotArray.forEach(item => targetArray.push(item));
   }
 
-  function handleSaveDefectSubmit(e) {
+  async function handleSaveDefectSubmit(e) {
     e.preventDefault();
 
     const defectId = DOM.defectIdInput ? DOM.defectIdInput.value.trim() : '';
@@ -5963,7 +6279,8 @@ import { initAuthUI } from './authUI.js';
       return;
     }
 
-    const projects = Storage.getProjects();
+    const preMutationSnapshot = Storage.getProjects();
+    const projects = cloneProjectData(preMutationSnapshot);
     const targetProject = projects.find(p => p.id === targetProjectId);
     if (!targetProject) {
       showDefectError('Selected project does not exist.');
@@ -5980,8 +6297,6 @@ import { initAuthUI } from './authUI.js';
       }
     }
 
-    // Capture full pre-mutation snapshot for atomic rollback if storage write fails
-    const preMutationSnapshot = JSON.parse(JSON.stringify(projects));
     const nowIso = new Date().toISOString();
 
     if (!Array.isArray(targetProject.defects)) targetProject.defects = [];
@@ -6002,15 +6317,21 @@ import { initAuthUI } from './authUI.js';
 
       // 1. Remove stale defectId from any previously linked Test Cases across projects
       projects.forEach(p => {
+        let modifiedOtherProject = false;
         (p.testSuites || []).forEach(s => {
           (s.testCases || []).forEach(tc => {
             if (!Array.isArray(tc.defectIds)) return;
             const isNewTargetCase = (p.id === targetProject.id && linkedCaseId && tc.id === linkedCaseId);
             if (!isNewTargetCase && tc.defectIds.includes(defectId)) {
               tc.defectIds = tc.defectIds.filter(id => id !== defectId);
+              tc.updatedAt = nowIso;
+              modifiedOtherProject = true;
             }
           });
         });
+        if (modifiedOtherProject) {
+          p.updatedAt = nowIso;
+        }
       });
 
       // 2. If moving defect to a different project, transfer record cleanly without duplication
@@ -6052,13 +6373,17 @@ import { initAuthUI } from './authUI.js';
         if (!targetCaseCtx.testCase.defectIds.includes(defectId)) {
           targetCaseCtx.testCase.defectIds.unshift(defectId);
         }
+        targetCaseCtx.testCase.updatedAt = nowIso;
       }
 
       targetProject.updatedAt = nowIso;
-      const saveRes = Storage.saveProjects(projects);
-      if (!saveRes.ok) {
-        restoreProjectsInPlace(projects, preMutationSnapshot);
-        showDefectError(saveRes.error || 'Failed to save defect to storage.');
+      const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+        projectId: targetProject.id,
+        isNew: false,
+        suppressStorageErrorToast: true
+      });
+      if (!persistRes.ok) {
+        showDefectError(persistRes.error || 'Failed to save defect.');
         return;
       }
 
@@ -6096,13 +6421,17 @@ import { initAuthUI } from './authUI.js';
         if (!targetCaseCtx.testCase.defectIds.includes(newId)) {
           targetCaseCtx.testCase.defectIds.unshift(newId);
         }
+        targetCaseCtx.testCase.updatedAt = nowIso;
       }
 
       targetProject.updatedAt = nowIso;
-      const saveRes = Storage.saveProjects(projects);
-      if (!saveRes.ok) {
-        restoreProjectsInPlace(projects, preMutationSnapshot);
-        showDefectError(saveRes.error || 'Failed to save defect to storage.');
+      const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+        projectId: targetProject.id,
+        isNew: false,
+        suppressStorageErrorToast: true
+      });
+      if (!persistRes.ok) {
+        showDefectError(persistRes.error || 'Failed to save defect.');
         return;
       }
 
@@ -6119,6 +6448,7 @@ import { initAuthUI } from './authUI.js';
 
     renderDefectsWorkspace();
     renderDashboard();
+    renderMyProjects();
     renderTestExecutionWorkspace();
     renderReportsWorkspace();
 
@@ -6256,8 +6586,9 @@ import { initAuthUI } from './authUI.js';
     }
   }
 
-  function updateDefectQuickStatus(projectId, defectId, newStatus) {
-    const projects = Storage.getProjects();
+  async function updateDefectQuickStatus(projectId, defectId, newStatus) {
+    const preMutationSnapshot = Storage.getProjects();
+    const projects = cloneProjectData(preMutationSnapshot);
     const project = (projectId && projectId !== 'ALL')
       ? projects.find(p => p.id === projectId && (p.defects || []).some(d => d.id === defectId))
       : projects.find(p => (p.defects || []).some(d => d.id === defectId));
@@ -6272,9 +6603,15 @@ import { initAuthUI } from './authUI.js';
     df.updatedAt = new Date().toISOString();
     project.updatedAt = df.updatedAt;
 
-    const saveRes = Storage.saveProjects(projects);
-    if (!saveRes.ok) {
-      df.status = oldStatus;
+    const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+      projectId: project.id,
+      isNew: false
+    });
+    if (!persistRes.ok) {
+      if (DOM.viewDefectStatusSelect) {
+        DOM.viewDefectStatusSelect.value = oldStatus;
+      }
+      showToast(persistRes.error || 'Failed to update defect status.', 'error');
       return;
     }
     Storage.addActivity('Updated defect status', `${df.id} (${oldStatus} → ${newStatus})`);
@@ -6287,10 +6624,12 @@ import { initAuthUI } from './authUI.js';
 
     renderDefectsWorkspace();
     renderDashboard();
+    renderMyProjects();
     renderReportsWorkspace();
 
     if (State.currentView === 'project-details' && State.currentDetailProjectId === project.id) {
-      renderProjectDetailsData(project);
+      const updatedProj = Storage.getProjects().find(x => x.id === project.id);
+      if (updatedProj) renderProjectDetailsData(updatedProj);
     }
   }
   function requestUniversalDelete(type, targetId, parentId) {
@@ -6411,7 +6750,7 @@ import { initAuthUI } from './authUI.js';
     }
   }
 
-  function executeUniversalDelete() {
+  async function executeUniversalDelete() {
     if (!State.pendingConfirm) return;
     if (DOM.deleteConfirmBtn) {
       DOM.deleteConfirmBtn.disabled = true;
@@ -6420,195 +6759,229 @@ import { initAuthUI } from './authUI.js';
     try {
       const { type, targetId, parentId } = State.pendingConfirm;
 
-      const projects = Storage.getProjects();
+      const preMutationSnapshot = Storage.getProjects();
+      const projects = cloneProjectData(preMutationSnapshot);
+      const nowIso = new Date().toISOString();
 
-    if (type === 'project') {
-      const targetProj = projects.find(p => p.id === targetId);
-      if (!targetProj) {
-        console.error('Qavora: Project deletion failed - project ID not found in storage:', targetId);
-        showToast('Failed to delete project: Project not found.', 'error');
-        closeDeleteModal();
-        return;
-      }
+      if (type === 'project') {
+        const targetProj = projects.find(p => p.id === targetId);
+        if (!targetProj) {
+          console.error('Qavora: Project deletion failed - project ID not found in storage:', targetId);
+          showToast('Failed to delete project: Project not found.', 'error');
+          closeDeleteModal();
+          return;
+        }
 
-      const deletedDefectIds = new Set((targetProj.defects || []).map(d => d.id));
-      const updated = projects.filter(p => p.id !== targetId);
-      if (deletedDefectIds.size > 0) {
-        updated.forEach(p => {
-          (p.executions || []).forEach(ex => {
-            if (Array.isArray(ex.defectIds)) ex.defectIds = ex.defectIds.filter(id => !deletedDefectIds.has(id));
-          });
-          (p.testSuites || []).forEach(s => {
-            (s.testCases || []).forEach(tc => {
-              if (Array.isArray(tc.defectIds)) tc.defectIds = tc.defectIds.filter(id => !deletedDefectIds.has(id));
+        const deletedDefectIds = new Set((targetProj.defects || []).map(d => d.id));
+        const updated = projects.filter(p => p.id !== targetId);
+        if (deletedDefectIds.size > 0) {
+          updated.forEach(p => {
+            let unlinked = false;
+            (p.executions || []).forEach(ex => {
+              if (Array.isArray(ex.defectIds) && ex.defectIds.some(id => deletedDefectIds.has(id))) {
+                ex.defectIds = ex.defectIds.filter(id => !deletedDefectIds.has(id));
+                unlinked = true;
+              }
             });
+            (p.testSuites || []).forEach(s => {
+              (s.testCases || []).forEach(tc => {
+                if (Array.isArray(tc.defectIds) && tc.defectIds.some(id => deletedDefectIds.has(id))) {
+                  tc.defectIds = tc.defectIds.filter(id => !deletedDefectIds.has(id));
+                  unlinked = true;
+                }
+              });
+            });
+            if (unlinked) {
+              p.updatedAt = nowIso;
+            }
           });
+        }
+        const persistRes = await persistProjectsMutation(updated, preMutationSnapshot, {
+          deletedProjectId: targetId
         });
-      }
-      const saveRes = Storage.saveProjects(updated, { deletedProjectId: targetId });
-      if (!saveRes.ok) {
-        return;
-      }
-      if (typeof ProjectsPersistence !== 'undefined') {
-        ProjectsPersistence.deleteProject(targetId);
-      }
-      Storage.addActivity('Deleted project', targetProj.name || targetId);
-      showToast(`Project deleted.`, 'info');
-
-      // Reliably clear active-project references across all workspaces
-      if (State.currentDetailProjectId === targetId) {
-        State.currentDetailProjectId = null;
-        if (State.currentView === 'project-details') {
-          switchView('projects');
-        }
-      }
-
-      if (State.activePlanProjectId === targetId) {
-        State.activePlanProjectId = updated.length > 0 ? updated[0].id : null;
-        State.activeSuiteId = null;
-      }
-
-      if (State.activeExecProjectId === targetId) {
-        State.activeExecProjectId = updated.length > 0 ? updated[0].id : null;
-        State.execPhaseFilter = 'ALL';
-        State.execSuiteFilter = 'ALL';
-      }
-
-      if (State.activeDefectsProjectId === targetId) {
-        State.activeDefectsProjectId = 'ALL';
-      }
-
-      if (State.reportsProjectId === targetId) {
-        State.reportsProjectId = 'ALL';
-      }
-
-      if (State.modalExecContext && State.modalExecContext.projectId === targetId) {
-        State.modalExecContext = null;
-        if (typeof closeExecutionModal === 'function') {
-          closeExecutionModal();
-        }
-      }
-    } else if (type === 'phase') {
-      const project = projects.find(p => p.id === parentId);
-      if (project && project.testPlan?.phases) {
-        const ph = project.testPlan.phases.find(x => x.id === targetId);
-        project.testPlan.phases = project.testPlan.phases.filter(x => x.id !== targetId);
-        // Identify deleted test case IDs from removed suites
-        const removedSuites = (project.testSuites || []).filter(s => s.phaseId === targetId);
-        const deletedCaseIds = new Set();
-        removedSuites.forEach(s => (s.testCases || []).forEach(c => deletedCaseIds.add(c.id)));
-        project.testSuites = (project.testSuites || []).filter(s => s.phaseId !== targetId);
-        // Cleanly unlink from defects
-        if (Array.isArray(project.defects)) {
-          project.defects.forEach(df => {
-            if (deletedCaseIds.has(df.testCaseId)) {
-              df.testCaseId = '';
-            }
-          });
-        }
-        project.updatedAt = new Date().toISOString();
-
-        const saveRes = Storage.saveProjects(projects);
-        if (!saveRes.ok) {
+        if (!persistRes.ok) {
+          showToast(persistRes.error || 'Failed to delete project.', 'error');
           return;
         }
-        Storage.addActivity('Deleted testing phase', ph ? ph.name : targetId);
-        showToast(`Phase deleted.`, 'info');
-      }
-    } else if (type === 'suite') {
-      const project = projects.find(p => p.id === parentId);
-      if (project && project.testSuites) {
-        const suite = project.testSuites.find(s => s.id === targetId);
-        const deletedCaseIds = new Set((suite?.testCases || []).map(c => c.id));
-        project.testSuites = project.testSuites.filter(s => s.id !== targetId);
-        // Cleanly unlink from defects
-        if (Array.isArray(project.defects)) {
-          project.defects.forEach(df => {
-            if (deletedCaseIds.has(df.testCaseId)) {
-              df.testCaseId = '';
-            }
-          });
-        }
-        project.updatedAt = new Date().toISOString();
+        Storage.addActivity('Deleted project', targetProj.name || targetId);
+        showToast(`Project deleted.`, 'info');
 
-        const saveRes = Storage.saveProjects(projects);
-        if (!saveRes.ok) {
-          return;
+        // Reliably clear active-project references across all workspaces
+        if (State.currentDetailProjectId === targetId) {
+          State.currentDetailProjectId = null;
+          if (State.currentView === 'project-details') {
+            switchView('projects');
+          }
         }
-        Storage.addActivity('Deleted test suite', suite ? suite.name : targetId);
-        showToast(`Test suite deleted.`, 'info');
 
-        if (State.activeSuiteId === targetId) {
+        if (State.activePlanProjectId === targetId) {
+          State.activePlanProjectId = updated.length > 0 ? updated[0].id : null;
           State.activeSuiteId = null;
         }
-      }
-    } else if (type === 'case') {
-      const project = projects.find(p => (p.testSuites || []).some(s => s.id === parentId)) || projects.find(p => p.id === State.activePlanProjectId);
-      const suite = (project?.testSuites || []).find(s => s.id === parentId);
-      if (suite && suite.testCases) {
-        const tc = suite.testCases.find(c => c.id === targetId);
-        suite.testCases = suite.testCases.filter(c => c.id !== targetId);
-        suite.updatedAt = new Date().toISOString();
-        if (project) {
-          project.updatedAt = new Date().toISOString();
-          // Cleanly unlink from defects
+
+        if (State.activeExecProjectId === targetId) {
+          State.activeExecProjectId = updated.length > 0 ? updated[0].id : null;
+          State.execPhaseFilter = 'ALL';
+          State.execSuiteFilter = 'ALL';
+        }
+
+        if (State.activeDefectsProjectId === targetId) {
+          State.activeDefectsProjectId = 'ALL';
+        }
+
+        if (State.reportsProjectId === targetId) {
+          State.reportsProjectId = 'ALL';
+        }
+
+        if (State.modalExecContext && State.modalExecContext.projectId === targetId) {
+          State.modalExecContext = null;
+          if (typeof closeExecutionModal === 'function') {
+            closeExecutionModal();
+          }
+        }
+      } else if (type === 'phase') {
+        const project = projects.find(p => p.id === parentId);
+        if (project && project.testPlan?.phases) {
+          const ph = project.testPlan.phases.find(x => x.id === targetId);
+          project.testPlan.phases = project.testPlan.phases.filter(x => x.id !== targetId);
+          const removedSuites = (project.testSuites || []).filter(s => s.phaseId === targetId);
+          const deletedCaseIds = new Set();
+          removedSuites.forEach(s => (s.testCases || []).forEach(c => deletedCaseIds.add(c.id)));
+          project.testSuites = (project.testSuites || []).filter(s => s.phaseId !== targetId);
           if (Array.isArray(project.defects)) {
             project.defects.forEach(df => {
-              if (df.testCaseId === targetId) {
+              if (deletedCaseIds.has(df.testCaseId)) {
                 df.testCaseId = '';
               }
             });
           }
-        }
+          project.testPlan.updatedAt = nowIso;
+          project.updatedAt = nowIso;
 
-        const saveRes = Storage.saveProjects(projects);
-        if (!saveRes.ok) {
-          return;
-        }
-        Storage.addActivity('Deleted test case', tc ? tc.id : targetId);
-        showToast(`Test case deleted.`, 'info');
-      }
-    } else if (type === 'defect') {
-      const project = (parentId && parentId !== 'ALL')
-        ? projects.find(p => p.id === parentId && (p.defects || []).some(d => d.id === targetId))
-        : projects.find(p => (p.defects || []).some(d => d.id === targetId));
-      if (project && project.defects) {
-        const df = project.defects.find(d => d.id === targetId);
-        project.defects = project.defects.filter(d => d.id !== targetId);
-        // Cleanly unlink from all executions and test cases across projects
-        projects.forEach(p => {
-          (p.executions || []).forEach(ex => {
-            if (Array.isArray(ex.defectIds)) ex.defectIds = ex.defectIds.filter(id => id !== targetId);
+          const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+            projectId: project.id,
+            isNew: false
           });
-          (p.testSuites || []).forEach(s => {
-            (s.testCases || []).forEach(tc => {
-              if (Array.isArray(tc.defectIds)) tc.defectIds = tc.defectIds.filter(id => id !== targetId);
+          if (!persistRes.ok) {
+            showToast(persistRes.error || 'Failed to delete testing phase.', 'error');
+            return;
+          }
+          Storage.addActivity('Deleted testing phase', ph ? ph.name : targetId);
+          showToast(`Phase deleted.`, 'info');
+        }
+      } else if (type === 'suite') {
+        const project = projects.find(p => p.id === parentId);
+        if (project && project.testSuites) {
+          const suite = project.testSuites.find(s => s.id === targetId);
+          const deletedCaseIds = new Set((suite?.testCases || []).map(c => c.id));
+          project.testSuites = project.testSuites.filter(s => s.id !== targetId);
+          if (Array.isArray(project.defects)) {
+            project.defects.forEach(df => {
+              if (deletedCaseIds.has(df.testCaseId)) {
+                df.testCaseId = '';
+              }
             });
+          }
+          project.updatedAt = nowIso;
+
+          const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+            projectId: project.id,
+            isNew: false
           });
-        });
-        project.updatedAt = new Date().toISOString();
+          if (!persistRes.ok) {
+            showToast(persistRes.error || 'Failed to delete test suite.', 'error');
+            return;
+          }
+          Storage.addActivity('Deleted test suite', suite ? suite.name : targetId);
+          showToast(`Test suite deleted.`, 'info');
 
-        const saveRes = Storage.saveProjects(projects);
-        if (!saveRes.ok) {
-          return;
+          if (State.activeSuiteId === targetId) {
+            State.activeSuiteId = null;
+          }
         }
-        Storage.addActivity('Deleted defect', df ? `${df.id} (${df.title})` : targetId);
-        showToast(`Defect deleted.`, 'info');
+      } else if (type === 'case') {
+        const project = projects.find(p => (p.testSuites || []).some(s => s.id === parentId)) || projects.find(p => p.id === State.activePlanProjectId);
+        const suite = (project?.testSuites || []).find(s => s.id === parentId);
+        if (suite && suite.testCases) {
+          const tc = suite.testCases.find(c => c.id === targetId);
+          suite.testCases = suite.testCases.filter(c => c.id !== targetId);
+          suite.updatedAt = nowIso;
+          if (project) {
+            project.updatedAt = nowIso;
+            if (Array.isArray(project.defects)) {
+              project.defects.forEach(df => {
+                if (df.testCaseId === targetId) {
+                  df.testCaseId = '';
+                }
+              });
+            }
+          }
+
+          const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+            projectId: project ? project.id : undefined,
+            isNew: false
+          });
+          if (!persistRes.ok) {
+            showToast(persistRes.error || 'Failed to delete test case.', 'error');
+            return;
+          }
+          Storage.addActivity('Deleted test case', tc ? tc.id : targetId);
+          showToast(`Test case deleted.`, 'info');
+        }
+      } else if (type === 'defect') {
+        const project = (parentId && parentId !== 'ALL')
+          ? projects.find(p => p.id === parentId && (p.defects || []).some(d => d.id === targetId))
+          : projects.find(p => (p.defects || []).some(d => d.id === targetId));
+        if (project && project.defects) {
+          const df = project.defects.find(d => d.id === targetId);
+          project.defects = project.defects.filter(d => d.id !== targetId);
+          projects.forEach(p => {
+            let unlinked = false;
+            (p.executions || []).forEach(ex => {
+              if (Array.isArray(ex.defectIds) && ex.defectIds.includes(targetId)) {
+                ex.defectIds = ex.defectIds.filter(id => id !== targetId);
+                unlinked = true;
+              }
+            });
+            (p.testSuites || []).forEach(s => {
+              (s.testCases || []).forEach(tc => {
+                if (Array.isArray(tc.defectIds) && tc.defectIds.includes(targetId)) {
+                  tc.defectIds = tc.defectIds.filter(id => id !== targetId);
+                  unlinked = true;
+                }
+              });
+            });
+            if (unlinked) {
+              p.updatedAt = nowIso;
+            }
+          });
+          project.updatedAt = nowIso;
+
+          const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+            projectId: project.id,
+            isNew: false
+          });
+          if (!persistRes.ok) {
+            showToast(persistRes.error || 'Failed to delete defect.', 'error');
+            return;
+          }
+          Storage.addActivity('Deleted defect', df ? `${df.id} (${df.title})` : targetId);
+          showToast(`Defect deleted.`, 'info');
+        }
       }
-    }
 
-    closeDeleteModal();
-    renderDashboard();
-    renderMyProjects();
-    renderTestPlansWorkspace();
-    renderTestExecutionWorkspace();
-    renderDefectsWorkspace();
-    renderReportsWorkspace();
+      closeDeleteModal();
+      renderDashboard();
+      renderMyProjects();
+      renderTestPlansWorkspace();
+      renderTestExecutionWorkspace();
+      renderDefectsWorkspace();
+      renderReportsWorkspace();
 
-    if (State.currentView === 'project-details' && State.currentDetailProjectId) {
-      const p = Storage.getProjects().find(x => x.id === State.currentDetailProjectId);
-      if (p) renderProjectDetailsData(p);
-    }
+      if (State.currentView === 'project-details' && State.currentDetailProjectId) {
+        const p = Storage.getProjects().find(x => x.id === State.currentDetailProjectId);
+        if (p) renderProjectDetailsData(p);
+      }
     } finally {
       if (DOM.deleteConfirmBtn) {
         DOM.deleteConfirmBtn.disabled = false;
@@ -6673,8 +7046,11 @@ import { initAuthUI } from './authUI.js';
     if (DOM.modalErrorAlert) DOM.modalErrorAlert.style.display = 'none';
   }
 
-  function handleCreateOrEditProjectSubmit(e) {
+  let isProjectFormSubmitting = false;
+
+  async function handleCreateOrEditProjectSubmit(e) {
     e.preventDefault();
+    if (isProjectFormSubmitting) return;
 
     const existingId = DOM.projectIdInput ? DOM.projectIdInput.value.trim() : '';
     const name = DOM.projectNameInput ? DOM.projectNameInput.value.trim() : '';
@@ -6694,107 +7070,111 @@ import { initAuthUI } from './authUI.js';
       return;
     }
 
-    const projects = Storage.getProjects();
+    isProjectFormSubmitting = true;
+    try {
+      const preMutationSnapshot = Storage.getProjects();
+      const projects = cloneProjectData(preMutationSnapshot);
+      const nowIso = new Date().toISOString();
 
-    if (existingId) {
-      const idx = projects.findIndex(p => p.id === existingId);
-      if (idx === -1) return;
+      if (existingId) {
+        const idx = projects.findIndex(p => p.id === existingId);
+        if (idx === -1) return;
 
-      const p = projects[idx];
-      const prevProjectState = {
-        name: p.name,
-        type: p.type,
-        status: p.status,
-        version: p.version,
-        description: p.description,
-        updatedAt: p.updatedAt
-      };
+        const p = projects[idx];
+        p.name = name;
+        p.type = type;
+        p.status = status;
+        p.version = version;
+        p.description = description;
+        p.updatedAt = nowIso;
 
-      p.name = name;
-      p.type = type;
-      p.status = status;
-      p.version = version;
-      p.description = description;
-      p.updatedAt = new Date().toISOString();
+        const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+          projectId: existingId,
+          isNew: false,
+          suppressStorageErrorToast: true
+        });
+        if (!persistRes.ok) {
+          showModalError(persistRes.error || 'Failed to save project changes.');
+          return;
+        }
 
-      const saveRes = Storage.saveProjects(projects);
-      if (!saveRes.ok) {
-        Object.assign(p, prevProjectState);
-        showModalError(saveRes.error || 'Failed to save project changes to storage.');
-        return;
+        Storage.addActivity('Updated project', name);
+        showToast(`Project "${name}" updated.`, 'success');
+        closeProjectModal();
+      } else {
+        const newId = 'proj_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
+        const newProj = {
+          id: newId,
+          name: name,
+          type: type,
+          status: status,
+          version: version,
+          description: description,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+          testCaseCount: 0,
+          passedTests: 0,
+          failedTests: 0,
+          blockedTests: 0,
+          skippedTests: 0,
+          notRunTests: 0,
+          executedTests: 0,
+          completionRate: 0,
+          passRate: 0,
+          totalDefects: 0,
+          openDefects: 0,
+          testPlan: {
+            id: 'plan_' + newId,
+            name: `${name} Test Plan`,
+            description: '',
+            objective: '',
+            scope: '',
+            notes: '',
+            createdAt: nowIso,
+            updatedAt: nowIso,
+            phases: []
+          },
+          testSuites: [],
+          executions: [],
+          defects: []
+        };
+
+        projects.unshift(newProj);
+
+        const persistRes = await persistProjectsMutation(projects, preMutationSnapshot, {
+          projectId: newId,
+          isNew: true,
+          suppressStorageErrorToast: true
+        });
+        if (!persistRes.ok) {
+          showModalError(persistRes.error || 'Failed to create project.');
+          return;
+        }
+
+        Storage.addActivity('Created new project', name);
+        addNotification({
+          title: 'Project Created',
+          message: `Project "${name}" was successfully initialized.`,
+          type: 'project',
+          link: { view: 'project-details', projectId: newId }
+        });
+        showToast(`Project "${name}" created!`, 'success');
+        closeProjectModal();
       }
 
-      Storage.addActivity('Updated project', name);
-      showToast(`Project "${name}" updated.`, 'success');
-      closeProjectModal();
-    } else {
-      const newId = 'proj_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
-      const newProj = {
-        id: newId,
-        name: name,
-        type: type,
-        status: status,
-        version: version,
-        description: description,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        testCaseCount: 0,
-        passedTests: 0,
-        failedTests: 0,
-        blockedTests: 0,
-        skippedTests: 0,
-        notRunTests: 0,
-        executedTests: 0,
-        completionRate: 0,
-        passRate: 0,
-        totalDefects: 0,
-        openDefects: 0,
-        testPlan: {
-          id: 'plan_' + newId,
-          name: `${name} Test Plan`,
-          description: '',
-          objective: '',
-          scope: '',
-          notes: '',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          phases: []
-        },
-        testSuites: [],
-        executions: [],
-        defects: []
-      };
+      renderDashboard();
+      renderMyProjects();
+      renderTestPlansWorkspace();
+      renderTestExecutionWorkspace();
+      renderDefectsWorkspace();
+      renderReportsWorkspace();
 
-      projects.unshift(newProj);
-
-      const saveRes = Storage.saveProjects(projects);
-      if (!saveRes.ok) {
-        projects.shift();
-        showModalError(saveRes.error || 'Failed to save new project to storage.');
-        return;
+      if (State.currentView === 'project-details' && State.currentDetailProjectId === existingId) {
+        const p = Storage.getProjects().find(x => x.id === existingId);
+        if (p) renderProjectDetailsData(p);
       }
-
-      Storage.addActivity('Created new project', name);
-      addNotification({
-        title: 'Project Created',
-        message: `Project "${name}" was successfully initialized.`,
-        type: 'project',
-        link: { view: 'project-details', projectId: newId }
-      });
-      showToast(`Project "${name}" created!`, 'success');
-      closeProjectModal();
-    }
-
-    renderDashboard();
-    renderMyProjects();
-    renderTestPlansWorkspace();
-    renderTestExecutionWorkspace();
-    renderDefectsWorkspace();
-    renderReportsWorkspace();
-
-    if (State.currentView === 'project-details' && State.currentDetailProjectId === existingId) {
-      const p = projects.find(x => x.id === existingId);
-      if (p) renderProjectDetailsData(p);
+    } finally {
+      isProjectFormSubmitting = false;
     }
   }
 
@@ -9533,7 +9913,7 @@ import { initAuthUI } from './authUI.js';
     if (DOM.importFileInput) DOM.importFileInput.value = '';
   }
 
-  function commitImport() {
+  async function commitImport() {
     if (!State.pendingImportPayload) {
       showToast('No active import payload to process', 'error');
       return;
@@ -9609,19 +9989,13 @@ import { initAuthUI } from './authUI.js';
       // 1. Create safety in-memory rollback snapshot (preserving projects, activities, QA checklists, and active runner state — QAV-ISS-013)
       Storage.saveRollbackSnapshot(currentProjects, currentActivities, currentChecklists, currentActiveRunner);
 
-      // 2. Persist imported projects through the normalization engine
-      const saveProjRes = Storage.saveProjects(importedRaw);
-      if (!saveProjRes.ok) {
-        showToast(`Import failed: ${saveProjRes.error || 'Unable to save imported projects.'}`, 'error');
+      // 2. Persist imported projects through the normalization & persistence engine
+      const persistProjRes = await persistProjectsMutation(importedRaw, currentProjects);
+      if (!persistProjRes.ok) {
+        showToast(`Import failed: ${persistProjRes.error || 'Unable to save imported projects.'}`, 'error');
         return;
       }
       const normalized = Storage.getProjects();
-      const saveNormRes = Storage.saveProjects(normalized);
-      if (!saveNormRes.ok) {
-        Storage.saveProjects(currentProjects);
-        showToast(`Import failed: ${saveNormRes.error || 'Unable to normalize imported projects.'}`, 'error');
-        return;
-      }
 
       // 3. Replace QA checklists only when the backup explicitly includes qaChecklists
       let restoredChkCount = currentChecklists.length;
@@ -9642,7 +10016,6 @@ import { initAuthUI } from './authUI.js';
       }
 
       // 4. Restore or reconcile active runner state (QAV-ISS-013)
-      // Backward-compatible with older backups that omit qaActiveRunner:
       if (hasQaActiveRunner || Array.isArray(importedRawChecklists)) {
         const candidateRunnerState = hasQaActiveRunner ? importedRawRunner : currentActiveRunner;
         const runnerSaveRes = replaceActiveRunnerState(candidateRunnerState, targetChecklistsForRunner);
@@ -9699,13 +10072,11 @@ import { initAuthUI } from './authUI.js';
 
       if (processedImported.length > 0) {
         const merged = [...currentProjects, ...processedImported];
-        const saveMergedRes = Storage.saveProjects(merged);
-        if (!saveMergedRes.ok) {
-          showToast(`Merge import failed: ${saveMergedRes.error}`, 'error');
+        const persistMergedRes = await persistProjectsMutation(merged, currentProjects);
+        if (!persistMergedRes.ok) {
+          showToast(`Merge import failed: ${persistMergedRes.error}`, 'error');
           return;
         }
-        const normalized = Storage.getProjects();
-        Storage.saveProjects(normalized);
       }
 
       let mergedChkCount = 0;
@@ -9740,7 +10111,6 @@ import { initAuthUI } from './authUI.js';
         mergedChkCount = processedChks.length;
       }
 
-      // If no active checklist was set prior to merge and backup provides one (or checklists were merged), reconcile active runner state
       if (!currentActiveRunner.activeChecklistId && (hasQaActiveRunner || mergedChkCount > 0)) {
         replaceActiveRunnerState(
           hasQaActiveRunner ? importedRawRunner : currentActiveRunner,
@@ -9773,7 +10143,7 @@ import { initAuthUI } from './authUI.js';
     }
   }
 
-  function executeRollback() {
+  async function executeRollback() {
     const snapshot = Storage.getRollbackSnapshot();
     if (!snapshot || (!Array.isArray(snapshot.projects) && !Array.isArray(snapshot.qaChecklists))) {
       showToast('No valid recovery snapshot available to roll back to.', 'warning');
@@ -9785,9 +10155,9 @@ import { initAuthUI } from './authUI.js';
     const prevRunnerState = getActiveRunnerState();
 
     const restoredProjects = Array.isArray(snapshot.projects) ? snapshot.projects : [];
-    const saveProjRes = Storage.saveProjects(restoredProjects);
-    if (!saveProjRes.ok) {
-      showToast(`Rollback failed: ${saveProjRes.error}. Recovery snapshot preserved.`, 'error');
+    const persistProjRes = await persistProjectsMutation(restoredProjects, prevProjects);
+    if (!persistProjRes.ok) {
+      showToast(`Rollback failed: ${persistProjRes.error}. Recovery snapshot preserved.`, 'error');
       return;
     }
 
@@ -9804,7 +10174,6 @@ import { initAuthUI } from './authUI.js';
       }
     }
 
-    // Restore active runner state from snapshot (or reconcile with restored checklists if older snapshot)
     const runnerSaveRes = replaceActiveRunnerState(
       snapshot.qaActiveRunner !== undefined ? snapshot.qaActiveRunner : prevRunnerState,
       restoredChecklists
@@ -9854,21 +10223,23 @@ import { initAuthUI } from './authUI.js';
     if (DOM.resetModalConfirmBtn) DOM.resetModalConfirmBtn.disabled = true;
   }
 
-  function executeWorkspaceReset() {
+  async function executeWorkspaceReset() {
     const currentProjects = Storage.getProjects();
     const currentActivities = Storage.getActivities();
     const currentChecklists = loadAllChecklists().checklists;
     const currentActiveRunner = getActiveRunnerState();
     Storage.saveRollbackSnapshot(currentProjects, currentActivities, currentChecklists, currentActiveRunner);
 
-    const pRes = Storage.saveProjects([]);
+    const pRes = await persistProjectsMutation([], currentProjects);
     const cRes = saveAllChecklists([]);
     const rRes = replaceActiveRunnerState({ activeChecklistId: null, lastQaView: null }, []);
     if (!pRes.ok || !cRes.ok || !rRes.ok) {
-      Storage.saveProjects(currentProjects);
+      if (pRes.ok) {
+        Storage.saveProjects(currentProjects);
+      }
       saveAllChecklists(currentChecklists);
       replaceActiveRunnerState(currentActiveRunner, currentChecklists);
-      showToast('Reset failed due to storage error. Existing workspace preserved.', 'error');
+      showToast(pRes.error || 'Reset failed due to storage error. Existing workspace preserved.', 'error');
       return;
     }
 
@@ -10166,6 +10537,15 @@ import { initAuthUI } from './authUI.js';
         title: 'Connecting to MongoDB Atlas backend...'
       };
     }
+    if (State.projectsError) {
+      return {
+        state: 'local',
+        text: State.projectsHydrated ? 'Sync error' : 'Working locally',
+        title: State.projectsHydrated
+          ? `MongoDB synchronization error: ${State.projectsError}`
+          : `Operating with local storage: ${State.projectsError}`
+      };
+    }
     if (State.projectsHydrated) {
       return {
         state: 'synced',
@@ -10176,9 +10556,7 @@ import { initAuthUI } from './authUI.js';
     return {
       state: 'local',
       text: 'Working locally',
-      title: State.projectsError
-        ? `Operating with local storage: ${State.projectsError}`
-        : 'Operating with local storage fallback'
+      title: 'Operating with local storage fallback'
     };
   }
 
@@ -10248,76 +10626,116 @@ import { initAuthUI } from './authUI.js';
    * 5. Refreshes the active view without page reload or event listener duplication.
    * 6. Preserves local storage and fallback cache if server or sync fails.
    */
-  async function hydrateProjectsFromBackend() {
+  let inFlightHydrationPromise = null;
+  let hydrationEpoch = 0;
+
+  async function hydrateProjectsFromBackend(options = {}) {
     // Phase 4: Do not send authenticated requests if session is unauthenticated
     if (typeof authController !== 'undefined' && !authController.isAuthenticated()) {
       updateSyncStatusIndicator();
       return { ok: false, reason: 'unauthenticated' };
     }
 
-    // Guard against concurrent or redundant hydration calls
-    if (State.projectsLoading || State.projectsHydrated) {
-      updateSyncStatusIndicator();
-      return { ok: State.projectsHydrated, data: State.projects };
+    if (options && options.force) {
+      State.projectsHydrated = false;
     }
 
+    // Share active in-flight hydration promise across concurrent callers
+    if (inFlightHydrationPromise) {
+      return inFlightHydrationPromise;
+    }
+
+    if (State.projectsHydrated && Array.isArray(State.projects)) {
+      updateSyncStatusIndicator();
+      return { ok: true, data: cloneProjectData(State.projects) };
+    }
+
+    const requestEpoch = hydrationEpoch;
     State.projectsLoading = true;
     State.projectsError = null;
     updateSyncStatusIndicator();
 
-    try {
-      // 1. Capture existing locally stored projects synchronously before hydration
-      const localProjects = Storage.getProjects();
+    inFlightHydrationPromise = (async () => {
+      try {
+        // 1. Capture existing locally stored projects synchronously before hydration
+        const localProjects = Storage.getProjects();
 
-      // 2. If local projects exist, sync them to MongoDB Atlas first
-      if (Array.isArray(localProjects) && localProjects.length > 0) {
-        try {
-          const syncRes = await ProjectsAPI.syncLocal(localProjects);
-          if (!syncRes.ok) {
-            console.warn('Qavora: syncLocal returned non-ok status during background hydration', syncRes.status, syncRes.error);
+        // 2. If local projects exist, sync them to MongoDB Atlas first
+        if (Array.isArray(localProjects) && localProjects.length > 0) {
+          try {
+            const syncRes = await ProjectsAPI.syncLocal(localProjects);
+            if (!syncRes.ok) {
+              console.warn('Qavora: syncLocal returned non-ok status during background hydration', syncRes.status, syncRes.error);
+            }
+          } catch (syncErr) {
+            console.warn('Qavora: syncLocal threw error during background hydration', syncErr);
           }
-        } catch (syncErr) {
-          console.warn('Qavora: syncLocal threw error during background hydration', syncErr);
-        }
-      }
-
-      // 3. Retrieve canonical MongoDB project list
-      const fetchRes = await ProjectsAPI.getAll();
-
-      // 4. Validate server response
-      if (fetchRes && fetchRes.ok && Array.isArray(fetchRes.data)) {
-        // Hydrate in-memory cache
-        ProjectsAPI.hydrateCache(fetchRes.data);
-
-        // Keep local storage backup cache in sync with canonical MongoDB records
-        try {
-          safeStorageWrite(STORAGE_KEYS.PROJECTS, JSON.stringify(fetchRes.data), 'syncing local backup cache with MongoDB');
-        } catch (writeErr) {
-          console.warn('Qavora: Could not write MongoDB projects to local backup cache', writeErr);
         }
 
-        // 5. Refresh currently active view
-        refreshActiveView();
+        // 3. Retrieve canonical MongoDB project list
+        const fetchRes = await ProjectsAPI.getAll();
 
-        return { ok: true, data: fetchRes.data };
-      } else {
-        // Server returned an error (e.g. 503 DB unavailable) or invalid data
-        const errMsg = (fetchRes && (fetchRes.error || fetchRes.message)) || 'Failed to fetch projects from MongoDB';
-        State.projectsError = errMsg;
-        // Do NOT mark cache as hydrated — preserve local fallback
-        console.warn('Qavora: Hydration could not complete. Retaining local fallback.', errMsg);
+        // Discard stale hydration response if session changed while request was in flight
+        if (requestEpoch !== hydrationEpoch || (typeof authController !== 'undefined' && !authController.isAuthenticated())) {
+          return { ok: false, reason: 'session_changed' };
+        }
+
+        // 4. Validate server response
+        if (fetchRes && fetchRes.ok && Array.isArray(fetchRes.data)) {
+          // Preserve any projects created/mutated in State.projects while GET /api/projects was in flight
+          const serverIds = new Set(fetchRes.data.filter(p => p && p.id).map(p => String(p.id)));
+          const concurrentNewProjects = Array.isArray(State.projects)
+            ? State.projects.filter(
+                p =>
+                  p &&
+                  p.id &&
+                  !serverIds.has(String(p.id)) &&
+                  (ProjectsPersistence.inFlightSync.has(String(p.id)) || ProjectsPersistence.isPersisted(String(p.id)))
+              )
+            : [];
+          const mergedServerData = concurrentNewProjects.length > 0
+            ? [...concurrentNewProjects, ...fetchRes.data]
+            : fetchRes.data;
+
+          // Hydrate & normalize in-memory cache (recomputing derived metrics)
+          const hydratedProjects = ProjectsAPI.hydrateCache(mergedServerData);
+
+          // Keep local storage backup cache in sync with normalized MongoDB records
+          try {
+            safeStorageWrite(STORAGE_KEYS.PROJECTS, JSON.stringify(hydratedProjects), 'syncing local backup cache with MongoDB');
+          } catch (writeErr) {
+            console.warn('Qavora: Could not write MongoDB projects to local backup cache', writeErr);
+          }
+
+          // 5. Refresh currently active view
+          refreshActiveView();
+
+          return { ok: true, data: hydratedProjects };
+        } else {
+          // Server returned an error (e.g. 503 DB unavailable) or invalid data
+          const errMsg = (fetchRes && (fetchRes.error || fetchRes.message)) || 'Failed to fetch projects from MongoDB';
+          State.projectsError = errMsg;
+          // Do NOT mark cache as hydrated — preserve local fallback
+          console.warn('Qavora: Hydration could not complete. Retaining local fallback.', errMsg);
+          return { ok: false, error: errMsg };
+        }
+      } catch (err) {
+        const errMsg = err?.message || 'Unexpected network or runtime failure during hydration';
+        if (requestEpoch === hydrationEpoch) {
+          State.projectsError = errMsg;
+        }
+        console.error('Qavora: Error during hydrateProjectsFromBackend', err);
         return { ok: false, error: errMsg };
+      } finally {
+        if (requestEpoch === hydrationEpoch) {
+          State.projectsLoading = false;
+        }
+        inFlightHydrationPromise = null;
+        updateSyncStatusIndicator();
       }
-    } catch (err) {
-      const errMsg = err?.message || 'Unexpected network or runtime failure during hydration';
-      State.projectsError = errMsg;
-      // Do NOT mark cache as hydrated — preserve local fallback
-      console.error('Qavora: Error during hydrateProjectsFromBackend', err);
-      return { ok: false, error: errMsg };
-    } finally {
-      State.projectsLoading = false;
-      updateSyncStatusIndicator();
-    }
+    })();
+
+    return inFlightHydrationPromise;
   }
 
   function openMobileSidebar() {
@@ -11789,20 +12207,20 @@ import { initAuthUI } from './authUI.js';
   // ==========================================================================
   if (typeof globalThis !== 'undefined') {
     globalThis.__qavoraGetActiveProjects = () => {
-      return (Array.isArray(State.projects) && State.projects.length > 0)
-        ? State.projects
-        : Storage.getProjects();
+      return Storage.getProjects();
     };
 
     globalThis.__qavoraOnProjectPromoted = (project) => {
       if (project && project.id) {
-        if (Array.isArray(State.projects) && !State.projects.some(p => p.id === project.id)) {
-          State.projects.unshift(project);
+        const normalizedProj = normalizeProjectRecord(project, 0).project;
+        if (Array.isArray(State.projects) && !State.projects.some(p => p.id === normalizedProj.id)) {
+          State.projects.unshift(cloneProjectData(normalizedProj));
         }
         if (typeof ProjectsPersistence !== 'undefined') {
-          ProjectsPersistence.syncProject(project, { isNew: true });
+          return ProjectsPersistence.syncProject(cloneProjectData(normalizedProj), { isNew: true });
         }
       }
+      return Promise.resolve({ ok: true });
     };
   }
 
@@ -11825,12 +12243,31 @@ import { initAuthUI } from './authUI.js';
     qaRunnerController = initQARunnerAndChecklists({
       navigateTo: (targetView, optArg) => switchView(targetView, optArg),
       notify: showToast,
-      onChecklistPromoted: ({ project, checklist, summary }) => {
-        if (Array.isArray(State.projects) && !State.projects.some(p => p.id === project.id)) {
-          State.projects.unshift(project);
+      onChecklistPromoted: async ({ project, checklist, summary }) => {
+        const normalizedProj = normalizeProjectRecord(project, 0).project;
+        if (Array.isArray(State.projects) && !State.projects.some(p => p.id === normalizedProj.id)) {
+          State.projects.unshift(cloneProjectData(normalizedProj));
         }
-        if (typeof ProjectsPersistence !== 'undefined') {
-          ProjectsPersistence.syncProject(project, { isNew: true });
+        let syncOk = true;
+        if (typeof ProjectsPersistence !== 'undefined' && isBackendPersistenceRequired()) {
+          let syncRes;
+          if (ProjectsPersistence.inFlightSync.has(normalizedProj.id)) {
+            syncRes = await ProjectsPersistence.inFlightSync.get(normalizedProj.id);
+          } else if (!ProjectsPersistence.isPersisted(normalizedProj.id)) {
+            syncRes = await ProjectsPersistence.syncProject(cloneProjectData(normalizedProj), {
+              isNew: true,
+              suppressErrorToast: true
+            });
+          } else {
+            syncRes = { ok: true };
+          }
+          if (syncRes && !syncRes.ok) {
+            syncOk = false;
+            showToast(
+              `Checklist promoted locally, but MongoDB sync failed: ${syncRes.error || 'Server error'}`,
+              'error'
+            );
+          }
         }
         Storage.addActivity(
           'Promoted Checklist to Project',
@@ -11849,10 +12286,12 @@ import { initAuthUI } from './authUI.js';
         renderDefectsWorkspace();
         renderReportsWorkspace();
         renderDataWorkspace();
-        showToast(
-          `Promoted "${checklist.title}" to formal project "${project.name}" (${summary.phasesCount} phases, ${summary.suitesCount} suites, ${summary.casesCount} test cases initialized as Not Run).`,
-          'success'
-        );
+        if (syncOk) {
+          showToast(
+            `Promoted "${checklist.title}" to formal project "${project.name}" (${summary.phasesCount} phases, ${summary.suitesCount} suites, ${summary.casesCount} test cases initialized as Not Run).`,
+            'success'
+          );
+        }
       },
       onOpenPromotedProject: (projectId) => {
         switchView('plans', projectId);
@@ -11904,6 +12343,8 @@ import { initAuthUI } from './authUI.js';
 
     // Safe User Session Data Cleanup (Phase 4 — Step 6)
     function clearUserSessionData() {
+      hydrationEpoch++;
+      inFlightHydrationPromise = null;
       // 1. Reset in-memory cached projects and hydration status
       State.projects = null;
       State.projectsHydrated = false;
@@ -12002,6 +12443,12 @@ import { initAuthUI } from './authUI.js';
         Auth: authController,
         authController,
         AuthUI: authUIController,
+        cloneProjectData,
+        normalizeProjectRecord,
+        normalizeProjectsList,
+        hasProjectChanged,
+        persistProjectsMutation,
+        clearUserSessionData,
         hydrateProjectsFromBackend,
         updateSyncStatusIndicator,
         getSyncStatusInfo,
@@ -12018,7 +12465,23 @@ import { initAuthUI } from './authUI.js';
         toggleNotificationPanel,
         handleNotificationNavigation,
         updateNotificationUI,
-        switchView
+        switchView,
+        openProjectModal,
+        handleCreateOrEditProjectSubmit,
+        handleSaveTestPlanSubmit,
+        handleSavePhaseSubmit,
+        movePhase,
+        handleSaveSuiteSubmit,
+        handleSaveTestCaseSubmit,
+        duplicateTestCase,
+        handleSaveExecutionSubmit,
+        handleSaveDefectSubmit,
+        updateDefectQuickStatus,
+        requestUniversalDelete,
+        executeUniversalDelete,
+        commitImport,
+        executeRollback,
+        executeWorkspaceReset
       };
     }
   }

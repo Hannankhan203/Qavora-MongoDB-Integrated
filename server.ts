@@ -1205,6 +1205,9 @@ app.get("/api/projects", requireAuth, async (req: Request, res: Response) => {
     }
 
     const projects = await db.collection("projects").find(filter).toArray();
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
     return res.json(projects);
   } catch (error: any) {
     const safeError = (error?.message || "Internal server error").replace(
@@ -1229,6 +1232,9 @@ app.get("/api/projects/:id", requireAuth, async (req: Request, res: Response) =>
       return res.status(404).json({ error: "Project not found." });
     }
 
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
     return res.json(project);
   } catch (error: any) {
     const safeError = (error?.message || "Internal server error").replace(
