@@ -30,6 +30,9 @@ import {
   getPendingDeleteProject,
   loadProjectsFromBackend
 } from './projectManager.js';
+import { renderDashboard } from './dashboardManager.js';
+import { renderExecutionWorkspace, initExecutionEventListeners } from './executionManager.js';
+import { renderDefectsWorkspace, initDefectEventListeners, getDefectFilterState } from './defectManager.js';
 import {
   populateProjectsDropdown,
   renderTestPlanWorkspace,
@@ -88,16 +91,21 @@ export function navigateTo(route, pushState = true) {
   const cleanRoute = route && route !== '/' ? route : '/projects';
   appState.currentRoute = cleanRoute;
 
-  if (typeof window !== 'undefined' && pushState && window.location.pathname !== cleanRoute) {
-    try {
-      window.history.pushState({ route: cleanRoute }, '', cleanRoute);
-    } catch {
-      // Ignore history pushState errors
+  if (typeof window !== 'undefined' && pushState) {
+    const currentFull = (window.location.pathname || '') + (window.location.search || '');
+    if (currentFull !== cleanRoute) {
+      try {
+        window.history.pushState({ route: cleanRoute }, '', cleanRoute);
+      } catch {
+        // Ignore history pushState errors
+      }
     }
   }
 
   if (typeof document !== 'undefined') {
-    const viewSlug = cleanRoute.replace(/^\//, '').split('/')[0] || 'projects';
+    const routeWithoutSlash = cleanRoute.replace(/^\//, '');
+    const pathPart = routeWithoutSlash.split('?')[0];
+    const viewSlug = pathPart.split('/')[0] || 'projects';
 
     const navItems = document.querySelectorAll('.nav-link[data-view]');
     navItems.forEach((el) => {
@@ -131,11 +139,60 @@ export function navigateTo(route, pushState = true) {
       pageTitleEl.textContent = VIEW_TITLES[viewSlug] || 'Qavora';
     }
 
+    if (viewSlug === 'dashboard') {
+      renderDashboard();
+    }
     if (viewSlug === 'project-details') {
-      renderProjectDetails(appState.activeProjectId);
+      let targetId = null;
+      if (cleanRoute.includes('?')) {
+        const queryStr = cleanRoute.split('?')[1];
+        const params = new URLSearchParams(queryStr);
+        targetId = params.get('id');
+      } else if (cleanRoute.startsWith('/project-details/')) {
+        targetId = cleanRoute.replace('/project-details/', '').split('?')[0];
+      }
+
+      if (targetId) {
+        setActiveProjectId(targetId);
+      }
+      renderProjectDetails(targetId || appState.activeProjectId);
     }
     if (viewSlug === 'plans') {
+      let targetId = null;
+      if (cleanRoute.includes('?')) {
+        const queryStr = cleanRoute.split('?')[1];
+        const params = new URLSearchParams(queryStr);
+        targetId = params.get('id');
+      }
+      if (targetId) {
+        setActiveProjectId(targetId);
+      }
       renderTestPlanWorkspace();
+    }
+    if (viewSlug === 'execution') {
+      let targetId = null;
+      if (cleanRoute.includes('?')) {
+        const queryStr = cleanRoute.split('?')[1];
+        const params = new URLSearchParams(queryStr);
+        targetId = params.get('id');
+      }
+      if (targetId) {
+        setActiveProjectId(targetId);
+      }
+      renderExecutionWorkspace();
+    }
+    if (viewSlug === 'defects') {
+      let targetId = null;
+      if (cleanRoute.includes('?')) {
+        const queryStr = cleanRoute.split('?')[1];
+        const params = new URLSearchParams(queryStr);
+        targetId = params.get('id');
+      }
+      if (targetId) {
+        setActiveProjectId(targetId);
+        getDefectFilterState().projectId = targetId;
+      }
+      renderDefectsWorkspace();
     }
   }
 }
@@ -143,13 +200,17 @@ export function navigateTo(route, pushState = true) {
 export function resolveInitialRoute() {
   if (typeof window === 'undefined') return '/projects';
   const pathname = window.location.pathname || '/projects';
-  if (pathname === '/' || pathname === '') return '/projects';
-  return pathname;
+  const search = window.location.search || '';
+  if (pathname === '/' || pathname === '') return '/projects' + search;
+  return pathname + search;
 }
 
 export function initUIEventListeners() {
   if (typeof document === 'undefined' || _listenersBound) return;
   _listenersBound = true;
+
+  initExecutionEventListeners();
+  initDefectEventListeners();
 
   // 1. Theme toggle
   const themeBtn = document.getElementById('theme-toggle-btn');
@@ -193,8 +254,9 @@ export function initUIEventListeners() {
   });
 
   if (typeof window !== 'undefined') {
-    window.addEventListener('popstate', () => {
-      navigateTo(resolveInitialRoute(), false);
+    window.addEventListener('popstate', (e) => {
+      const targetRoute = e.state?.route || resolveInitialRoute();
+      navigateTo(targetRoute, false);
     });
   }
 
@@ -259,7 +321,7 @@ export function initUIEventListeners() {
 
   document
     .querySelectorAll(
-      '#header-create-btn, #projects-create-btn, #panel-new-project-btn, .plans-create-project-btn, #empty-projects-create-btn, [data-action="new-project"]'
+      '#header-create-btn, #projects-create-btn, #panel-new-project-btn, #hero-create-btn, .plans-create-project-btn, #empty-projects-create-btn, [data-action="new-project"]'
     )
     .forEach((btn) => {
       btn.addEventListener('click', (e) => {
@@ -498,12 +560,77 @@ export function initUIEventListeners() {
       if (projectId) {
         setActiveProjectId(projectId);
         renderProjectDetails(projectId);
-        navigateTo('/project-details');
+        navigateTo(`/project-details?id=${encodeURIComponent(projectId)}`);
       }
     }
   });
 
-  // 9. Search and Filters Toolbar
+  // 9. Dashboard Event Handlers & Recent Projects Delegation (Phase 4)
+  document.getElementById('dash-open-reports-btn')?.addEventListener('click', () => {
+    navigateTo('/reports');
+  });
+
+  document.getElementById('view-all-projects-btn')?.addEventListener('click', () => {
+    navigateTo('/projects');
+  });
+
+  document.getElementById('clear-activity-btn')?.addEventListener('click', () => {
+    showToast('Activity log is empty.', 'info');
+  });
+
+  const recentProjectsContainer = document.getElementById('recent-projects-container');
+  recentProjectsContainer?.addEventListener('click', (e) => {
+    const target = e.target;
+    if (!(target instanceof HTMLElement)) return;
+
+    // A. Click on project item
+    const item = target.closest('.project-item');
+    if (item) {
+      const projectId = item.getAttribute('data-project-id');
+      if (projectId) {
+        setActiveProjectId(projectId);
+        renderProjectDetails(projectId);
+        navigateTo(`/project-details?id=${encodeURIComponent(projectId)}`);
+      }
+      return;
+    }
+
+    // B. Create project from empty state
+    const createBtn = target.closest('.dash-create-project-btn');
+    if (createBtn) {
+      openCreateProjectModal();
+      return;
+    }
+
+    // C. Retry button from error state
+    const retryBtn = target.closest('#dash-retry-projects-btn');
+    if (retryBtn) {
+      loadProjectsFromBackend().then(() => {
+        renderDashboard();
+      });
+      return;
+    }
+  });
+
+  recentProjectsContainer?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      const target = e.target;
+      if (target instanceof HTMLElement) {
+        const item = target.closest('.project-item');
+        if (item) {
+          e.preventDefault();
+          const projectId = item.getAttribute('data-project-id');
+          if (projectId) {
+            setActiveProjectId(projectId);
+            renderProjectDetails(projectId);
+            navigateTo(`/project-details?id=${encodeURIComponent(projectId)}`);
+          }
+        }
+      }
+    }
+  });
+
+  // 10. Search and Filters Toolbar
   const searchInput = document.getElementById('project-search-input');
   const typeSelect = document.getElementById('project-filter-type');
   const statusSelect = document.getElementById('project-filter-status');
@@ -540,12 +667,16 @@ export function initUIEventListeners() {
     renderProjectsGrid();
   });
 
-  // 10. Project Details View Action Buttons
+  // 11. Project Details View Action Buttons (Phase 4)
   document.getElementById('detail-back-crumb')?.addEventListener('click', () => {
     navigateTo('/projects');
   });
 
   document.getElementById('detail-back-btn')?.addEventListener('click', () => {
+    navigateTo('/projects');
+  });
+
+  document.getElementById('detail-not-found-back-btn')?.addEventListener('click', () => {
     navigateTo('/projects');
   });
 
@@ -560,15 +691,91 @@ export function initUIEventListeners() {
   });
 
   document.getElementById('detail-open-plan-btn')?.addEventListener('click', () => {
+    const current = getActiveProject();
+    if (current) {
+      setActiveProjectId(current.id);
+      populateProjectsDropdown();
+    }
     navigateTo('/plans');
   });
 
+  document.getElementById('detail-goto-plans-btn')?.addEventListener('click', () => {
+    const current = getActiveProject();
+    if (current) {
+      setActiveProjectId(current.id);
+      populateProjectsDropdown();
+    }
+    navigateTo('/plans');
+  });
+
+  document.getElementById('detail-quick-add-phase-btn')?.addEventListener('click', () => {
+    const current = getActiveProject();
+    if (current) {
+      setActiveProjectId(current.id);
+      openPhaseModal();
+    }
+  });
+
+  document.getElementById('detail-quick-add-suite-btn')?.addEventListener('click', () => {
+    const current = getActiveProject();
+    if (current) {
+      setActiveProjectId(current.id);
+      openSuiteModal();
+    }
+  });
+
+  const detailSuitesContainer = document.getElementById('detail-suites-container');
+  detailSuitesContainer?.addEventListener('click', (e) => {
+    const target = e.target;
+    if (!(target instanceof HTMLElement)) return;
+
+    const openSuiteBtn = target.closest('[data-action="open-suite-plan"]');
+    if (openSuiteBtn) {
+      e.stopPropagation();
+      const suiteId = openSuiteBtn.getAttribute('data-suite-id');
+      const current = getActiveProject();
+      if (current) {
+        setActiveProjectId(current.id);
+        populateProjectsDropdown();
+      }
+      if (suiteId) {
+        openSuiteExplorer(suiteId);
+      }
+      navigateTo('/plans');
+      return;
+    }
+
+    const emptyAddBtn = target.closest('#detail-empty-create-suite-btn');
+    if (emptyAddBtn) {
+      e.stopPropagation();
+      const current = getActiveProject();
+      if (current) {
+        setActiveProjectId(current.id);
+      }
+      openSuiteModal();
+      return;
+    }
+  });
+
   document.getElementById('detail-exec-btn')?.addEventListener('click', () => {
-    navigateTo('/qa-runner');
+    const current = getActiveProject();
+    if (current) {
+      setActiveProjectId(current.id);
+      navigateTo(`/execution?id=${encodeURIComponent(current.id)}`);
+    } else {
+      navigateTo('/execution');
+    }
   });
 
   document.getElementById('detail-defects-btn')?.addEventListener('click', () => {
-    navigateTo('/defects');
+    const current = getActiveProject();
+    if (current) {
+      setActiveProjectId(current.id);
+      getDefectFilterState().projectId = current.id;
+      navigateTo(`/defects?id=${encodeURIComponent(current.id)}`);
+    } else {
+      navigateTo('/defects');
+    }
   });
 
   // ==========================================================================

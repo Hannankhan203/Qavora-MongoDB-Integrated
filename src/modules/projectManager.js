@@ -18,11 +18,16 @@ import { populateProjectsDropdown } from './testPlanManager.js';
 import { renderDashboard } from './dashboardManager.js';
 
 let _isLoadingProjects = false;
+let _hasLoadedProjects = false;
 let _projectLoadError = null;
 let _pendingDeleteProject = null;
 
 export function getIsLoadingProjects() {
   return _isLoadingProjects;
+}
+
+export function getHasLoadedProjects() {
+  return _hasLoadedProjects;
 }
 
 export function getProjectLoadError() {
@@ -41,6 +46,7 @@ export async function loadProjectsFromBackend() {
 
   const res = await apiJson('/api/projects');
   _isLoadingProjects = false;
+  _hasLoadedProjects = true;
 
   if (res.ok && Array.isArray(res.data)) {
     setProjects(res.data);
@@ -51,6 +57,7 @@ export async function loadProjectsFromBackend() {
     renderProjectsGrid();
     populateProjectsDropdown();
     renderDashboard();
+    renderProjectDetails();
     return { ok: true, projects: res.data };
   }
 
@@ -58,6 +65,7 @@ export async function loadProjectsFromBackend() {
   renderProjectsGrid();
   populateProjectsDropdown();
   renderDashboard();
+  renderProjectDetails();
   return { ok: false, status: res.status, error: _projectLoadError };
 }
 
@@ -130,6 +138,38 @@ export function updateSidebarProjectCounters() {
   const countEl = document.getElementById('sidebar-projects-count');
   if (countEl) {
     countEl.textContent = String(projects.length);
+  }
+
+  const navProjEl = document.getElementById('nav-project-count');
+  if (navProjEl) {
+    navProjEl.textContent = String(projects.length);
+  }
+
+  let totalCases = 0;
+  let activeDefects = 0;
+  projects.forEach((p) => {
+    if (Array.isArray(p.testSuites)) {
+      p.testSuites.forEach((s) => {
+        totalCases += Array.isArray(s.cases) ? s.cases.length : 0;
+      });
+    }
+    if (Array.isArray(p.defects)) {
+      p.defects.forEach((d) => {
+        if (d.status !== 'Resolved' && d.status !== 'Closed') {
+          activeDefects++;
+        }
+      });
+    }
+  });
+
+  const navCasesEl = document.getElementById('nav-cases-count');
+  if (navCasesEl) {
+    navCasesEl.textContent = String(totalCases);
+  }
+
+  const navDefectsEl = document.getElementById('nav-defects-count');
+  if (navDefectsEl) {
+    navDefectsEl.textContent = String(activeDefects);
   }
 
   const totalEl = document.getElementById('my-stat-total');
@@ -496,7 +536,7 @@ export function renderProjectDetails(projectId) {
   const notFoundEl = document.getElementById('detail-not-found-view');
   const contentWrap = document.getElementById('detail-content-wrap');
 
-  if (_isLoadingProjects) {
+  if (_isLoadingProjects || !_hasLoadedProjects) {
     if (loadingEl) loadingEl.style.display = 'block';
     if (notFoundEl) notFoundEl.style.display = 'none';
     if (contentWrap) contentWrap.style.display = 'none';
@@ -628,6 +668,18 @@ export function renderProjectDetails(projectId) {
   if (progressPercent) progressPercent.textContent = `${pct}%`;
   if (progressBar) progressBar.style.width = `${pct}%`;
   if (progressSub) progressSub.textContent = `${executedTotal} of ${totalCases} executed`;
+
+  const defectsBtn = document.getElementById('detail-defects-btn');
+  if (defectsBtn) {
+    const defectsCount = Array.isArray(project.defects) ? project.defects.length : 0;
+    const activeDefectsCount = Array.isArray(project.defects)
+      ? project.defects.filter((d) => d.status !== 'Resolved' && d.status !== 'Closed').length
+      : 0;
+    const defectsLabel = defectsBtn.querySelector('span');
+    if (defectsLabel) {
+      defectsLabel.textContent = defectsCount > 0 ? `Defects (${activeDefectsCount > 0 ? activeDefectsCount : defectsCount})` : 'Defects';
+    }
+  }
 
   const suitesCounter = document.getElementById('detail-suites-counter');
   if (suitesCounter) {

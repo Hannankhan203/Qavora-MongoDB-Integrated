@@ -32,8 +32,13 @@ import {
   saveProjectData,
   deleteProjectById,
   updateSidebarProjectCounters,
-  renderProjectsGrid
+  renderProjectsGrid,
+  renderProjectDetails
 } from './src/modules/projectManager.js';
+import {
+  renderDashboard,
+  getDashboardMetrics
+} from './src/modules/dashboardManager.js';
 import {
   saveTestPlan,
   saveTestSuite,
@@ -49,8 +54,27 @@ import {
   openSuiteExplorer,
   closeSuiteExplorer
 } from './src/modules/testPlanManager.js';
-import { saveExecutionResult } from './src/modules/executionManager.js';
-import { saveDefect, updateDefectQuickStatus } from './src/modules/defectManager.js';
+import {
+  saveExecutionResult,
+  renderExecutionWorkspace,
+  openExecutionModal,
+  closeExecutionModal,
+  openExecutionHistoryModal,
+  closeExecutionHistoryModal,
+  quickRecordOutcome
+} from './src/modules/executionManager.js';
+import {
+  saveDefect,
+  updateDefectQuickStatus,
+  deleteDefectById,
+  renderDefectsWorkspace,
+  openCreateDefectModal,
+  openEditDefectModal,
+  closeDefectModal,
+  openDefectViewModal,
+  closeDefectViewModal,
+  openDeleteDefectModal
+} from './src/modules/defectManager.js';
 import {
   showToast,
   navigateTo,
@@ -76,9 +100,32 @@ async function init() {
       updateSidebarProjectCounters();
       renderProjectsGrid();
       populateProjectsDropdown();
-      if (getAppState().currentRoute === '/plans') {
+
+      const currentRoute = getAppState().currentRoute;
+      const baseSlug = currentRoute.replace(/^\//, '').split('?')[0].split('/')[0];
+
+      if (baseSlug === 'dashboard') {
+        renderDashboard();
+      } else if (baseSlug === 'project-details') {
+        let pId = null;
+        if (currentRoute.includes('?')) {
+          const params = new URLSearchParams(currentRoute.split('?')[1]);
+          pId = params.get('id');
+        } else if (currentRoute.startsWith('/project-details/')) {
+          pId = currentRoute.replace('/project-details/', '').split('?')[0];
+        }
+        if (pId) {
+          setActiveProjectId(pId);
+        }
+        renderProjectDetails(pId || getActiveProjectId());
+      } else if (baseSlug === 'plans') {
         renderTestPlanWorkspace();
+      } else if (baseSlug === 'execution') {
+        renderExecutionWorkspace();
+      } else if (baseSlug === 'defects') {
+        renderDefectsWorkspace();
       }
+
       if (typeof initChecklistGenerator === 'function') {
         initChecklistGenerator();
       }
@@ -94,6 +141,10 @@ async function init() {
       updateSidebarProjectCounters();
       renderProjectsGrid();
       populateProjectsDropdown();
+      renderDashboard();
+      renderProjectDetails();
+      renderExecutionWorkspace();
+      renderDefectsWorkspace();
       if (getAppState().currentRoute === '/plans') {
         renderTestPlanWorkspace();
       }
@@ -121,6 +172,10 @@ if (typeof window !== 'undefined') {
     saveProjectData,
     deleteProjectById,
     updateSidebarProjectCounters,
+    renderProjectsGrid,
+    renderProjectDetails,
+    renderDashboard,
+    getDashboardMetrics,
     saveTestPlan,
     saveTestSuite,
     saveTestCase,
@@ -133,10 +188,23 @@ if (typeof window !== 'undefined') {
     populateProjectsDropdown,
     renderTestPlanWorkspace,
     openSuiteExplorer,
-    closeSuiteExplorer,
     saveExecutionResult,
+    renderExecutionWorkspace,
+    openExecutionModal,
+    closeExecutionModal,
+    openExecutionHistoryModal,
+    closeExecutionHistoryModal,
+    quickRecordOutcome,
     saveDefect,
     updateDefectQuickStatus,
+    deleteDefectById,
+    renderDefectsWorkspace,
+    openCreateDefectModal,
+    openEditDefectModal,
+    closeDefectModal,
+    openDefectViewModal,
+    closeDefectViewModal,
+    openDeleteDefectModal,
     showToast,
     navigateTo,
     resolveInitialRoute
