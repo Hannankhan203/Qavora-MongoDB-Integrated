@@ -9,40 +9,32 @@
 // ============================================================================
 // Storage & Constants
 // ============================================================================
-export const AUTH_TOKEN_STORAGE_KEY = 'qavora_auth_token_v1';
+export const CSRF_COOKIE_NAME = 'qavora_csrf_token';
 
-function getStoredToken() {
+function getCsrfTokenFromCookie() {
   try {
-    if (typeof localStorage !== 'undefined') {
-      return localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+    if (typeof document !== 'undefined' && typeof document.cookie === 'string') {
+      const pairs = document.cookie.split(';');
+      for (const pair of pairs) {
+        const idx = pair.indexOf('=');
+        if (idx > 0 && pair.slice(0, idx).trim() === CSRF_COOKIE_NAME) {
+          return decodeURIComponent(pair.slice(idx + 1).trim());
+        }
+      }
     }
   } catch (err) {
-    // Gracefully handle storage quota or private-browsing restrictions
+    // Ignore cookie access errors
   }
   return null;
 }
 
-function setStoredToken(token) {
+function clearLegacyStoredToken() {
   try {
     if (typeof localStorage !== 'undefined') {
-      if (token) {
-        localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
-      } else {
-        localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
-      }
+      localStorage.removeItem('qavora_auth_token_v1');
     }
   } catch (err) {
-    // Gracefully handle storage access denial
-  }
-}
-
-function removeStoredToken() {
-  try {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
-    }
-  } catch (err) {
-    // Gracefully handle storage access denial
+    // Ignore storage access errors
   }
 }
 
@@ -52,7 +44,6 @@ function removeStoredToken() {
 // Valid states: 'loading' | 'authenticated' | 'unauthenticated'
 let _state = 'unauthenticated';
 let _user = null;
-let _token = null;
 let _initPromise = null;
 const _listeners = new Set();
 
@@ -60,8 +51,7 @@ function _notifyListeners() {
   const snapshot = {
     state: _state,
     user: _user ? { ..._user } : null,
-    isAuthenticated: _state === 'authenticated' && Boolean(_token) && Boolean(_user),
-    token: _token
+    isAuthenticated: _state === 'authenticated' && Boolean(_user)
   };
 
   _listeners.forEach(listener => {
@@ -98,18 +88,19 @@ export const authController = {
     return this.getCurrentUser();
   },
 
-  /**
-   * Returns current active JWT token string or null
-   */
   getToken() {
-    return _token;
+    return null;
+  },
+
+  getCsrfToken() {
+    return getCsrfTokenFromCookie();
   },
 
   /**
-   * True if user is fully authenticated with a valid token & user profile
+   * True if user is fully authenticated with a valid session & user profile
    */
   isAuthenticated() {
-    return _state === 'authenticated' && Boolean(_token) && Boolean(_user);
+    return _state === 'authenticated' && Boolean(_user);
   },
 
   /**
@@ -120,30 +111,27 @@ export const authController = {
   },
 
   /**
-   * Attach Authorization headers to an options object or headers object
+   * Attach CSRF headers to an options object or headers object
    */
   getAuthHeaders(customHeaders = {}) {
     const headers = { ...customHeaders };
-    if (_token) {
-      headers['Authorization'] = `Bearer ${_token}`;
+    const csrf = getCsrfTokenFromCookie();
+    if (csrf && !headers['X-CSRF-Token'] && !headers['x-csrf-token']) {
+      headers['X-CSRF-Token'] = csrf;
     }
     return headers;
   },
 
   /**
-   * Set or override current session (e.g. for testing token expiration or restoring session)
+   * Set or override current session
    */
   setSession(session) {
-    if (session && session.token) {
-      _token = session.token;
-      _user = session.user || _user;
+    if (session && session.user) {
+      _user = session.user;
       _state = 'authenticated';
-      setStoredToken(_token);
     } else {
-      _token = null;
       _user = null;
       _state = 'unauthenticated';
-      removeStoredToken();
     }
     _notifyListeners();
   },
@@ -162,8 +150,7 @@ export const authController = {
       listener({
         state: _state,
         user: _user ? { ..._user } : null,
-        isAuthenticated: this.isAuthenticated(),
-        token: _token
+        isAuthenticated: this.isAuthenticated()
       });
     } catch (err) {
       console.warn('Qavora: Error in initial auth listener invocation', err);
@@ -189,31 +176,17 @@ export const authController = {
       return _initPromise;
     }
 
-    const storedToken = getStoredToken();
-    if (!storedToken) {
-      _token = null;
-      _user = null;
-      _state = 'unauthenticated';
-      _notifyListeners();
-      return {
-        ok: false,
-        state: _state,
-        user: null,
-        token: null
-      };
-    }
-
+    clearLegacyStoredToken();
     _state = 'loading';
-    _token = storedToken;
     _notifyListeners();
 
     _initPromise = (async () => {
       try {
         const response = await fetch('/api/auth/me', {
           method: 'GET',
+          credentials: 'include',
           headers: {
-            'Accept': 'application/json',
-            'Authorization': `Bearer ${_token}`
+            'Accept': 'application/json'
           }
         });
 
@@ -226,35 +199,18 @@ export const authController = {
             return {
               ok: true,
               state: _state,
-              user: _user,
-              token: _token
+              user: _user
             };
           }
         }
 
-        // If 401 or 403 or invalid user, the token is expired or unauthorized
-        if (response.status === 401 || response.status === 403 || !response.ok) {
-          removeStoredToken();
-          _token = null;
-          _user = null;
-          _state = 'unauthenticated';
-          _notifyListeners();
-          return {
-            ok: false,
-            state: _state,
-            user: null,
-            token: null
-          };
-        }
-
-        // Other non-ok responses
+        _user = null;
         _state = 'unauthenticated';
         _notifyListeners();
         return {
           ok: false,
           state: _state,
-          user: null,
-          token: null
+          user: null
         };
       } catch (networkErr) {
         console.warn('Qavora: Could not reach /api/auth/me during initialization', networkErr.message);
@@ -306,6 +262,7 @@ export const authController = {
     try {
       const response = await fetch('/api/auth/login', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json'
@@ -318,25 +275,20 @@ export const authController = {
 
       const data = await response.json().catch(() => null);
 
-      if (response.ok && data && data.token && data.user) {
-        _token = data.token;
+      if (response.ok && data && data.user) {
         _user = data.user;
         _state = 'authenticated';
-        setStoredToken(_token);
         _notifyListeners();
         return {
           ok: true,
           status: response.status,
-          user: _user,
-          token: _token
+          user: _user
         };
       }
 
       // Login failed
-      _token = null;
       _user = null;
       _state = 'unauthenticated';
-      removeStoredToken();
       _notifyListeners();
 
       return {
@@ -410,6 +362,7 @@ export const authController = {
     try {
       const response = await fetch('/api/auth/register', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json'
@@ -424,25 +377,20 @@ export const authController = {
 
       const data = await response.json().catch(() => null);
 
-      if (response.ok && data && data.token && data.user) {
-        _token = data.token;
+      if (response.ok && data && data.user) {
         _user = data.user;
         _state = 'authenticated';
-        setStoredToken(_token);
         _notifyListeners();
         return {
           ok: true,
           status: response.status,
-          user: _user,
-          token: _token
+          user: _user
         };
       }
 
       // Registration failed
-      _token = null;
       _user = null;
       _state = 'unauthenticated';
-      removeStoredToken();
       _notifyListeners();
 
       return {
@@ -467,9 +415,21 @@ export const authController = {
   /**
    * Log out the current user: clears in-memory state and persistent token
    */
-  logout() {
-    removeStoredToken();
-    _token = null;
+  async logout() {
+    clearLegacyStoredToken();
+    try {
+      const csrf = getCsrfTokenFromCookie();
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Accept': 'application/json',
+          ...(csrf ? { 'X-CSRF-Token': csrf } : {})
+        }
+      });
+    } catch (err) {
+      // Ignore network errors during logout
+    }
     _user = null;
     _state = 'unauthenticated';
     _notifyListeners();
@@ -478,12 +438,11 @@ export const authController = {
 
   /**
    * Called when any API call receives HTTP 401 Unauthorized.
-   * Clears invalid token and resets state without looping.
+   * Clears invalid session and resets state without looping.
    */
   handleUnauthorized() {
-    const wasActive = Boolean(_token || _user || _state !== 'unauthenticated');
-    removeStoredToken();
-    _token = null;
+    const wasActive = Boolean(_user || _state !== 'unauthenticated');
+    clearLegacyStoredToken();
     _user = null;
     _state = 'unauthenticated';
 
@@ -493,19 +452,24 @@ export const authController = {
   },
 
   /**
-   * Reusable authenticated fetch wrapper that injects Bearer token and intercepts 401
+   * Reusable authenticated fetch wrapper that sends HttpOnly cookies, injects CSRF token, and intercepts 401
    */
   async authenticatedFetch(url, options = {}) {
     const headers = {
       ...(options.headers || {})
     };
 
-    if (_token && !headers['Authorization'] && !headers['authorization']) {
-      headers['Authorization'] = `Bearer ${_token}`;
+    const method = (options.method || 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+      const csrf = getCsrfTokenFromCookie();
+      if (csrf && !headers['X-CSRF-Token'] && !headers['x-csrf-token']) {
+        headers['X-CSRF-Token'] = csrf;
+      }
     }
 
     try {
       const response = await fetch(url, {
+        credentials: 'include',
         ...options,
         headers
       });

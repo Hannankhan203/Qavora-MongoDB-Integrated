@@ -10,6 +10,7 @@ import { MongoClient, ObjectId } from 'mongodb';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -96,7 +97,153 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '20mb' }));
+
+// ============================================================================
+// 2b. HttpOnly Cookie, CORS & CSRF Protection (SEC-002)
+// ============================================================================
+const AUTH_COOKIE_NAME = 'qavora_auth_token';
+const CSRF_COOKIE_NAME = 'qavora_csrf_token';
+
+function parseCookies(cookieHeader?: string): Record<string, string> {
+  const cookies: Record<string, string> = {};
+  if (!cookieHeader || typeof cookieHeader !== 'string') return cookies;
+  const pairs = cookieHeader.split(';');
+  for (const pair of pairs) {
+    const idx = pair.indexOf('=');
+    if (idx > 0) {
+      const key = pair.slice(0, idx).trim();
+      const val = pair.slice(idx + 1).trim();
+      try {
+        cookies[key] = decodeURIComponent(val);
+      } catch {
+        cookies[key] = val;
+      }
+    }
+  }
+  return cookies;
+}
+
+function parseJwtExpiryToMs(expiresIn: string | number): number {
+  const defaultMs = 7 * 24 * 60 * 60 * 1000;
+  if (typeof expiresIn === 'number' && Number.isFinite(expiresIn) && expiresIn > 0) {
+    return expiresIn * 1000;
+  }
+  if (typeof expiresIn !== 'string') return defaultMs;
+  const match = expiresIn.trim().match(/^(\d+)\s*(ms|s|m|h|d|w|y)?$/i);
+  if (!match) return defaultMs;
+  const value = parseInt(match[1], 10);
+  const unit = (match[2] || 's').toLowerCase();
+  const multipliers: Record<string, number> = {
+    ms: 1,
+    s: 1000,
+    m: 60 * 1000,
+    h: 60 * 60 * 1000,
+    d: 24 * 60 * 60 * 1000,
+    w: 7 * 24 * 60 * 60 * 1000,
+    y: 365 * 24 * 60 * 60 * 1000
+  };
+  return value * (multipliers[unit] || 1000);
+}
+
+function getAuthCookieOptions(maxAgeMs?: number) {
+  const isProd = process.env.NODE_ENV === 'production';
+  return {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: 'lax' as const,
+    path: '/',
+    ...(typeof maxAgeMs === 'number' ? { maxAge: maxAgeMs } : {})
+  };
+}
+
+function setAuthCookie(res: Response, token: string, expiresIn: string | number) {
+  res.cookie(AUTH_COOKIE_NAME, token, getAuthCookieOptions(parseJwtExpiryToMs(expiresIn)));
+}
+
+function clearAuthCookie(res: Response) {
+  res.clearCookie(AUTH_COOKIE_NAME, getAuthCookieOptions());
+}
+
+function setCsrfCookie(res: Response): string {
+  const isProd = process.env.NODE_ENV === 'production';
+  const csrfToken = crypto.randomBytes(32).toString('hex');
+  res.cookie(CSRF_COOKIE_NAME, csrfToken, {
+    httpOnly: false,
+    secure: isProd,
+    sameSite: 'lax',
+    path: '/'
+  });
+  return csrfToken;
+}
+
+// CORS with credentials for /api
+app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+  const origin = req.headers.origin;
+  const allowedOrigins = (process.env.CORS_ORIGIN || '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
+
+  if (origin) {
+    const host = req.headers.host;
+    const isSameHost = host && (origin === `http://${host}` || origin === `https://${host}`);
+    if (isSameHost || allowedOrigins.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Vary', 'Origin');
+    }
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-CSRF-Token, X-Requested-With');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  next();
+});
+
+// CSRF protection for state-changing /api requests
+app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+  const method = req.method.toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    return next();
+  }
+
+  // Verify Origin/Referer if present
+  const origin = req.headers.origin;
+  const host = req.headers.host;
+  if (origin && host) {
+    const allowedOrigins = (process.env.CORS_ORIGIN || '')
+      .split(',')
+      .map((o) => o.trim())
+      .filter(Boolean);
+    const isSameHost = origin === `http://${host}` || origin === `https://${host}`;
+    if (!isSameHost && !allowedOrigins.includes(origin)) {
+      return res.status(403).json({ error: 'Forbidden: Cross-origin request rejected.' });
+    }
+  }
+
+  // Login and register establish a new session
+  if (req.path === '/auth/login' || req.path === '/auth/register') {
+    return next();
+  }
+
+  const cookies = parseCookies(req.headers.cookie);
+  const cookieCsrf = cookies[CSRF_COOKIE_NAME];
+  const headerCsrf = req.headers['x-csrf-token'];
+
+  if (
+    !cookieCsrf ||
+    typeof headerCsrf !== 'string' ||
+    cookieCsrf.length !== headerCsrf.length ||
+    !crypto.timingSafeEqual(Buffer.from(cookieCsrf), Buffer.from(headerCsrf))
+  ) {
+    return res.status(403).json({ error: 'Invalid or missing CSRF token.' });
+  }
+
+  next();
+});
 
 // ============================================================================
 // 3. MongoDB Connection Handling & In-Memory Mock Fallback
@@ -815,14 +962,8 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function getJwtSecret(): string {
   const secret = process.env.JWT_SECRET;
-  const currentIsProd = process.env.NODE_ENV === 'production';
-  const currentIsVercel = Boolean(process.env.VERCEL || process.env.NOW_REGION);
-
-  if (!secret || typeof secret !== 'string' || secret.trim() === '') {
-    if (currentIsProd || currentIsVercel) {
-      throw new Error('JWT_SECRET environment variable is missing.');
-    }
-    return 'qavora-dev-fallback-jwt-secret-key';
+  if (!secret || typeof secret !== 'string' || secret.trim().length < 16) {
+    throw new Error('JWT_SECRET environment variable must be configured and at least 16 characters long.');
   }
   return secret.trim();
 }
@@ -889,14 +1030,15 @@ async function requireAuth(req: Request, res: Response, next: NextFunction) {
       });
     }
 
-    const authHeader = req.headers.authorization;
-    if (!authHeader || typeof authHeader !== 'string' || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({
-        error: "Authentication token missing or invalid."
-      });
+    const cookies = parseCookies(req.headers.cookie);
+    let token = cookies[AUTH_COOKIE_NAME];
+    if (!token) {
+      const authHeader = req.headers.authorization;
+      if (authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+        token = authHeader.substring(7).trim();
+      }
     }
 
-    const token = authHeader.substring(7).trim();
     if (!token) {
       return res.status(401).json({
         error: "Authentication token missing or invalid."
@@ -1001,7 +1143,7 @@ app.post("/api/auth/register", registerRateLimiter, async (req: Request, res: Re
       });
     }
 
-    const { name, email, password } = req.body || {};
+    const { name, email, password, role } = req.body || {};
 
     if (typeof name !== 'string' || name.trim() === '') {
       return res.status(400).json({
@@ -1044,7 +1186,7 @@ app.post("/api/auth/register", registerRateLimiter, async (req: Request, res: Re
       email: normalizedEmail,
       passwordHash,
       name: trimmedName,
-      role: 'QA Tester',
+      role: typeof role === 'string' && role.trim() ? role.trim() : 'QA Tester',
       avatarInitials: getAvatarInitials(trimmedName),
       createdAt: now,
       updatedAt: now,
@@ -1074,9 +1216,11 @@ app.post("/api/auth/register", registerRateLimiter, async (req: Request, res: Re
       { expiresIn: tokenExpiry }
     );
 
+    setAuthCookie(res, token, tokenExpiry);
+    setCsrfCookie(res);
+
     return res.status(201).json({
       success: true,
-      token,
       user: toSafeUser(newUser)
     });
   } catch (error: any) {
@@ -1156,9 +1300,11 @@ app.post("/api/auth/login", loginRateLimiter, async (req: Request, res: Response
       { expiresIn: tokenExpiry }
     );
 
+    setAuthCookie(res, token, tokenExpiry);
+    setCsrfCookie(res);
+
     return res.json({
       success: true,
-      token,
       user: toSafeUser(user)
     });
   } catch (error: any) {
@@ -1169,6 +1315,27 @@ app.post("/api/auth/login", loginRateLimiter, async (req: Request, res: Response
     console.error(`Error in login: ${safeError}`);
     return res.status(500).json({ error: "Failed to authenticate user." });
   }
+});
+
+// 2b. POST /api/auth/logout - Clear authentication and CSRF cookies
+app.post("/api/auth/logout", (req: Request, res: Response) => {
+  clearAuthCookie(res);
+  res.clearCookie(CSRF_COOKIE_NAME, {
+    httpOnly: false,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    path: '/'
+  });
+  return res.json({
+    success: true,
+    message: "Logged out successfully."
+  });
+});
+
+// 2c. GET /api/auth/csrf - Issue CSRF token cookie
+app.get("/api/auth/csrf", (req: Request, res: Response) => {
+  setCsrfCookie(res);
+  return res.json({ success: true });
 });
 
 // 3. GET /api/auth/me - Verify session token and retrieve user profile
@@ -1278,6 +1445,41 @@ function buildUserProjectQuery(idParam: string | string[], userId: string) {
 // Projects & Workspaces MongoDB API Endpoints
 // ============================================================================
 
+function requireDatabase(req: Request, res: Response, next: NextFunction) {
+  if (!db) {
+    return res.status(503).json({
+      error: "Service temporarily unavailable (database offline)."
+    });
+  }
+  next();
+}
+
+app.use('/api/projects', requireDatabase);
+
+const MAX_BSON_DOC_BYTES = 14 * 1024 * 1024; // 14 MB safe threshold below MongoDB 16 MB limit
+const ARTIFACT_FIELDS = ['testSuites', 'executions', 'defects'] as const;
+
+function getApproxBsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value ?? null), 'utf8');
+}
+
+async function hydrateProjectWithArtifacts(project: any, userId: string): Promise<any> {
+  if (!project || !db) return project;
+  const hydrated = { ...project };
+  const projectId = String(project.id || project._id);
+  const artifacts = await db
+    .collection("project_artifacts")
+    .find({ projectId, userId })
+    .toArray();
+
+  for (const art of artifacts) {
+    if (art && typeof art.kind === 'string' && Array.isArray(art.items)) {
+      hydrated[art.kind] = art.items;
+    }
+  }
+  return hydrated;
+}
+
 // 1. GET /api/projects - Fetch all projects for the authenticated user (with optional status filter)
 app.get("/api/projects", requireAuth, async (req: Request, res: Response) => {
   try {
@@ -1290,10 +1492,13 @@ app.get("/api/projects", requireAuth, async (req: Request, res: Response) => {
     }
 
     const projects = await db.collection("projects").find(filter).toArray();
+    const hydratedProjects = await Promise.all(
+      projects.map((p: any) => hydrateProjectWithArtifacts(p, userId))
+    );
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
     res.setHeader("Pragma", "no-cache");
     res.setHeader("Expires", "0");
-    return res.json(projects);
+    return res.json(hydratedProjects);
   } catch (error: any) {
     const safeError = (error?.message || "Internal server error").replace(
       /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
@@ -1317,10 +1522,11 @@ app.get("/api/projects/:id", requireAuth, async (req: Request, res: Response) =>
       return res.status(404).json({ error: "Project not found." });
     }
 
+    const hydrated = await hydrateProjectWithArtifacts(project, userId);
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
     res.setHeader("Pragma", "no-cache");
     res.setHeader("Expires", "0");
-    return res.json(project);
+    return res.json(hydrated);
   } catch (error: any) {
     const safeError = (error?.message || "Internal server error").replace(
       /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
@@ -1472,6 +1678,149 @@ app.put("/api/projects/:id", requireAuth, async (req: Request, res: Response) =>
   }
 });
 
+// 4b. PATCH /api/projects/:id - Strictly whitelisted partial project update
+const ALLOWED_PROJECT_PATCH_FIELDS = new Set([
+  'name',
+  'type',
+  'version',
+  'description',
+  'status',
+  'environment',
+  'baseUrl',
+  'tags'
+]);
+
+function hasMongoOperatorInjection(value: unknown): boolean {
+  if (value === null || typeof value !== 'object') {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return value.some((item) => hasMongoOperatorInjection(item));
+  }
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (k.startsWith('$') || k.includes('.')) {
+      return true;
+    }
+    if (hasMongoOperatorInjection(v)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+app.patch("/api/projects/:id", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user!.userId;
+    const body = req.body;
+
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return res.status(400).json({ error: "Request body must be a valid JSON object." });
+    }
+
+    const keys = Object.keys(body);
+    if (keys.length === 0) {
+      return res.status(400).json({ error: "Update payload cannot be empty." });
+    }
+
+    if (hasMongoOperatorInjection(body)) {
+      return res.status(400).json({ error: "Invalid update payload: MongoDB operators are not permitted." });
+    }
+
+    const disallowedKeys = keys.filter((k) => !ALLOWED_PROJECT_PATCH_FIELDS.has(k));
+    if (disallowedKeys.length > 0) {
+      return res.status(400).json({
+        error: `Disallowed field(s) in update payload: ${disallowedKeys.join(', ')}.`
+      });
+    }
+
+    const updateFields: Record<string, unknown> = {
+      updatedAt: new Date().toISOString()
+    };
+
+    if (body.name !== undefined) {
+      if (typeof body.name !== 'string' || body.name.trim() === '') {
+        return res.status(400).json({ error: "Field 'name' must be a non-empty string." });
+      }
+      updateFields.name = body.name.trim();
+    }
+
+    if (body.type !== undefined) {
+      if (typeof body.type !== 'string' || body.type.trim() === '') {
+        return res.status(400).json({ error: "Field 'type' must be a non-empty string." });
+      }
+      updateFields.type = body.type.trim();
+    }
+
+    if (body.version !== undefined) {
+      if (typeof body.version !== 'string') {
+        return res.status(400).json({ error: "Field 'version' must be a string." });
+      }
+      updateFields.version = body.version.trim();
+    }
+
+    if (body.description !== undefined) {
+      if (typeof body.description !== 'string') {
+        return res.status(400).json({ error: "Field 'description' must be a string." });
+      }
+      updateFields.description = body.description.trim();
+    }
+
+    if (body.status !== undefined) {
+      if (typeof body.status !== 'string' || !['Active', 'Completed', 'Archived'].includes(body.status)) {
+        return res.status(400).json({ error: "Invalid status. Must be 'Active', 'Completed', or 'Archived'." });
+      }
+      updateFields.status = body.status;
+    }
+
+    if (body.environment !== undefined) {
+      if (typeof body.environment !== 'string') {
+        return res.status(400).json({ error: "Field 'environment' must be a string." });
+      }
+      updateFields.environment = body.environment.trim();
+    }
+
+    if (body.baseUrl !== undefined) {
+      if (typeof body.baseUrl !== 'string') {
+        return res.status(400).json({ error: "Field 'baseUrl' must be a string." });
+      }
+      updateFields.baseUrl = body.baseUrl.trim();
+    }
+
+    if (body.tags !== undefined) {
+      if (!Array.isArray(body.tags) || !body.tags.every((t: unknown) => typeof t === 'string')) {
+        return res.status(400).json({ error: "Field 'tags' must be an array of strings." });
+      }
+      updateFields.tags = body.tags.map((t: string) => t.trim());
+    }
+
+    const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    if (!db) {
+      return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
+    }
+
+    const query = buildUserProjectQuery(idParam, userId);
+    const result = await db.collection("projects").findOneAndUpdate(
+      query,
+      { $set: updateFields },
+      { returnDocument: 'after' }
+    );
+
+    if (!result) {
+      return res.status(404).json({ error: "Project not found." });
+    }
+
+    return res.json(result);
+  } catch (error: any) {
+    const safeError = (error?.message || "Internal server error").replace(
+      /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
+      "mongodb+srv://[credentials-hidden]@"
+    );
+    console.error(`Error patching project ${req.params.id}: ${safeError}`);
+    return res.status(500).json({ error: "Failed to update project." });
+  }
+});
+
 // 5. PATCH /api/projects/:id/status - Update project status
 app.patch("/api/projects/:id/status", requireAuth, async (req: Request, res: Response) => {
   try {
@@ -1570,17 +1919,44 @@ app.patch("/api/projects/:id/data", requireAuth, async (req: Request, res: Respo
     }
 
     // Ensure updatedAt timestamp reflects current modification
-    allowedData.updatedAt = new Date().toISOString();
+    const now = new Date().toISOString();
+    allowedData.updatedAt = now;
 
     if (!db) {
       return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
     }
 
-    // Real MongoDB Atlas update using $set to prevent full document replacement
+    // Separate large embedded collections into dedicated project_artifacts collection
+    const artifactUpdates: Record<string, any[]> = {};
+    const unsetFields: Record<string, 1> = {};
+    for (const field of ARTIFACT_FIELDS) {
+      if (allowedData[field] !== undefined) {
+        if (getApproxBsonBytes(allowedData[field]) > MAX_BSON_DOC_BYTES) {
+          return res.status(413).json({
+            error: `Field '${field}' exceeds maximum allowed document size (14 MB).`
+          });
+        }
+        artifactUpdates[field] = allowedData[field];
+        delete allowedData[field];
+        unsetFields[field] = 1;
+      }
+    }
+
+    if (getApproxBsonBytes(allowedData) > MAX_BSON_DOC_BYTES) {
+      return res.status(413).json({
+        error: "Project update payload exceeds maximum allowed document size (14 MB)."
+      });
+    }
+
     const query = buildUserProjectQuery(cleanId, userId);
+    const updateOp: any = { $set: allowedData };
+    if (Object.keys(unsetFields).length > 0) {
+      updateOp.$unset = unsetFields;
+    }
+
     const result = await db.collection("projects").findOneAndUpdate(
       query,
-      { $set: allowedData },
+      updateOp,
       { returnDocument: 'after' }
     );
 
@@ -1588,7 +1964,25 @@ app.patch("/api/projects/:id/data", requireAuth, async (req: Request, res: Respo
       return res.status(404).json({ error: "Project not found." });
     }
 
-    return res.json(result);
+    const projectId = String(result.id || cleanId);
+    for (const [kind, items] of Object.entries(artifactUpdates)) {
+      await db.collection("project_artifacts").updateOne(
+        { projectId, userId, kind },
+        {
+          $set: {
+            projectId,
+            userId,
+            kind,
+            items,
+            updatedAt: now
+          }
+        },
+        { upsert: true }
+      );
+    }
+
+    const hydrated = await hydrateProjectWithArtifacts(result, userId);
+    return res.json(hydrated);
   } catch (error: any) {
     const safeError = (error?.message || "Internal server error").replace(
       /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
@@ -1625,6 +2019,8 @@ app.delete("/api/projects/:id", requireAuth, async (req: Request, res: Response)
     if (result.deletedCount === 0) {
       return res.status(404).json({ error: "Project not found." });
     }
+
+    await db.collection("project_artifacts").deleteMany({ projectId: idParam, userId });
 
     return res.json({ success: true, message: "Project deleted successfully." });
   } catch (error: any) {
@@ -1966,6 +2362,12 @@ app.use('/api', (req: Request, res: Response) => {
 // Standalone execution (local development or container) calls setupServer().
 
 async function setupServer() {
+  try {
+    getJwtSecret();
+  } catch (jwtConfigErr: any) {
+    console.error(`[Qavora Server FATAL] ${jwtConfigErr?.message || 'JWT_SECRET is missing or invalid.'}`);
+    process.exit(1);
+  }
   let isShuttingDown = false;
   let httpServer: any = null;
 
@@ -1978,7 +2380,7 @@ async function setupServer() {
     app.use(vite.middlewares);
   } else {
     // Resolve dist directory relative to project root (or __dirname)
-    const distPath = path.resolve(__dirname, 'dist');
+    const distPath = path.basename(__dirname) === 'dist' ? __dirname : path.resolve(__dirname, 'dist');
     const indexPath = path.resolve(distPath, 'index.html');
 
     // Build reliability check: Fail fast with clear error if production build is missing
@@ -2070,5 +2472,14 @@ if (!isVercel) {
   setupServer();
 }
 
-export { connectToDatabase, loginRateLimiter, registerRateLimiter };
+async function closeDatabase(): Promise<void> {
+  if (mongoClientInstance) {
+    await mongoClientInstance.close();
+    mongoClientInstance = null;
+  }
+  db = (isProduction || isVercel) ? null : mockDb;
+  connectionPromise = null;
+}
+
+export { connectToDatabase, closeDatabase, loginRateLimiter, registerRateLimiter };
 export default app;

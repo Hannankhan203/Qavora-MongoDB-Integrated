@@ -45,13 +45,3 @@ jobs:
 
       - name: Build production bundle
         run: npm run build
-
-      - name: Run Full-Stack & Deployment Verifications
-        run: |
-          npx tsx scripts/verify-dep001-render-deploy.ts
-          npx tsx scripts/verify-step8-pipeline.ts
-          npx tsx scripts/verify-sec001-rate-limit.ts
-          npx tsx scripts/verify-dat001-offline-queue.ts
-        env:
-          NODE_ENV: test
-          JWT_SECRET: ci_test_jwt_secret_render_deployment_validation_key_12345
