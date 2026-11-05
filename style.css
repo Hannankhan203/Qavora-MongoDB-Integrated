@@ -11605,3 +11605,853 @@ body.mobile-nav-open {
     padding: 10px 18px !important;
   }
 }
+
+
+/* ==========================================================================
+   Phase 3: Complete Laptop & Desktop UI/UX Refinement (1024px to 1920px+)
+   ========================================================================== */
+
+/* 1. Global Laptop & Desktop Foundation (1024px and above) */
+@media (min-width: 1024px) {
+  /* Layout Architecture & Desktop Sidebar */
+  :root {
+    --sidebar-width: 256px;
+    --header-height: 64px;
+  }
+
+  .app-container {
+    display: flex !important;
+    min-height: 100vh !important;
+    width: 100% !important;
+  }
+
+  .sidebar {
+    position: fixed !important;
+    top: 0 !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    width: var(--sidebar-width) !important;
+    max-width: var(--sidebar-width) !important;
+    transform: none !important;
+    z-index: 40 !important;
+    box-shadow: none !important;
+    border-right: 1px solid var(--border-subtle) !important;
+    background-color: var(--bg-surface) !important;
+    display: flex !important;
+    flex-direction: column !important;
+    overflow-y: auto !important;
+  }
+
+  .sidebar-header {
+    height: var(--header-height) !important;
+    padding: 0 20px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    border-bottom: 1px solid var(--border-subtle) !important;
+    flex-shrink: 0 !important;
+  }
+
+  .sidebar-nav {
+    padding: 16px 12px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 4px !important;
+    flex: 1 !important;
+  }
+
+  .nav-link {
+    padding: 10px 14px !important;
+    gap: 12px !important;
+    font-size: 0.875rem !important;
+    font-weight: 500 !important;
+    border-radius: var(--radius-sm) !important;
+    transition: all var(--transition-speed) !important;
+    white-space: nowrap !important;
+  }
+
+  .nav-link svg {
+    width: 18px !important;
+    height: 18px !important;
+    flex-shrink: 0 !important;
+  }
+
+  .sidebar-footer {
+    padding: 14px 16px !important;
+    border-top: 1px solid var(--border-subtle) !important;
+    flex-shrink: 0 !important;
+  }
+
+  .sidebar-overlay,
+  .sidebar-toggle-btn,
+  .sidebar-close-btn {
+    display: none !important;
+  }
+
+  /* Main Wrapper & Top Navigation */
+  .main-wrapper {
+    margin-left: var(--sidebar-width) !important;
+    width: calc(100% - var(--sidebar-width)) !important;
+    min-width: 0 !important;
+    flex: 1 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    background-color: var(--bg-base) !important;
+  }
+
+  .top-nav {
+    height: var(--header-height) !important;
+    padding: 0 32px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 30 !important;
+    background-color: var(--bg-surface) !important;
+    border-bottom: 1px solid var(--border-subtle) !important;
+    backdrop-filter: blur(12px) !important;
+  }
+
+  .top-nav-left {
+    display: flex !important;
+    align-items: center !important;
+    gap: 16px !important;
+    min-width: 0 !important;
+  }
+
+  .page-title {
+    font-size: 1.15rem !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.015em !important;
+    color: var(--text-primary) !important;
+    white-space: nowrap !important;
+  }
+
+  .page-subtitle {
+    font-size: 0.75rem !important;
+    color: var(--text-muted) !important;
+    white-space: nowrap !important;
+  }
+
+  .top-nav-center {
+    display: flex !important;
+    max-width: 380px !important;
+    width: 100% !important;
+    margin: 0 24px !important;
+    flex-shrink: 1 !important;
+  }
+
+  .search-input-wrapper {
+    width: 100% !important;
+  }
+
+  .top-nav-right {
+    display: flex !important;
+    align-items: center !important;
+    gap: 12px !important;
+    flex-shrink: 0 !important;
+  }
+
+  .user-meta {
+    display: flex !important;
+    flex-direction: column !important;
+    text-align: left !important;
+  }
+
+  .search-kbd {
+    display: inline-flex !important;
+  }
+
+  /* Content Viewport Container Constraints */
+  .content-viewport {
+    max-width: 1680px !important;
+    width: 100% !important;
+    margin: 0 auto !important;
+    padding: 28px 32px !important;
+    box-sizing: border-box !important;
+    min-width: 0 !important;
+  }
+
+  /* Universal Desktop Grid Disciplines */
+  .stats-grid,
+  .project-stats-grid {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 16px !important;
+    margin-bottom: 24px !important;
+  }
+
+  .stat-card {
+    padding: 18px 20px !important;
+    border-radius: var(--radius-md) !important;
+  }
+
+  .stat-value {
+    font-size: 1.75rem !important;
+    font-weight: 700 !important;
+    font-variant-numeric: tabular-nums !important;
+  }
+
+  /* Form Grids on Desktop */
+  .form-row,
+  .form-row-2 {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 16px !important;
+  }
+
+  .form-row-3 {
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    gap: 16px !important;
+  }
+
+  .form-row-4 {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 14px !important;
+  }
+
+  /* Desktop Tables & Scroll Handling */
+  .cases-table-wrapper {
+    border-radius: var(--radius-md) !important;
+    border: 1px solid var(--border-subtle) !important;
+    background-color: var(--bg-card) !important;
+    overflow-x: auto !important;
+  }
+
+  .cases-table {
+    width: 100% !important;
+    font-size: 0.85rem !important;
+  }
+
+  .cases-table th {
+    padding: 12px 16px !important;
+    font-size: 0.72rem !important;
+  }
+
+  .cases-table td {
+    padding: 12px 16px !important;
+  }
+
+  /* Desktop Modals Foundation (All 17 Modals) */
+  .modal-backdrop {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 24px 20px !important;
+    z-index: 100 !important;
+  }
+
+  .modal-dialog {
+    width: 100% !important;
+    max-width: 580px !important;
+    max-height: min(88vh, 840px) !important;
+    display: flex !important;
+    flex-direction: column !important;
+    border-radius: var(--radius-lg) !important;
+    overflow: hidden !important;
+    box-shadow: 0 24px 64px -12px rgba(0, 0, 0, 0.75), 0 0 0 1px var(--border-medium) !important;
+  }
+
+  .modal-dialog.modal-dialog-sm {
+    max-width: 460px !important;
+  }
+
+  .modal-dialog.modal-dialog-md {
+    max-width: 660px !important;
+  }
+
+  .modal-dialog.modal-dialog-lg {
+    max-width: 840px !important;
+  }
+
+  .modal-header {
+    padding: 18px 24px !important;
+    border-bottom: 1px solid var(--border-subtle) !important;
+    flex-shrink: 0 !important;
+  }
+
+  .modal-form,
+  .view-case-body,
+  .modal-body {
+    padding: 20px 24px !important;
+    flex: 1 !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+    gap: 16px !important;
+  }
+
+  .modal-footer {
+    padding: 14px 24px !important;
+    border-top: 1px solid var(--border-subtle) !important;
+    background-color: var(--bg-surface) !important;
+    flex-shrink: 0 !important;
+  }
+}
+
+/* 2. Standard Laptops Specific Refinements (1024px to 1279px) */
+@media (min-width: 1024px) and (max-width: 1279px) {
+  :root {
+    --sidebar-width: 224px !important;
+  }
+
+  .content-viewport {
+    padding: 22px 24px !important;
+  }
+
+  .top-nav {
+    padding: 0 24px !important;
+    gap: 12px !important;
+  }
+
+  .top-nav-center {
+    max-width: 280px !important;
+    margin: 0 12px !important;
+  }
+
+  /* Defect Tracking 5 KPI cards in 1 row with compact padding */
+  #view-defects .stats-grid {
+    display: grid !important;
+    grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+    gap: 12px !important;
+  }
+
+  #view-defects .stats-grid .stat-card {
+    padding: 14px 12px !important;
+  }
+
+  #view-defects .stats-grid .stat-title,
+  #view-defects .stats-grid .stat-label {
+    font-size: 0.72rem !important;
+  }
+
+  #view-defects .stats-grid .stat-value {
+    font-size: 1.4rem !important;
+  }
+
+  /* Execution 8 metrics in 4x2 grid */
+  .exec-metrics-bar {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 12px 14px !important;
+    padding: 14px 18px !important;
+  }
+
+  /* Dashboard QA Analytics 8 chips in 4x2 grid */
+  .dash-analytics-stats {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+  }
+
+  /* Reports KPI grid in 4 columns */
+  .reports-kpi-grid {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 12px !important;
+  }
+
+  .projects-grid {
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)) !important;
+    gap: 18px !important;
+  }
+
+  .qa-mychk-grid {
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)) !important;
+    gap: 18px !important;
+  }
+
+  .modal-dialog.modal-dialog-lg {
+    max-width: 760px !important;
+  }
+}
+
+/* 3. Large Laptops Specific Refinements (1280px to 1439px) */
+@media (min-width: 1280px) and (max-width: 1439px) {
+  :root {
+    --sidebar-width: 240px !important;
+  }
+
+  .content-viewport {
+    padding: 26px 30px !important;
+  }
+
+  .top-nav {
+    padding: 0 30px !important;
+  }
+
+  .top-nav-center {
+    max-width: 340px !important;
+    margin: 0 20px !important;
+  }
+
+  /* Defect Tracking 5 KPI cards in 1 row */
+  #view-defects .stats-grid {
+    display: grid !important;
+    grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+    gap: 14px !important;
+  }
+
+  /* Execution 8 metrics in 1 single row */
+  .exec-metrics-bar {
+    display: grid !important;
+    grid-template-columns: repeat(8, minmax(0, 1fr)) !important;
+    gap: 12px !important;
+    padding: 16px 20px !important;
+  }
+
+  /* Dashboard QA Analytics 8 chips in 1 row */
+  .dash-analytics-stats {
+    display: grid !important;
+    grid-template-columns: repeat(8, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+  }
+
+  /* Reports KPI grid in 4 columns */
+  .reports-kpi-grid {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 14px !important;
+  }
+
+  .projects-grid {
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)) !important;
+    gap: 20px !important;
+  }
+
+  .qa-mychk-grid {
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)) !important;
+    gap: 20px !important;
+  }
+
+  .modal-dialog.modal-dialog-lg {
+    max-width: 820px !important;
+  }
+}
+
+/* 4. Desktop Monitors Specific Refinements (1440px to 1919px) */
+@media (min-width: 1440px) and (max-width: 1919px) {
+  :root {
+    --sidebar-width: 260px !important;
+  }
+
+  .content-viewport {
+    padding: 30px 36px !important;
+  }
+
+  .top-nav {
+    padding: 0 36px !important;
+  }
+
+  .top-nav-center {
+    max-width: 440px !important;
+    margin: 0 28px !important;
+  }
+
+  /* Data Management 6 KPI cards in 1 row */
+  .stats-grid.data-stats-grid {
+    display: grid !important;
+    grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+    gap: 14px !important;
+  }
+
+  /* Defect Tracking 5 KPI cards in 1 row */
+  #view-defects .stats-grid {
+    display: grid !important;
+    grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+    gap: 16px !important;
+  }
+
+  /* Execution 8 metrics in 1 row */
+  .exec-metrics-bar {
+    display: grid !important;
+    grid-template-columns: repeat(8, minmax(0, 1fr)) !important;
+    gap: 14px !important;
+  }
+
+  /* Dashboard QA Analytics 8 chips in 1 row */
+  .dash-analytics-stats {
+    display: grid !important;
+    grid-template-columns: repeat(8, minmax(0, 1fr)) !important;
+    gap: 12px !important;
+  }
+
+  /* Reports KPI grid in 6 columns (or 4 columns if < 1600px) */
+  .reports-kpi-grid {
+    display: grid !important;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)) !important;
+    gap: 16px !important;
+  }
+
+  .projects-grid {
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)) !important;
+    gap: 22px !important;
+  }
+
+  .qa-mychk-grid {
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)) !important;
+    gap: 22px !important;
+  }
+
+  .modal-dialog.modal-dialog-lg {
+    max-width: 860px !important;
+  }
+}
+
+/* 5. Large & Ultrawide Displays Specific Refinements (1920px and above) */
+@media (min-width: 1920px) {
+  :root {
+    --sidebar-width: 270px !important;
+  }
+
+  .content-viewport {
+    max-width: 1740px !important;
+    padding: 34px 44px !important;
+  }
+
+  .top-nav {
+    padding: 0 44px !important;
+  }
+
+  .top-nav-center {
+    max-width: 500px !important;
+    margin: 0 36px !important;
+  }
+
+  .stats-grid.data-stats-grid {
+    display: grid !important;
+    grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+    gap: 16px !important;
+  }
+
+  #view-defects .stats-grid {
+    display: grid !important;
+    grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+    gap: 18px !important;
+  }
+
+  .reports-kpi-grid {
+    display: grid !important;
+    grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+    gap: 18px !important;
+  }
+
+  .projects-grid {
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)) !important;
+    gap: 24px !important;
+  }
+
+  .qa-mychk-grid {
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)) !important;
+    gap: 24px !important;
+  }
+
+  .modal-dialog.modal-dialog-lg {
+    max-width: 900px !important;
+  }
+}
+
+/* 6. Height-Constrained Laptop Displays (720px / 768px Window Heights) */
+@media (min-width: 1024px) and (max-height: 820px) {
+  .welcome-banner {
+    padding: 16px 22px !important;
+    margin-bottom: 18px !important;
+  }
+
+  .welcome-heading {
+    font-size: 1.45rem !important;
+  }
+
+  .welcome-description {
+    font-size: 0.85rem !important;
+    line-height: 1.45 !important;
+  }
+
+  .stats-grid {
+    margin-bottom: 18px !important;
+  }
+
+  .stat-card {
+    padding: 14px 16px !important;
+  }
+
+  .stat-value {
+    font-size: 1.55rem !important;
+  }
+
+  .dashboard-sections-grid > .panel {
+    min-height: 320px !important;
+  }
+
+  .qa-gen-textarea {
+    min-height: 280px !important;
+    max-height: 380px !important;
+  }
+
+  .modal-dialog {
+    max-height: calc(100vh - 48px) !important;
+  }
+
+  .modal-header {
+    padding: 14px 20px !important;
+  }
+
+  .modal-form,
+  .view-case-body,
+  .modal-body {
+    padding: 16px 20px !important;
+    gap: 14px !important;
+  }
+
+  .modal-footer {
+    padding: 12px 20px !important;
+  }
+
+  .cases-table th,
+  .cases-table td {
+    padding: 10px 14px !important;
+  }
+}
+
+/* 7. Screen-Specific Precision Refinements across Laptop & Desktop */
+@media (min-width: 1024px) {
+  /* Screen 1: Auth Screen Desktop Polish */
+  .auth-card-wrapper {
+    max-width: 440px !important;
+  }
+
+  .auth-card {
+    padding: 32px 30px !important;
+    box-shadow: 0 24px 60px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px var(--border-medium) !important;
+  }
+
+  /* Screen 2: Dashboard Polish */
+  .dashboard-sections-grid {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr) !important;
+    gap: 20px !important;
+  }
+
+  #recent-projects-container,
+  #recent-activity-container {
+    max-height: 480px !important;
+    overflow-y: auto !important;
+  }
+
+  /* Screen 3: Projects Polish */
+  .projects-top-bar {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 16px !important;
+    flex-wrap: nowrap !important;
+    margin-bottom: 20px !important;
+  }
+
+  .projects-toolbar {
+    display: flex !important;
+    align-items: center !important;
+    gap: 12px !important;
+    flex-wrap: nowrap !important;
+  }
+
+  /* Screen 4: Project Details Polish */
+  .project-details-hero {
+    padding: 24px 28px !important;
+    margin-bottom: 24px !important;
+  }
+
+  .project-tabs {
+    display: flex !important;
+    gap: 8px !important;
+    border-bottom: 1px solid var(--border-subtle) !important;
+    margin-bottom: 24px !important;
+  }
+
+  .project-tab-btn {
+    padding: 10px 18px !important;
+    font-size: 0.88rem !important;
+    font-weight: 600 !important;
+    white-space: nowrap !important;
+  }
+
+  /* Screen 5: Test Plans Polish */
+  .plans-top-bar {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 16px !important;
+    flex-wrap: nowrap !important;
+    margin-bottom: 20px !important;
+  }
+
+  .plans-top-actions {
+    display: flex !important;
+    align-items: center !important;
+    gap: 10px !important;
+    flex-shrink: 0 !important;
+  }
+
+  /* Screen 6: Test Execution Polish */
+  .exec-top-bar {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 16px !important;
+    flex-wrap: nowrap !important;
+    margin-bottom: 18px !important;
+  }
+
+  .exec-metrics-bar .metric-val {
+    font-size: 1.55rem !important;
+    font-weight: 700 !important;
+    font-variant-numeric: tabular-nums !important;
+  }
+
+  .exec-toolbar {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 14px !important;
+    flex-wrap: nowrap !important;
+    margin-bottom: 16px !important;
+  }
+
+  .exec-filter-tabs {
+    display: flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    flex-wrap: nowrap !important;
+  }
+
+  /* Screen 7: Defects Polish */
+  .defects-top-bar {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 16px !important;
+    flex-wrap: nowrap !important;
+    margin-bottom: 18px !important;
+  }
+
+  .defects-toolbar {
+    display: flex !important;
+    align-items: center !important;
+    gap: 10px !important;
+    flex-wrap: nowrap !important;
+    margin-bottom: 18px !important;
+  }
+
+  /* Screen 8: Reports Polish */
+  .reports-top-bar {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 16px !important;
+    flex-wrap: nowrap !important;
+    margin-bottom: 22px !important;
+  }
+
+  .reports-two-col-grid {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+    gap: 20px !important;
+    margin-bottom: 24px !important;
+  }
+
+  .reports-donut-layout {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 28px !important;
+    padding: 24px !important;
+    min-height: 280px !important;
+  }
+
+  .trend-chart-container {
+    padding: 16px 20px !important;
+    min-height: 240px !important;
+  }
+
+  /* Screen 9: Settings Polish */
+  .settings-cards-grid {
+    max-width: 1040px !important;
+    margin: 0 auto !important;
+    gap: 22px !important;
+  }
+
+  /* Screen 10: Data Management Polish */
+  .data-management-actions-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 20px !important;
+  }
+
+  /* Screen 11: Checklist Generator Polish */
+  .qa-gen-input-layout {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1.55fr) minmax(320px, 0.85fr) !important;
+    gap: 22px !important;
+    align-items: start !important;
+  }
+
+  /* Screen 12: My Checklists Polish */
+  .qa-mychk-toolbar {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 14px !important;
+    flex-wrap: nowrap !important;
+    margin-bottom: 20px !important;
+  }
+
+  /* Screen 13: QA Test Runner Polish */
+  .qa-runner-top-nav {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 16px !important;
+    flex-wrap: nowrap !important;
+    margin-bottom: 18px !important;
+  }
+
+  .qa-runner-metrics-grid {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 14px !important;
+  }
+
+  /* Modal-Specific Desktop Refinements */
+  /* Execution Modal */
+  #execution-modal .exec-status-radios-group,
+  #execution-modal .exec-status-group {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+  }
+
+  /* View Details Modals */
+  #testcase-view-modal .view-case-header-meta,
+  #defect-view-modal .view-defect-header-meta {
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    flex-wrap: wrap !important;
+  }
+
+  /* Notifications & Dropdowns */
+  .notifications-dropdown {
+    width: 380px !important;
+    max-height: 460px !important;
+    overflow-y: auto !important;
+    box-shadow: 0 16px 40px -8px rgba(0, 0, 0, 0.65), 0 0 0 1px var(--border-medium) !important;
+  }
+
+  .toast-container {
+    bottom: 28px !important;
+    right: 32px !important;
+    max-width: 420px !important;
+  }
+}
