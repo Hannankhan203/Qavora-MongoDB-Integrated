@@ -1359,6 +1359,92 @@ app.patch("/api/auth/preferences", requireAuth, async (req: Request, res: Respon
   }
 });
 
+// 6.5. GET /api/data/storage-usage - Actual MongoDB Atlas database storage usage
+app.get("/api/data/storage-usage", requireAuth, async (req: Request, res: Response) => {
+  try {
+    if (!db) {
+      return res.status(503).json({
+        error: "Service temporarily unavailable (database offline).",
+        status: "offline"
+      });
+    }
+
+    // Retrieve genuine database statistics directly from MongoDB Atlas via dbStats command
+    const stats: any = await db.command({ dbStats: 1, scale: 1 });
+
+    const rawDataSize = typeof stats.dataSize === 'number' ? stats.dataSize : 0;
+    const rawStorageSize = typeof stats.storageSize === 'number' ? stats.storageSize : 0;
+    const rawIndexSize = typeof stats.indexSize === 'number' ? stats.indexSize : 0;
+
+    // Total storage footprint: In MongoDB WiredTiger, actual disk space consumed by the database
+    // equals storageSize (compressed data on disk) plus indexSize (index allocation on disk).
+    const totalFootprintBytes = typeof stats.totalSize === 'number' && stats.totalSize > 0
+      ? stats.totalSize
+      : (rawStorageSize + rawIndexSize);
+
+    // Configurable reference storage capacity limit (default 512 MB)
+    const envLimit = Number(process.env.MONGODB_STORAGE_LIMIT_MB);
+    const capacityMb = !isNaN(envLimit) && envLimit > 0 ? envLimit : 512;
+    const capacityBytes = capacityMb * 1024 * 1024;
+
+    const usedMb = Number((totalFootprintBytes / (1024 * 1024)).toFixed(2));
+    const availableBytes = Math.max(0, capacityBytes - totalFootprintBytes);
+    const availableMb = Number(Math.max(0, capacityMb - (totalFootprintBytes / (1024 * 1024))).toFixed(2));
+    const usagePercentage = Number(Math.min(100, Math.max(0, (totalFootprintBytes / capacityBytes) * 100)).toFixed(2));
+
+    const dataSizeMb = Number((rawDataSize / (1024 * 1024)).toFixed(2));
+    const storageSizeMb = Number((rawStorageSize / (1024 * 1024)).toFixed(2));
+    const indexSizeMb = Number((rawIndexSize / (1024 * 1024)).toFixed(2));
+
+    return res.json({
+      success: true,
+      status: "connected",
+      storage: {
+        usedBytes: totalFootprintBytes,
+        usedMb,
+        capacityBytes,
+        capacityMb,
+        availableBytes,
+        availableMb,
+        usagePercentage
+      },
+      metrics: {
+        dataSize: {
+          bytes: rawDataSize,
+          mb: dataSizeMb
+        },
+        storageSize: {
+          bytes: rawStorageSize,
+          mb: storageSizeMb
+        },
+        indexSize: {
+          bytes: rawIndexSize,
+          mb: indexSizeMb
+        },
+        totalStorage: {
+          bytes: totalFootprintBytes,
+          mb: usedMb
+        }
+      },
+      metadata: {
+        collections: typeof stats.collections === 'number' ? stats.collections : 0,
+        objects: typeof stats.objects === 'number' ? stats.objects : 0,
+        indexes: typeof stats.indexes === 'number' ? stats.indexes : 0,
+        avgObjSizeBytes: typeof stats.avgObjSize === 'number' ? Math.round(stats.avgObjSize) : 0,
+        timestamp: new Date().toISOString(),
+        definition: "Total storage footprint equals MongoDB storageSize (compressed data on disk) plus indexSize (indexes on disk)."
+      }
+    });
+  } catch (error: any) {
+    const safeError = sanitizeDiagnosticText(error?.message || "Internal server error");
+    console.error(`[Qavora Server] Error retrieving MongoDB storage stats: ${safeError}`);
+    return res.status(500).json({
+      error: "Failed to retrieve MongoDB database storage statistics.",
+      status: "error"
+    });
+  }
+});
+
 // 7. POST /api/data/reset - Danger Zone: Reset all projects and checklists for the authenticated user
 app.post("/api/data/reset", requireAuth, async (req: Request, res: Response) => {
   try {

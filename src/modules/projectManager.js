@@ -80,6 +80,9 @@ export async function createProject(payload) {
     setActiveProjectId(res.data.id);
     updateSidebarProjectCounters();
     renderDashboard();
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('qavora:storage-invalidate'));
+    }
     return { ok: true, project: res.data };
   }
   return { ok: false, status: res.status, error: res.data?.error || 'Failed to create project.' };
@@ -110,6 +113,9 @@ export async function saveProjectData(projectId, dataPayload) {
     setProjects(updated);
     updateSidebarProjectCounters();
     renderDashboard();
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('qavora:storage-invalidate'));
+    }
     return { ok: true, project: res.data };
   }
   return { ok: false, status: res.status, error: res.data?.error || 'Failed to save project data.' };
@@ -127,6 +133,9 @@ export async function deleteProjectById(projectId) {
     }
     updateSidebarProjectCounters();
     renderDashboard();
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('qavora:storage-invalidate'));
+    }
     return { ok: true };
   }
   return { ok: false, status: res.status, error: res.data?.error || 'Failed to delete project.' };

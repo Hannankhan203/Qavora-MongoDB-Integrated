@@ -77,7 +77,7 @@ import {
 } from './src/modules/defectManager.js';
 import { renderReportsWorkspace } from './src/modules/reportsManager.js';
 import { renderSettingsWorkspace } from './src/modules/settingsManager.js';
-import { renderDataManagementWorkspace } from './src/modules/dataManager.js';
+import { renderDataManagementWorkspace, refreshStorageUsage } from './src/modules/dataManager.js';
 import {
   showToast,
   navigateTo,
@@ -228,6 +228,7 @@ if (typeof window !== 'undefined') {
     renderReportsWorkspace,
     renderSettingsWorkspace,
     renderDataManagementWorkspace,
+    refreshStorageUsage,
     showToast,
     navigateTo,
     resolveInitialRoute

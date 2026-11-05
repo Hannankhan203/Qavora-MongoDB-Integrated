@@ -44,6 +44,164 @@ function exportCsvFile(filename, headers, rows) {
   URL.revokeObjectURL(url);
 }
 
+let _isFetchingStorage = false;
+let _lastStorageStats = null;
+
+export async function fetchStorageUsage(force = false) {
+  if (typeof document === 'undefined') return null;
+
+  // Prevent overlapping refresh requests
+  if (_isFetchingStorage) {
+    return _lastStorageStats;
+  }
+  _isFetchingStorage = true;
+
+  const refreshBtn = document.getElementById('btn-refresh-storage-stats');
+  const refreshIcon = document.getElementById('btn-refresh-storage-icon');
+  const refreshText = document.getElementById('btn-refresh-storage-text');
+  const statusBadge = document.getElementById('data-storage-status-badge');
+
+  if (refreshBtn) refreshBtn.setAttribute('disabled', 'true');
+  if (refreshIcon) refreshIcon.classList.add('btn-icon-spin');
+  if (refreshText) refreshText.textContent = 'Updating...';
+
+  try {
+    const res = await apiFetch('/api/data/storage-usage');
+
+    if (res.ok) {
+      const data = await res.json();
+      const storage = data.storage || {};
+      const metrics = data.metrics || {};
+      const metadata = data.metadata || {};
+
+      _lastStorageStats = data;
+
+      // 1. Used Storage
+      const usedMb = typeof storage.usedMb === 'number' ? storage.usedMb : 0;
+      const usedBytes = typeof storage.usedBytes === 'number' ? storage.usedBytes : 0;
+      let usedText = `${usedMb} MB`;
+      if (usedMb < 0.01 && usedBytes > 0) {
+        usedText = `${(usedBytes / 1024).toFixed(1)} KB (<0.01 MB)`;
+      } else if (usedMb === 0 && usedBytes === 0) {
+        usedText = `0 MB`;
+      }
+      setEl('data-stat-storage-used', usedText);
+      setEl('data-stat-storage-size', usedText);
+
+      // 2. Total Capacity
+      const capacityMb = typeof storage.capacityMb === 'number' ? storage.capacityMb : 512;
+      setEl('data-stat-storage-capacity', `${capacityMb} MB`);
+
+      // 3. Available Storage
+      const availableMb = typeof storage.availableMb === 'number' ? storage.availableMb : capacityMb;
+      setEl('data-stat-storage-available', `${availableMb} MB`);
+
+      // 4. Usage Percentage
+      const usagePercentage = typeof storage.usagePercentage === 'number' ? storage.usagePercentage : 0;
+      setEl('data-stat-storage-percent', `${usagePercentage}%`);
+
+      // 5. Ratio & Progress Bar
+      setEl('data-stat-storage-ratio', `${usedMb} MB / ${capacityMb} MB`);
+
+      const bar = document.getElementById('data-stat-storage-bar');
+      if (bar) {
+        const pct = Math.min(100, Math.max(0, usagePercentage));
+        const width = pct > 0 && pct < 0.4 ? '0.4%' : `${pct}%`;
+        bar.style.width = width;
+        if (pct >= 90) {
+          bar.style.background = 'var(--danger-color, #ef4444)';
+        } else if (pct >= 75) {
+          bar.style.background = 'var(--warning-color, #f59e0b)';
+        } else {
+          bar.style.background = 'linear-gradient(90deg, var(--accent-primary) 0%, #8b5cf6 100%)';
+        }
+      }
+
+      // 6. Detailed Metrics Breakdown
+      const dataSizeMb = metrics.dataSize?.mb ?? 0;
+      const indexSizeMb = metrics.indexSize?.mb ?? 0;
+      const storageSizeMb = metrics.storageSize?.mb ?? 0;
+      setEl(
+        'data-stat-storage-breakdown',
+        `Data: ${dataSizeMb} MB | Index: ${indexSizeMb} MB`
+      );
+
+      const collCount = metadata.collections ?? 0;
+      const docCount = metadata.objects ?? 0;
+      setEl(
+        'data-stat-storage-details',
+        `Actual MongoDB Atlas footprint: ${usedMb} MB total (${storageSizeMb} MB disk data + ${indexSizeMb} MB indexes across ${collCount} collection${collCount === 1 ? '' : 's'} and ${docCount} documents).`
+      );
+
+      // 7. Last Updated Timestamp & Status Badge
+      setEl(
+        'data-stat-storage-updated',
+        `Updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
+      );
+
+      if (statusBadge) {
+        statusBadge.style.background = 'rgba(16, 185, 129, 0.15)';
+        statusBadge.style.color = '#10b981';
+        statusBadge.innerHTML = '<span style="width: 6px; height: 6px; border-radius: 50%; background: #10b981;"></span> Live Atlas Connection';
+      }
+
+      return data;
+    } else {
+      // API error or offline (HTTP 503 / 500) - Never display misleading zero usage
+      const err = await res.json().catch(() => ({}));
+      const errorMsg = err.error || (res.status === 503 ? 'Database is offline' : 'Storage service unavailable');
+
+      setEl('data-stat-storage-used', 'Unavailable');
+      setEl('data-stat-storage-size', 'Unavailable');
+      setEl('data-stat-storage-available', '--');
+      setEl('data-stat-storage-percent', '--%');
+      setEl('data-stat-storage-ratio', '-- / 512 MB');
+      setEl('data-stat-storage-breakdown', 'Offline / Connection error');
+      setEl('data-stat-storage-details', `Unable to retrieve MongoDB Atlas statistics: ${errorMsg}`);
+      setEl('data-stat-storage-updated', 'Sync failed');
+
+      const bar = document.getElementById('data-stat-storage-bar');
+      if (bar) bar.style.width = '0%';
+
+      if (statusBadge) {
+        statusBadge.style.background = 'rgba(239, 68, 68, 0.15)';
+        statusBadge.style.color = '#ef4444';
+        statusBadge.innerHTML = '<span style="width: 6px; height: 6px; border-radius: 50%; background: #ef4444;"></span> Storage Stats Unavailable';
+      }
+
+      return null;
+    }
+  } catch (netErr) {
+    // Network failure
+    setEl('data-stat-storage-used', 'Unavailable');
+    setEl('data-stat-storage-size', 'Unavailable');
+    setEl('data-stat-storage-available', '--');
+    setEl('data-stat-storage-percent', '--%');
+    setEl('data-stat-storage-ratio', '-- / 512 MB');
+    setEl('data-stat-storage-breakdown', 'Network failure');
+    setEl('data-stat-storage-details', `Network error connecting to storage API: ${netErr.message || 'Unknown network error'}`);
+    setEl('data-stat-storage-updated', 'Sync error');
+
+    const bar = document.getElementById('data-stat-storage-bar');
+    if (bar) bar.style.width = '0%';
+
+    if (statusBadge) {
+      statusBadge.style.background = 'rgba(239, 68, 68, 0.15)';
+      statusBadge.style.color = '#ef4444';
+      statusBadge.innerHTML = '<span style="width: 6px; height: 6px; border-radius: 50%; background: #ef4444;"></span> Storage Stats Unavailable';
+    }
+
+    return null;
+  } finally {
+    _isFetchingStorage = false;
+    if (refreshBtn) refreshBtn.removeAttribute('disabled');
+    if (refreshIcon) refreshIcon.classList.remove('btn-icon-spin');
+    if (refreshText) refreshText.textContent = 'Refresh Usage';
+  }
+}
+
+export const refreshStorageUsage = fetchStorageUsage;
+
 export function renderDataManagementWorkspace() {
   if (typeof document === 'undefined') return;
 
@@ -85,15 +243,8 @@ export function renderDataManagementWorkspace() {
     }
   }).catch(() => {});
 
-  // Compute Footprint: Estimated serialized data payload size in memory
-  const serialized = JSON.stringify(projects);
-  const bytes = new Blob([serialized]).size;
-  const kb = (bytes / 1024).toFixed(1);
-
-  setEl('data-stat-storage-size', `${kb} KB`);
-  setEl('data-stat-storage-percent', `Serialized JSON`);
-  const bar = document.getElementById('data-stat-storage-bar');
-  if (bar) bar.style.width = `100%`;
+  // Fetch actual MongoDB Atlas database storage usage
+  fetchStorageUsage().catch(() => {});
 
   // 2. Populate Dropdowns
   populateDataProjectDropdowns(projects);
@@ -991,4 +1142,17 @@ export function initDataManagementEventListeners() {
     confirmBtn.addEventListener('click', executeWorkspaceReset);
     modalFooter.appendChild(confirmBtn);
   }
+
+  // 10. Manual MongoDB Atlas Storage Refresh Button
+  const btnRefreshStorage = document.getElementById('btn-refresh-storage-stats');
+  if (btnRefreshStorage) {
+    btnRefreshStorage.addEventListener('click', () => {
+      fetchStorageUsage(true);
+    });
+  }
+
+  // 11. React to workspace mutations (create, delete, import, reset, rollback)
+  window.addEventListener('qavora:storage-invalidate', () => {
+    fetchStorageUsage(true);
+  });
 }

@@ -9491,3 +9491,7 @@ body.mobile-nav-open {
   width: 14px;
   height: 14px;
 }
+
+.btn-icon-spin {
+  animation: authSpin 0.75s linear infinite;
+}

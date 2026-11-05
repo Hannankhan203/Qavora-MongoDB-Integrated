@@ -3265,33 +3265,102 @@
               <div class="stat-footer" id="data-stat-checklists-sub">Saved QA checklists</div>
             </div>
 
-            <div class="stat-card" style="grid-column: 1 / -1; background: linear-gradient(135deg, var(--bg-card) 0%, var(--bg-input) 100%);">
-              <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+            <div class="stat-card data-storage-dashboard-card" style="grid-column: 1 / -1; background: linear-gradient(135deg, var(--bg-card) 0%, var(--bg-input) 100%); padding: 18px 20px; border: 1px solid var(--border-color); border-radius: var(--radius-lg, 12px);">
+              <!-- Top Row: Title, Live Status Badge, and Manual Refresh Button -->
+              <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
                 <div style="display: flex; align-items: center; gap: 12px;">
-                  <span class="stat-icon icon-purple" style="width: 36px; height: 36px;">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <span class="stat-icon icon-purple" style="width: 38px; height: 38px; display: inline-flex; align-items: center; justify-content: center; border-radius: 10px; background: rgba(139, 92, 246, 0.12); color: #8b5cf6;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 22px; height: 22px;">
                       <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
                       <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
                       <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
                     </svg>
                   </span>
                   <div>
-                    <div style="font-weight: 700; font-size: 0.95rem; color: var(--text-primary);">
-                      Estimated Project &amp; Checklist Data Size: <span id="data-stat-storage-size">0 KB</span>
+                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                      <span style="font-weight: 700; font-size: 1.05rem; color: var(--text-primary); letter-spacing: -0.01em;">MongoDB Atlas Storage Usage</span>
+                      <span id="data-storage-status-badge" class="badge" style="font-size: 0.68rem; padding: 2px 8px; border-radius: 999px; background: rgba(16, 185, 129, 0.15); color: #10b981; font-weight: 600; display: inline-flex; align-items: center; gap: 4px;">
+                        <span style="width: 6px; height: 6px; border-radius: 50%; background: #10b981;"></span>
+                        Live Atlas Connection
+                      </span>
                     </div>
-                    <div style="font-size: 0.75rem; color: var(--text-muted);">
-                      Estimated serialized data payload size in memory (uncompressed JSON; does not represent MongoDB Atlas storage)
+                    <div id="data-storage-subtitle" style="font-size: 0.76rem; color: var(--text-muted); margin-top: 2px;">
+                      Actual database storage footprint retrieved via MongoDB dbStats (512 MB reference limit)
                     </div>
                   </div>
                 </div>
-                <div style="min-width: 220px; flex: 1; max-width: 380px;">
-                  <div style="display: flex; justify-content: space-between; font-size: 0.72rem; color: var(--text-secondary); margin-bottom: 4px;">
-                    <span>Payload Scale</span>
-                    <span id="data-stat-storage-percent">Serialized JSON</span>
+
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <button type="button" id="btn-refresh-storage-stats" class="btn btn-secondary btn-sm" title="Refresh MongoDB Atlas storage usage" style="display: inline-flex; align-items: center; gap: 6px; font-size: 0.78rem; padding: 6px 12px; cursor: pointer;">
+                    <svg id="btn-refresh-storage-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px; transition: transform 0.5s ease;">
+                      <path d="M23 4v6h-6"></path>
+                      <path d="M1 20v-6h6"></path>
+                      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                    </svg>
+                    <span id="btn-refresh-storage-text">Refresh Usage</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Metric Grid: 1. Used, 2. Capacity, 3. Available, 4. Usage % -->
+              <div class="storage-metrics-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 14px;">
+                <!-- 1. MongoDB Storage Used -->
+                <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 14px;">
+                  <div style="font-size: 0.72rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.03em;">MongoDB Storage Used</div>
+                  <div style="display: flex; align-items: baseline; gap: 4px; margin-top: 4px;">
+                    <span id="data-stat-storage-used" style="font-size: 1.25rem; font-weight: 800; color: var(--text-primary);">--</span>
+                    <!-- Hidden element retaining compatibility with data-stat-storage-size -->
+                    <span id="data-stat-storage-size" style="display: none;">0 KB</span>
                   </div>
-                  <div style="height: 6px; background-color: var(--border-color); border-radius: 999px; overflow: hidden;">
-                    <div id="data-stat-storage-bar" style="height: 100%; width: 100%; background-color: var(--accent-primary); border-radius: 999px;"></div>
+                  <div id="data-stat-storage-breakdown" style="font-size: 0.7rem; color: var(--text-muted); margin-top: 2px;">Data + Index footprint</div>
+                </div>
+
+                <!-- 2. Total Storage Capacity -->
+                <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 14px;">
+                  <div style="font-size: 0.72rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.03em;">Total Capacity</div>
+                  <div style="display: flex; align-items: baseline; gap: 4px; margin-top: 4px;">
+                    <span id="data-stat-storage-capacity" style="font-size: 1.25rem; font-weight: 800; color: var(--text-primary);">512 MB</span>
                   </div>
+                  <div id="data-stat-storage-capacity-note" style="font-size: 0.7rem; color: var(--text-muted); margin-top: 2px;">Reference limit</div>
+                </div>
+
+                <!-- 3. Available Storage -->
+                <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 14px;">
+                  <div style="font-size: 0.72rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.03em;">Available Storage</div>
+                  <div style="display: flex; align-items: baseline; gap: 4px; margin-top: 4px;">
+                    <span id="data-stat-storage-available" style="font-size: 1.25rem; font-weight: 800; color: #10b981;">--</span>
+                  </div>
+                  <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 2px;">Remaining capacity</div>
+                </div>
+
+                <!-- 4. Storage Usage Percentage -->
+                <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 14px;">
+                  <div style="font-size: 0.72rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.03em;">Usage Percentage</div>
+                  <div style="display: flex; align-items: baseline; gap: 4px; margin-top: 4px;">
+                    <span id="data-stat-storage-percent" style="font-size: 1.25rem; font-weight: 800; color: var(--accent-primary);">--%</span>
+                  </div>
+                  <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 2px;">Of 512 MB quota</div>
+                </div>
+              </div>
+
+              <!-- 5. Visual Progress Bar -->
+              <div style="margin-bottom: 8px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.72rem; color: var(--text-secondary); margin-bottom: 5px;">
+                  <span id="data-stat-storage-bar-label">Atlas Storage Allocation</span>
+                  <span id="data-stat-storage-ratio">0 MB / 512 MB</span>
+                </div>
+                <div style="height: 8px; background-color: var(--border-color); border-radius: 999px; overflow: hidden; position: relative;">
+                  <div id="data-stat-storage-bar" style="height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent-primary) 0%, #8b5cf6 100%); border-radius: 999px; transition: width 0.4s ease, background 0.3s ease;"></div>
+                </div>
+              </div>
+
+              <!-- Bottom Footer: Detailed breakdown & Last updated timestamp -->
+              <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 0.72rem; color: var(--text-muted);">
+                <div id="data-stat-storage-details">
+                  Fetching actual MongoDB database statistics...
+                </div>
+                <div id="data-stat-storage-updated">
+                  --
                 </div>
               </div>
             </div>
