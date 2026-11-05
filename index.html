@@ -305,7 +305,7 @@
     </div>
   </div>
 
-  <div id="app-container" class="app-container" style="display: none;">
+  <div id="app-container" class="app-container app-hidden" style="display: none;">
     <!-- Sidebar -->
     <aside id="sidebar" class="sidebar">
       <div class="sidebar-header">
@@ -557,11 +557,55 @@
             </div>
           </div>
 
-          <div class="user-profile" id="header-user-profile" title="QA Lead Account">
-            <div class="avatar" id="header-user-avatar">QA</div>
-            <div class="user-meta">
-              <span class="user-name" id="header-user-name">QA Tester</span>
-              <span class="user-role" id="header-user-role">Manual Lead</span>
+          <div class="user-profile-wrapper" id="header-user-profile-wrapper">
+            <button type="button" class="user-profile-btn" id="header-user-profile-btn" aria-haspopup="true" aria-expanded="false" aria-label="User account menu" title="Account Menu">
+              <div class="avatar" id="header-user-avatar">QA</div>
+              <div class="user-meta">
+                <span class="user-name" id="header-user-name">QA Tester</span>
+                <span class="user-role" id="header-user-role">Manual Lead</span>
+              </div>
+              <svg class="user-profile-caret" viewBox="0 0 20 20" fill="currentColor" width="16" height="16" aria-hidden="true">
+                <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" />
+              </svg>
+            </button>
+            <div class="account-dropdown-menu" id="account-dropdown-menu" role="menu" aria-label="Account options" style="display: none;">
+              <div class="account-dropdown-header">
+                <div class="avatar avatar-md" id="account-dropdown-avatar">QA</div>
+                <div class="account-dropdown-info">
+                  <div class="account-dropdown-name" id="account-dropdown-name">QA Tester</div>
+                  <div class="account-dropdown-email" id="account-dropdown-email">tester@qavora.internal</div>
+                  <span class="account-dropdown-badge" id="account-dropdown-role">Lead Tester</span>
+                </div>
+              </div>
+              <div class="account-dropdown-divider"></div>
+              <div class="account-dropdown-items">
+                <button type="button" class="account-dropdown-item" id="account-menu-settings-btn" role="menuitem">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+                    <circle cx="12" cy="12" r="3"></circle>
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                  </svg>
+                  <span>Workspace Settings</span>
+                </button>
+                <button type="button" class="account-dropdown-item" id="account-menu-data-btn" role="menuitem">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+                    <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                    <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                    <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                  </svg>
+                  <span>Data Management</span>
+                </button>
+              </div>
+              <div class="account-dropdown-divider"></div>
+              <div class="account-dropdown-footer">
+                <button type="button" class="account-dropdown-item account-dropdown-logout" id="account-menu-logout-btn" role="menuitem">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+                    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                    <polyline points="16 17 21 12 16 7"></polyline>
+                    <line x1="21" y1="12" x2="9" y2="12"></line>
+                  </svg>
+                  <span>Log Out</span>
+                </button>
+              </div>
             </div>
           </div>
 

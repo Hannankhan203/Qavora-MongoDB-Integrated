@@ -32,7 +32,7 @@ function getCsrfTokenFromCookie() {
 // Auth Controller State
 // ============================================================================
 // Valid states: 'loading' | 'authenticated' | 'unauthenticated'
-let _state = 'unauthenticated';
+let _state = 'loading';
 let _user = null;
 let _initPromise = null;
 const _listeners = new Set();

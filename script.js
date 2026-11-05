@@ -93,12 +93,14 @@ async function init() {
 
   initUIEventListeners();
   const initialRoute = resolveInitialRoute();
-  navigateTo(initialRoute, false);
 
   await checkBackendHealth();
 
   await initAuthAndSession({
     onAuthenticated: async () => {
+      // Safely navigate to verified user route only after session is confirmed
+      navigateTo(initialRoute, false);
+
       await loadProjectsFromBackend();
       updateSidebarProjectCounters();
       renderProjectsGrid();
@@ -154,6 +156,14 @@ async function init() {
       }
     },
     onUnauthenticated: () => {
+      const appContainer = document.getElementById('app-container');
+      if (appContainer) {
+        appContainer.classList.add('app-hidden');
+        appContainer.style.setProperty('display', 'none', 'important');
+      }
+      if (typeof document !== 'undefined') {
+        document.body.classList.add('auth-view-active');
+      }
       setProjects([]);
       updateSidebarProjectCounters();
       renderProjectsGrid();

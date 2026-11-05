@@ -10,6 +10,7 @@
 
   /* Color Palette — Dark Theme (Default) */
   --bg-app: #0b0f19;
+  --bg-base: #0b0f19;
   --bg-sidebar: #0e1422;
   --bg-surface: #131b2e;
   --bg-surface-hover: #19233c;
@@ -534,13 +535,50 @@ textarea:focus-visible,
   display: block;
 }
 
-.user-profile {
-  display: flex;
+.user-profile-wrapper {
+  position: relative;
+  display: inline-flex;
   align-items: center;
-  gap: 9px;
-  padding: 3px 6px;
+  z-index: 50;
+}
+
+.user-profile,
+.user-profile-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
   border-radius: var(--radius-md);
   cursor: pointer;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-primary);
+  transition: all var(--transition-speed) ease;
+  text-align: left;
+  user-select: none;
+  min-height: 40px;
+}
+
+.user-profile:hover,
+.user-profile-btn:hover,
+.user-profile-btn[aria-expanded="true"] {
+  background-color: var(--bg-surface-hover);
+  border-color: var(--border-subtle);
+}
+
+.user-profile-btn:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.user-profile-caret {
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+
+.user-profile-btn[aria-expanded="true"] .user-profile-caret {
+  transform: rotate(180deg);
 }
 
 .avatar {
@@ -560,6 +598,12 @@ textarea:focus-visible,
   border: 1px solid rgba(255, 255, 255, 0.15);
 }
 
+.avatar.avatar-md {
+  width: 40px;
+  height: 40px;
+  font-size: 0.95rem;
+}
+
 .user-meta {
   display: flex;
   flex-direction: column;
@@ -575,6 +619,132 @@ textarea:focus-visible,
 .user-role {
   font-size: 0.68rem;
   color: var(--text-muted);
+}
+
+/* Account Dropdown Menu */
+.account-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 270px;
+  max-width: calc(100vw - 20px);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 16px 40px -8px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  z-index: 1000;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.account-dropdown-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background-color: rgba(255, 255, 255, 0.03);
+}
+
+.account-dropdown-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+  flex: 1;
+}
+
+.account-dropdown-name {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.account-dropdown-email {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.account-dropdown-badge {
+  display: inline-block;
+  align-self: flex-start;
+  font-size: 0.66rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent-primary-subtle);
+  color: var(--accent-primary);
+  border: 1px solid var(--accent-primary-border);
+  margin-top: 4px;
+}
+
+.account-dropdown-divider {
+  height: 1px;
+  background-color: var(--border-subtle);
+  margin: 4px 0;
+}
+
+.account-dropdown-items,
+.account-dropdown-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.account-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  min-height: 42px;
+  font-size: 0.84rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+}
+
+.account-dropdown-item svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: color 0.15s ease;
+}
+
+.account-dropdown-item:hover {
+  background-color: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+
+.account-dropdown-item:hover svg {
+  color: var(--text-primary);
+}
+
+.account-dropdown-item.account-dropdown-logout {
+  color: var(--color-red);
+}
+
+.account-dropdown-item.account-dropdown-logout svg {
+  color: var(--color-red);
+}
+
+.account-dropdown-item.account-dropdown-logout:hover {
+  background-color: var(--color-red-subtle);
+  color: var(--color-red);
 }
 
 /* ==========================================================================
@@ -9092,14 +9262,24 @@ body.mobile-nav-open {
 
 /* 1. Session Restoration Loading Overlay */
 .auth-loading-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 9999;
-  background-color: var(--bg-base);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-direction: column;
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100dvh !important;
+  z-index: 99999 !important;
+  background-color: #0b0f19 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  flex-direction: column !important;
+  pointer-events: auto !important;
+}
+
+.auth-loading-overlay.auth-hidden,
+.auth-loading-overlay[style*="display: none"] {
+  display: none !important;
+  pointer-events: none !important;
+  visibility: hidden !important;
 }
 
 .auth-loading-content {
@@ -9150,14 +9330,45 @@ body.mobile-nav-open {
 /* 2. Authentication Container & Card */
 .auth-container {
   min-height: 100vh;
+  min-height: 100dvh;
   width: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 32px 16px;
-  background: radial-gradient(circle at 50% 15%, rgba(99, 102, 241, 0.12), transparent 60%), var(--bg-base);
+  background: radial-gradient(circle at 50% 15%, rgba(99, 102, 241, 0.12), transparent 60%), #0b0f19;
   position: relative;
-  z-index: 10;
+  z-index: 50;
+}
+
+.auth-container.auth-hidden,
+.auth-container[style*="display: none"] {
+  display: none !important;
+  pointer-events: none !important;
+  visibility: hidden !important;
+}
+
+/* Protected App Content Rules: completely hide when unauthenticated or auth view active */
+.app-container.app-hidden,
+.app-container[style*="display: none"],
+body.auth-view-active .app-container {
+  display: none !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+.app-container.app-hidden .sidebar,
+.app-container[style*="display: none"] .sidebar,
+body.auth-view-active .sidebar,
+body.auth-view-active #sidebar,
+body.auth-view-active .sidebar-overlay {
+  display: none !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+body.auth-view-active {
+  overflow: hidden !important;
 }
 
 .auth-card-wrapper {
@@ -10189,8 +10400,11 @@ body.mobile-nav-open {
   }
 
   .auth-card {
-    padding: 22px 18px !important;
-    border-radius: var(--radius-md) !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    padding: 8px 4px !important;
   }
 
   .auth-tabs {
@@ -10367,13 +10581,19 @@ body.mobile-nav-open {
   }
 
   .auth-card {
-    padding: 16px 12px !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    padding: 6px 2px !important;
   }
 }
 
 /* 3. Smallest Mobile Screens (max-width: 335px down to 320px) */
 @media (max-width: 335px) {
-  #header-user-profile {
+  #header-user-profile .user-meta,
+  #header-user-profile-btn .user-meta,
+  .user-profile-caret {
     display: none !important;
   }
 
@@ -10409,7 +10629,11 @@ body.mobile-nav-open {
   }
 
   .auth-card {
-    padding: 14px 10px !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    padding: 6px 2px !important;
   }
 }
 
@@ -10443,7 +10667,11 @@ body.mobile-nav-open {
   }
 
   .auth-card {
-    padding: 14px 16px !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    padding: 10px 8px !important;
   }
 
   .auth-tabs {
@@ -11620,9 +11848,26 @@ body.mobile-nav-open {
   }
 
   .app-container {
-    display: flex !important;
-    min-height: 100vh !important;
-    width: 100% !important;
+    display: flex;
+    min-height: 100vh;
+    width: 100%;
+  }
+
+  .app-container.app-hidden,
+  .app-container[style*="display: none"],
+  body.auth-view-active .app-container {
+    display: none !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
+  }
+
+  .app-container.app-hidden .sidebar,
+  .app-container[style*="display: none"] .sidebar,
+  body.auth-view-active .sidebar,
+  body.auth-view-active #sidebar {
+    display: none !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
   }
 
   .sidebar {
@@ -11837,11 +12082,15 @@ body.mobile-nav-open {
 
   /* Desktop Modals Foundation (All 17 Modals) */
   .modal-backdrop {
-    display: flex !important;
+    display: none;
     align-items: center !important;
     justify-content: center !important;
     padding: 24px 20px !important;
     z-index: 100 !important;
+  }
+
+  .modal-backdrop.open {
+    display: flex !important;
   }
 
   .modal-dialog {

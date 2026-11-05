@@ -67,6 +67,16 @@ function getElements() {
     registerSubmitBtn: document.getElementById('register-submit-btn'),
 
     // Profile & Logout in main app
+    headerUserProfileWrapper: document.getElementById('header-user-profile-wrapper'),
+    headerUserProfileBtn: document.getElementById('header-user-profile-btn'),
+    accountDropdownMenu: document.getElementById('account-dropdown-menu'),
+    accountDropdownAvatar: document.getElementById('account-dropdown-avatar'),
+    accountDropdownName: document.getElementById('account-dropdown-name'),
+    accountDropdownEmail: document.getElementById('account-dropdown-email'),
+    accountDropdownRole: document.getElementById('account-dropdown-role'),
+    accountMenuLogoutBtn: document.getElementById('account-menu-logout-btn'),
+    accountMenuSettingsBtn: document.getElementById('account-menu-settings-btn'),
+    accountMenuDataBtn: document.getElementById('account-menu-data-btn'),
     headerUserAvatar: document.getElementById('header-user-avatar'),
     headerUserName: document.getElementById('header-user-name'),
     headerUserRole: document.getElementById('header-user-role'),
@@ -298,10 +308,32 @@ function setButtonLoading(buttonEl, isLoading, defaultText) {
  */
 export function setLoadingOverlay(visible) {
   const dom = DOM || getElements();
-  if (!dom || !dom.loadingOverlay) return;
+  if (!dom) return;
 
-  dom.loadingOverlay.style.display = visible ? 'flex' : 'none';
-  dom.loadingOverlay.setAttribute('aria-busy', visible ? 'true' : 'false');
+  if (visible) {
+    if (dom.loadingOverlay) {
+      dom.loadingOverlay.style.setProperty('display', 'flex', 'important');
+      dom.loadingOverlay.classList.remove('auth-hidden');
+      dom.loadingOverlay.setAttribute('aria-busy', 'true');
+    }
+    if (dom.appContainer) {
+      dom.appContainer.style.setProperty('display', 'none', 'important');
+      dom.appContainer.classList.add('app-hidden');
+    }
+    if (dom.authContainer) {
+      dom.authContainer.style.setProperty('display', 'none', 'important');
+      dom.authContainer.classList.add('auth-hidden');
+    }
+    if (typeof document !== 'undefined') {
+      document.body.classList.add('auth-view-active');
+    }
+  } else {
+    if (dom.loadingOverlay) {
+      dom.loadingOverlay.style.setProperty('display', 'none', 'important');
+      dom.loadingOverlay.classList.add('auth-hidden');
+      dom.loadingOverlay.setAttribute('aria-busy', 'false');
+    }
+  }
 }
 
 /**
@@ -311,9 +343,22 @@ export function showAuthView(tab = 'login') {
   const dom = DOM || getElements();
   if (!dom) return;
 
-  if (dom.loadingOverlay) dom.loadingOverlay.style.display = 'none';
-  if (dom.appContainer) dom.appContainer.style.display = 'none';
-  if (dom.authContainer) dom.authContainer.style.display = 'flex';
+  if (dom.loadingOverlay) {
+    dom.loadingOverlay.style.setProperty('display', 'none', 'important');
+    dom.loadingOverlay.classList.add('auth-hidden');
+    dom.loadingOverlay.setAttribute('aria-busy', 'false');
+  }
+  if (dom.appContainer) {
+    dom.appContainer.style.setProperty('display', 'none', 'important');
+    dom.appContainer.classList.add('app-hidden');
+  }
+  if (typeof document !== 'undefined') {
+    document.body.classList.add('auth-view-active');
+  }
+  if (dom.authContainer) {
+    dom.authContainer.classList.remove('auth-hidden');
+    dom.authContainer.style.setProperty('display', 'flex', 'important');
+  }
 
   switchAuthTab(tab);
 }
@@ -325,13 +370,26 @@ export function hideAuthView() {
   const dom = DOM || getElements();
   if (!dom) return;
 
-  if (dom.loadingOverlay) dom.loadingOverlay.style.display = 'none';
-  if (dom.authContainer) dom.authContainer.style.display = 'none';
-  if (dom.appContainer) dom.appContainer.style.display = 'flex';
+  if (dom.loadingOverlay) {
+    dom.loadingOverlay.style.setProperty('display', 'none', 'important');
+    dom.loadingOverlay.classList.add('auth-hidden');
+    dom.loadingOverlay.setAttribute('aria-busy', 'false');
+  }
+  if (dom.authContainer) {
+    dom.authContainer.style.setProperty('display', 'none', 'important');
+    dom.authContainer.classList.add('auth-hidden');
+  }
+  if (typeof document !== 'undefined') {
+    document.body.classList.remove('auth-view-active');
+  }
+  if (dom.appContainer) {
+    dom.appContainer.classList.remove('app-hidden');
+    dom.appContainer.style.removeProperty('display');
+  }
 }
 
 /**
- * Update authenticated user profile display in top-bar header
+ * Update authenticated user profile display in top-bar header and account dropdown
  */
 export function updateUserProfileUI(user) {
   const dom = DOM || getElements();
@@ -341,20 +399,26 @@ export function updateUserProfileUI(user) {
     if (dom.headerUserAvatar) dom.headerUserAvatar.textContent = 'QA';
     if (dom.headerUserName) dom.headerUserName.textContent = 'QA Tester';
     if (dom.headerUserRole) dom.headerUserRole.textContent = 'Manual QA';
+    if (dom.accountDropdownAvatar) dom.accountDropdownAvatar.textContent = 'QA';
+    if (dom.accountDropdownName) dom.accountDropdownName.textContent = 'QA Tester';
+    if (dom.accountDropdownEmail) dom.accountDropdownEmail.textContent = 'tester@qavora.internal';
+    if (dom.accountDropdownRole) dom.accountDropdownRole.textContent = 'Manual QA';
     return;
   }
 
-  if (dom.headerUserAvatar) {
-    dom.headerUserAvatar.textContent = user.avatarInitials || (user.name ? user.name.slice(0, 2).toUpperCase() : 'QA');
-  }
+  const initials = user.avatarInitials || (user.name ? user.name.slice(0, 2).toUpperCase() : 'QA');
+  const displayName = user.name || user.email || 'QA Tester';
+  const roleTitle = user.role || 'QA Lead';
+  const emailAddr = user.email || `${user.username || 'user'}@qavora.internal`;
 
-  if (dom.headerUserName) {
-    dom.headerUserName.textContent = user.name || user.email || 'QA Tester';
-  }
+  if (dom.headerUserAvatar) dom.headerUserAvatar.textContent = initials;
+  if (dom.headerUserName) dom.headerUserName.textContent = displayName;
+  if (dom.headerUserRole) dom.headerUserRole.textContent = roleTitle;
 
-  if (dom.headerUserRole) {
-    dom.headerUserRole.textContent = user.role || 'QA Tester';
-  }
+  if (dom.accountDropdownAvatar) dom.accountDropdownAvatar.textContent = initials;
+  if (dom.accountDropdownName) dom.accountDropdownName.textContent = displayName;
+  if (dom.accountDropdownEmail) dom.accountDropdownEmail.textContent = emailAddr;
+  if (dom.accountDropdownRole) dom.accountDropdownRole.textContent = roleTitle;
 }
 
 /**
@@ -571,12 +635,14 @@ export function initAuthUI(options = {}) {
     DOM.sidebarLogoutBtn.addEventListener('click', handleLogoutAction);
   }
 
+  if (DOM.accountMenuLogoutBtn) {
+    DOM.accountMenuLogoutBtn.addEventListener('click', handleLogoutAction);
+  }
+
   // 7. Subscribe to authController state transitions
   authController.onAuthStateChanged((snapshot) => {
     if (snapshot.state === 'loading') {
       setLoadingOverlay(true);
-      if (DOM.authContainer) DOM.authContainer.style.display = 'none';
-      if (DOM.appContainer) DOM.appContainer.style.display = 'none';
     } else if (snapshot.isAuthenticated && snapshot.user) {
       setLoadingOverlay(false);
       hideAuthView();

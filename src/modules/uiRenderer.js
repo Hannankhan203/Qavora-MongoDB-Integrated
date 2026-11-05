@@ -289,18 +289,66 @@ export function initUIEventListeners() {
     });
   }
 
-  // 4. Notifications panel toggle
+  // 4. Notifications panel toggle & Account dropdown menu
   const notifBtn = document.getElementById('notification-btn');
   const notifPanel = document.getElementById('notification-panel');
   const notifMarkAll = document.getElementById('notification-mark-all-btn');
   const notifClearAll = document.getElementById('notification-clear-all-btn');
 
+  const profileBtn = document.getElementById('header-user-profile-btn') || document.getElementById('header-user-profile');
+  const accountMenu = document.getElementById('account-dropdown-menu');
+
+  const closeAccountMenu = () => {
+    if (accountMenu) {
+      accountMenu.style.display = 'none';
+      profileBtn?.setAttribute('aria-expanded', 'false');
+    }
+  };
+
+  const closeNotifPanel = () => {
+    if (notifPanel) {
+      notifPanel.style.display = 'none';
+      notifBtn?.setAttribute('aria-expanded', 'false');
+    }
+  };
+
   notifBtn?.addEventListener('click', (e) => {
     e.stopPropagation();
+    closeAccountMenu();
     if (!notifPanel) return;
     const isHidden = notifPanel.style.display === 'none' || !notifPanel.style.display;
     notifPanel.style.display = isHidden ? 'block' : 'none';
     notifBtn.setAttribute('aria-expanded', String(isHidden));
+  });
+
+  profileBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeNotifPanel();
+    if (!accountMenu) return;
+    const isHidden = accountMenu.style.display === 'none' || !accountMenu.style.display;
+    accountMenu.style.display = isHidden ? 'flex' : 'none';
+    profileBtn.setAttribute('aria-expanded', String(isHidden));
+  });
+
+  const accountSettingsBtn = document.getElementById('account-menu-settings-btn');
+  accountSettingsBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeAccountMenu();
+    navigateTo('/settings', true);
+  });
+
+  const accountDataBtn = document.getElementById('account-menu-data-btn');
+  accountDataBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeAccountMenu();
+    navigateTo('/data', true);
+  });
+
+  const accountLogoutBtn = document.getElementById('account-menu-logout-btn');
+  accountLogoutBtn?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    closeAccountMenu();
+    await authController.logout();
   });
 
   notifMarkAll?.addEventListener('click', () => {
@@ -325,12 +373,29 @@ export function initUIEventListeners() {
       !notifPanel.contains(e.target) &&
       e.target !== notifBtn
     ) {
-      notifPanel.style.display = 'none';
-      notifBtn?.setAttribute('aria-expanded', 'false');
+      closeNotifPanel();
+    }
+
+    if (
+      accountMenu &&
+      accountMenu.style.display !== 'none' &&
+      e.target instanceof Node &&
+      !accountMenu.contains(e.target) &&
+      e.target !== profileBtn &&
+      !profileBtn?.contains(e.target)
+    ) {
+      closeAccountMenu();
     }
   });
 
-  // 5. Logout buttons (sidebar and header navbar)
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closeNotifPanel();
+      closeAccountMenu();
+    }
+  });
+
+  // 5. Logout buttons (sidebar, header navbar, and account menu)
   const logoutButtons = document.querySelectorAll('#sidebar-logout-btn, #header-logout-btn');
   logoutButtons.forEach((btn) => {
     btn.addEventListener('click', async () => {
