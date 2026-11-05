@@ -839,6 +839,10 @@ async function executeConfirmedImport() {
 
     const countP = result.imported?.projects ?? _stagedImportData.projects.length;
     const countC = result.imported?.checklists ?? (_stagedImportData.checklists || []).length;
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('qavora:storage-invalidate'));
+    }
+    fetchStorageUsage(true).catch(() => {});
     showToast(`Successfully imported ${countP} project(s) and ${countC} checklist(s) via ${mode} mode`, 'success');
   } catch (err) {
     showToast(err.message || 'Error executing import.', 'error');
@@ -881,6 +885,10 @@ async function executeWorkspaceReset() {
       updateSidebarProjectCounters();
       renderProjectsGrid();
       renderDataManagementWorkspace();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('qavora:storage-invalidate'));
+      }
+      fetchStorageUsage(true).catch(() => {});
       showToast('All workspace test data has been permanently cleared.', 'info');
     } else {
       const err = await res.json().catch(() => ({}));
@@ -1111,6 +1119,10 @@ export function initDataManagementEventListeners() {
         renderProjectsGrid();
         renderDataManagementWorkspace();
         updateRollbackUI();
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('qavora:storage-invalidate'));
+        }
+        fetchStorageUsage(true).catch(() => {});
         showToast(data.message || 'Rollback successful: Workspace restored to previous snapshot state', 'success');
       } catch (err) {
         showToast(err.message || 'Error executing rollback.', 'error');
