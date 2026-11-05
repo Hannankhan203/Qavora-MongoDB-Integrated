@@ -1,0 +1,26 @@
+# Render Blueprint Specification for Qavora (MongoDB-integrated Full-Stack QA Platform)
+# Reference: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: qavora
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB
+        value: qavora
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: VITE_BASE_PATH
+        value: /

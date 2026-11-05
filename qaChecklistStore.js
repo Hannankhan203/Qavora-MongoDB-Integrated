@@ -7,6 +7,26 @@
  */
 
 import { authController } from './authController.js';
+import {
+  queueChecklistCreate,
+  queueChecklistUpdate,
+  queueChecklistDelete,
+  getPendingOperations,
+  getCachedChecklistsForUser,
+  processChecklistSyncQueue,
+  clearAllOfflineData,
+  dequeueOperation
+} from './qaChecklistSyncQueue.js';
+
+export {
+  queueChecklistCreate,
+  queueChecklistUpdate,
+  queueChecklistDelete,
+  getPendingOperations,
+  getCachedChecklistsForUser,
+  processChecklistSyncQueue,
+  clearAllOfflineData
+};
 
 export const CHECKLISTS_STORAGE_KEY = 'qavora_qa_checklists_v1';
 export const ACTIVE_RUNNER_STORAGE_KEY = 'qavora_qa_active_runner_v1';
@@ -814,17 +834,19 @@ export const ChecklistsPersistence = {
     }
   },
 
-  async syncChecklist(checklist, options = {}) {
+  syncChecklist(checklist, options = {}) {
     if (!checklist || !checklist.id || typeof checklist !== 'object') {
-      return { ok: false, error: 'Invalid checklist record for sync' };
+      return Promise.resolve({ ok: false, error: 'Invalid checklist record for sync' });
     }
 
     if (typeof authController !== 'undefined' && !authController.isAuthenticated()) {
-      return { ok: false, status: 401, error: 'Authentication required for server synchronization' };
+      return Promise.resolve({ ok: false, status: 401, error: 'Authentication required for server synchronization' });
     }
 
     const checklistId = String(checklist.id).trim();
     const payload = JSON.parse(JSON.stringify(checklist));
+    const currentUser = typeof authController !== 'undefined' ? authController.getUser() : null;
+    const userId = currentUser?.userId ? String(currentUser.userId).trim() : null;
 
     // Prevent duplicate network calls while maintaining latest snapshot
     if (this.inFlightSync.has(checklistId)) {
@@ -853,6 +875,19 @@ export const ChecklistsPersistence = {
 
     const syncPromise = (async () => {
       try {
+        // Enqueue operation in durable IndexedDB queue
+        if (userId) {
+          try {
+            if (options.isNew) {
+              await queueChecklistCreate(payload, userId);
+            } else {
+              await queueChecklistUpdate(payload, userId);
+            }
+          } catch (qErr) {
+            console.warn('Qavora: Failed to enqueue checklist in offline queue', qErr);
+          }
+        }
+
         const isKnownOnServer = this.isPersisted(checklistId) && !options.isNew;
         let result;
 
@@ -873,6 +908,19 @@ export const ChecklistsPersistence = {
         if (result && result.ok) {
           this.markPersisted(checklistId);
           this.lastSyncError = null;
+
+          // Dequeue from durable IndexedDB queue on verified server success
+          if (userId) {
+            try {
+              const pendingOps = await getPendingOperations(userId);
+              const match = pendingOps.find(op => op.checklistId === checklistId && op.type !== 'DELETE');
+              if (match) {
+                await dequeueOperation(match.id);
+              }
+            } catch (dqErr) {
+              console.warn('Qavora: Error dequeuing operation', dqErr);
+            }
+          }
         } else {
           const errMsg = (result && (result.error || result.message)) || 'Failed to synchronize checklist with MongoDB.';
           this.lastSyncError = errMsg;
@@ -897,25 +945,57 @@ export const ChecklistsPersistence = {
     return syncPromise;
   },
 
-  async deleteChecklist(id) {
-    if (!id) return { ok: false, error: 'A valid checklist ID is required' };
+  deleteChecklist(id) {
+    if (!id) return Promise.resolve({ ok: false, error: 'A valid checklist ID is required' });
     const checklistId = String(id).trim();
+    const wasPersisted = this.isPersisted(checklistId);
     this.unmarkPersisted(checklistId);
 
-    if (typeof authController !== 'undefined' && !authController.isAuthenticated()) {
-      return { ok: true };
-    }
+    const currentUser = typeof authController !== 'undefined' ? authController.getUser() : null;
+    const userId = currentUser?.userId ? String(currentUser.userId).trim() : null;
 
-    try {
-      const res = await ChecklistAPI.delete(checklistId);
-      if (!res.ok && res.status !== 404) {
-        console.warn(`Qavora: Error deleting checklist ${checklistId} on server:`, res.error);
+    const opKey = `delete:${checklistId}`;
+    const delPromise = (async () => {
+      try {
+        if (userId) {
+          try {
+            await queueChecklistDelete(checklistId, userId, wasPersisted);
+          } catch (qErr) {
+            console.warn('Qavora: Failed to queue delete operation', qErr);
+          }
+        }
+
+        if (typeof authController !== 'undefined' && !authController.isAuthenticated()) {
+          return { ok: true };
+        }
+
+        const res = await ChecklistAPI.delete(checklistId);
+        if (res && (res.ok || res.status === 404)) {
+          if (userId) {
+            try {
+              const pendingOps = await getPendingOperations(userId);
+              const match = pendingOps.find(op => op.checklistId === checklistId && op.type === 'DELETE');
+              if (match) {
+                await dequeueOperation(match.id);
+              }
+            } catch (dqErr) {
+              console.warn('Qavora: Error dequeuing delete operation', dqErr);
+            }
+          }
+        } else {
+          console.warn(`Qavora: Error deleting checklist ${checklistId} on server:`, res?.error);
+        }
+        return res;
+      } catch (err) {
+        console.warn(`Qavora: Network exception deleting checklist ${checklistId}`, err);
+        return { ok: false, error: err?.message };
+      } finally {
+        this.inFlightSync.delete(opKey);
       }
-      return res;
-    } catch (err) {
-      console.warn(`Qavora: Network exception deleting checklist ${checklistId}`, err);
-      return { ok: false, error: err?.message };
-    }
+    })();
+
+    this.inFlightSync.set(opKey, delPromise);
+    return delPromise;
   },
 
   onChecklistsSaved(nextList, previousList = []) {
@@ -948,8 +1028,27 @@ export const ChecklistsPersistence = {
       return { ok: false, error: 'Unauthenticated' };
     }
 
+    const currentUser = typeof authController !== 'undefined' ? authController.getUser() : null;
+    const userId = currentUser?.userId ? String(currentUser.userId).trim() : null;
+
     try {
-      // 1. Sync any unpersisted local checklists to MongoDB first
+      // 0. Restore offline cached checklists from IndexedDB into in-memory store if memory is empty
+      if (userId) {
+        const cached = await getCachedChecklistsForUser(userId);
+        if (Array.isArray(cached) && cached.length > 0) {
+          const currentLocal = loadAllChecklists().checklists;
+          if (!currentLocal || currentLocal.length === 0) {
+            saveAllChecklists(cached, { skipBackendSync: true });
+          }
+        }
+      }
+
+      // 1. Process durable IndexedDB sync queue first
+      if (userId) {
+        await processChecklistSyncQueue(userId);
+      }
+
+      // 2. Sync any remaining unpersisted local checklists to MongoDB
       const { checklists: localList } = loadAllChecklists();
       if (Array.isArray(localList) && localList.length > 0) {
         for (const localChk of localList) {
@@ -960,7 +1059,7 @@ export const ChecklistsPersistence = {
         await this.flushAll();
       }
 
-      // 2. Fetch authenticated user's checklists from MongoDB Atlas
+      // 3. Fetch authenticated user's checklists from MongoDB Atlas
       const res = await ChecklistAPI.list();
       if (res && res.ok && Array.isArray(res.data)) {
         const remoteChecklists = res.data;
@@ -969,9 +1068,28 @@ export const ChecklistsPersistence = {
           if (c && c.id) this.markPersisted(c.id);
         });
 
-        // Populate in-memory cache directly from server records
-        saveAllChecklists(remoteChecklists, { skipBackendSync: true });
-        return { ok: true, checklists: remoteChecklists };
+        // Check if any local checklist has pending un-synced operations to avoid overwriting newer local state
+        let finalChecklists = remoteChecklists;
+        if (userId) {
+          const pendingOps = await getPendingOperations(userId);
+          if (pendingOps.length > 0) {
+            const pendingMap = new Map();
+            pendingOps.forEach(op => {
+              if (op.payload) pendingMap.set(op.checklistId, op.payload);
+            });
+            finalChecklists = remoteChecklists.map(rc => pendingMap.get(rc.id) || rc);
+            // Also append any pending CREATE items not yet in remoteChecklists
+            pendingOps.forEach(op => {
+              if (op.type === 'CREATE' && op.payload && !finalChecklists.some(fc => fc.id === op.checklistId)) {
+                finalChecklists.push(op.payload);
+              }
+            });
+          }
+        }
+
+        // Populate in-memory cache directly from merged records
+        saveAllChecklists(finalChecklists, { skipBackendSync: true });
+        return { ok: true, checklists: finalChecklists };
       }
       return res;
     } catch (err) {
@@ -986,6 +1104,7 @@ export const ChecklistsPersistence = {
     this.pendingSync.clear();
     this.lastSyncError = null;
     clearMemoryDataStore();
+    // Note: Pending operations and durable cache in IndexedDB are preserved on logout per DAT-001 requirements
   }
 };
 

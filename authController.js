@@ -92,6 +92,13 @@ export const authController = {
   },
 
   /**
+   * Alias for getCurrentUser()
+   */
+  getUser() {
+    return this.getCurrentUser();
+  },
+
+  /**
    * Returns current active JWT token string or null
    */
   getToken() {
@@ -121,6 +128,24 @@ export const authController = {
       headers['Authorization'] = `Bearer ${_token}`;
     }
     return headers;
+  },
+
+  /**
+   * Set or override current session (e.g. for testing token expiration or restoring session)
+   */
+  setSession(session) {
+    if (session && session.token) {
+      _token = session.token;
+      _user = session.user || _user;
+      _state = 'authenticated';
+      setStoredToken(_token);
+    } else {
+      _token = null;
+      _user = null;
+      _state = 'unauthenticated';
+      removeStoredToken();
+    }
+    _notifyListeners();
   },
 
   /**

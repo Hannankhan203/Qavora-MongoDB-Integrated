@@ -215,7 +215,8 @@ Qavora is engineered as a **pure client-side single page application (SPA)** wit
 Test-Pilot/
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml              # GitHub Actions deployment to GitHub Pages
+│       └── deploy.yml              # GitHub Actions CI build & test verification workflow
+├── render.yaml                     # Render Blueprint specification for full-stack hosting
 ├── .audit-tmp/                     # Audit and verification scripts
 ├── public/
 │   ├── .nojekyll                   # Bypasses Jekyll processing on GitHub Pages
@@ -367,14 +368,20 @@ This compiles the application assets into the `./dist` directory:
 
 ## Deployment Configuration
 
-Qavora is hosted as a static web application on GitHub Pages.
+Qavora has two separate deployment architectures:
 
-- **Base Path**: The production build uses `/Qavora/` as the base asset URL when deployed via GitHub Actions, configured in `vite.config.ts`:
-  ```typescript
-  base: process.env.VITE_BASE_PATH || (process.env.GITHUB_ACTIONS === 'true' ? '/Qavora/' : '/')
-  ```
-- **Automated Workflow**: `.github/workflows/deploy.yml` triggers on pushes to `main` or `master`, building the project via Node.js 20 and publishing the `./dist` directory using GitHub Actions Pages deployment (`actions/deploy-pages@v4`).
-- **Jekyll Bypass**: The `public/.nojekyll` file ensures GitHub Pages serves files with underscores or modern asset directories without Jekyll interference.
+1. **LocalStorage Version**: Maintained independently and deployed on GitHub Pages as a purely client-side static web application with browser storage.
+2. **MongoDB-Integrated Version (Current)**: Configured for full-stack deployment on **Render** as a unified Node.js Web Service running Express and serving the Vite-compiled single-page application.
+
+### Render Full-Stack Deployment (DEP-001)
+
+- **Blueprint (`render.yaml`)**: Declares the Web Service with Node.js runtime, automated build and start lifecycle commands, and health check validation.
+- **Build Command**: `npm install && npm run build` compiles Vite frontend assets into `dist/`.
+- **Start Command**: `npm start` (`node server.ts`) boots the Express production server.
+- **Health Check**: `/api/health` validates system health and database connectivity.
+- **Dynamic Port**: Express dynamically binds to `0.0.0.0:${PORT}` matching Render's assigned port.
+- **SPA Routing**: Non-API GET routes fall back to `dist/index.html` for deep client-side routing.
+- **Continuous Integration**: `.github/workflows/deploy.yml` runs type checks, bundle builds, and automated regression verification tests without overwriting or deploying to GitHub Pages.
 
 ---
 
