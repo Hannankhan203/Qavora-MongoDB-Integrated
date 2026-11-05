@@ -44,7 +44,7 @@ export function navigateTo(route, pushState = true) {
   if (typeof document !== 'undefined') {
     const viewSlug = cleanRoute.replace(/^\//, '').split('/')[0] || 'projects';
 
-    const navItems = document.querySelectorAll('.nav-item[data-view]');
+    const navItems = document.querySelectorAll('.nav-link[data-view]');
     navItems.forEach((el) => {
       const targetView = el.getAttribute('data-view');
       el.classList.toggle('active', targetView === viewSlug);
@@ -118,8 +118,8 @@ export function initUIEventListeners() {
   sidebarCloseBtn?.addEventListener('click', closeSidebar);
   sidebarOverlay?.addEventListener('click', closeSidebar);
 
-  // 3. Sidebar navigation links (.nav-item[data-view]) & browser popstate
-  document.querySelectorAll('.nav-item[data-view]').forEach((navEl) => {
+  // 3. Sidebar navigation links (.nav-link[data-view]) & browser popstate
+  document.querySelectorAll('.nav-link[data-view]').forEach((navEl) => {
     navEl.addEventListener('click', (e) => {
       e.preventDefault();
       const viewName = navEl.getAttribute('data-view');
@@ -185,21 +185,21 @@ export function initUIEventListeners() {
 
   // 6. New Project modal & buttons
   const projectForm = document.getElementById('create-project-form');
-  const projectModalOverlay = projectForm?.closest('.modal-overlay') || document.getElementById('modal-project-overlay');
+  const projectModal = document.getElementById('project-modal');
   const modalCloseBtn = document.getElementById('modal-close-btn');
   const modalCancelBtn = document.getElementById('modal-cancel-btn');
 
   const openProjectModal = () => {
-    if (projectModalOverlay) {
-      projectModalOverlay.style.display = 'flex';
-      projectModalOverlay.classList.add('active');
+    if (projectModal) {
+      projectModal.classList.add('open');
+      projectModal.setAttribute('aria-hidden', 'false');
     }
   };
 
   const closeProjectModal = () => {
-    if (projectModalOverlay) {
-      projectModalOverlay.style.display = 'none';
-      projectModalOverlay.classList.remove('active');
+    if (projectModal) {
+      projectModal.classList.remove('open');
+      projectModal.setAttribute('aria-hidden', 'true');
     }
   };
 
@@ -216,6 +216,11 @@ export function initUIEventListeners() {
 
   modalCloseBtn?.addEventListener('click', closeProjectModal);
   modalCancelBtn?.addEventListener('click', closeProjectModal);
+  projectModal?.addEventListener('click', (e) => {
+    if (e.target === projectModal) {
+      closeProjectModal();
+    }
+  });
 
   projectForm?.addEventListener('submit', async (e) => {
     e.preventDefault();
