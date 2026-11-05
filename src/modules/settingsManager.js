@@ -93,7 +93,6 @@ async function computeStorageHealth() {
   const serializedProjects = JSON.stringify(projects);
   const bytesUsed = new Blob([serializedProjects]).size;
   const kbUsed = (bytesUsed / 1024).toFixed(1);
-  const percentUsed = Math.min(100, Math.max(0.1, (bytesUsed / (5 * 1024 * 1024)) * 100)).toFixed(1);
 
   const usedEl = document.getElementById('settings-storage-used');
   const pctEl = document.getElementById('settings-storage-percent');
@@ -102,7 +101,7 @@ async function computeStorageHealth() {
   const countCasesEl = document.getElementById('settings-count-cases');
 
   if (usedEl) usedEl.textContent = `${kbUsed} KB`;
-  if (pctEl) pctEl.textContent = `${percentUsed}% of ~5 MB`;
+  if (pctEl) pctEl.textContent = `Serialized JSON payload`;
   if (countProjEl) countProjEl.textContent = String(projects.length);
   if (countChkEl) countChkEl.textContent = String(checklistsCount);
   if (countCasesEl) countCasesEl.textContent = String(totalCases);
@@ -329,11 +328,22 @@ export function initSettingsEventListeners() {
     });
   }
 
-  // 7. Quick Backup Export
+  // 7. Quick Backup Export (Includes Projects & Checklists)
   const quickBackupBtn = document.getElementById('settings-quick-backup-btn');
   if (quickBackupBtn) {
     quickBackupBtn.addEventListener('click', async () => {
       const projects = getProjects() || [];
+      let checklists = [];
+      try {
+        const res = await apiFetch('/api/checklists');
+        if (res.ok) {
+          const chk = await res.json();
+          if (Array.isArray(chk)) checklists = chk;
+        }
+      } catch (err) {
+        console.warn('Could not fetch checklists for quick backup:', err);
+      }
+
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const backupData = {
         application: 'Qavora',
@@ -342,9 +352,11 @@ export function initSettingsEventListeners() {
         exportedAt: new Date().toISOString(),
         metadata: {
           totalProjects: projects.length,
+          totalChecklists: checklists.length,
           exportedBy: authController.getCurrentUser()?.email || 'authenticated_user'
         },
-        projects
+        projects,
+        checklists
       };
 
       const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
@@ -356,7 +368,7 @@ export function initSettingsEventListeners() {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      showToast('Full workspace backup downloaded', 'success');
+      showToast(`Full workspace backup downloaded (${projects.length} projects, ${checklists.length} checklists)`, 'success');
     });
   }
 

@@ -3025,9 +3025,9 @@
               <div class="settings-card-body">
                 <div class="settings-storage-stats-row">
                   <div class="settings-mini-stat">
-                    <span class="settings-mini-stat-label">Storage Usage</span>
+                    <span class="settings-mini-stat-label">Estimated Payload</span>
                     <span class="settings-mini-stat-value" id="settings-storage-used">0.0 KB</span>
-                    <span class="settings-mini-stat-sub" id="settings-storage-percent">&lt; 1% of ~5 MB</span>
+                    <span class="settings-mini-stat-sub" id="settings-storage-percent">Serialized JSON payload</span>
                   </div>
                   <div class="settings-mini-stat">
                     <span class="settings-mini-stat-label">Projects</span>
@@ -3177,7 +3177,7 @@
                 </span>
               </div>
               <div class="stat-value" id="data-stat-projects">0</div>
-              <div class="stat-footer">Stored in LocalStorage</div>
+              <div class="stat-footer">Stored in MongoDB Atlas</div>
             </div>
 
             <div class="stat-card">
@@ -3277,20 +3277,20 @@
                   </span>
                   <div>
                     <div style="font-weight: 700; font-size: 0.95rem; color: var(--text-primary);">
-                      Storage Footprint: <span id="data-stat-storage-size">0 KB</span>
+                      Estimated Project &amp; Checklist Data Size: <span id="data-stat-storage-size">0 KB</span>
                     </div>
                     <div style="font-size: 0.75rem; color: var(--text-muted);">
-                      Estimated LocalStorage utilization (standard browser quota is ~5 MB per origin)
+                      Estimated serialized data payload size in memory (uncompressed JSON; does not represent MongoDB Atlas storage)
                     </div>
                   </div>
                 </div>
                 <div style="min-width: 220px; flex: 1; max-width: 380px;">
                   <div style="display: flex; justify-content: space-between; font-size: 0.72rem; color: var(--text-secondary); margin-bottom: 4px;">
-                    <span>Storage Quota</span>
-                    <span id="data-stat-storage-percent">&lt; 1% used</span>
+                    <span>Payload Scale</span>
+                    <span id="data-stat-storage-percent">Serialized JSON</span>
                   </div>
                   <div style="height: 6px; background-color: var(--border-color); border-radius: 999px; overflow: hidden;">
-                    <div id="data-stat-storage-bar" style="height: 100%; width: 1%; background-color: var(--accent-primary); border-radius: 999px;"></div>
+                    <div id="data-stat-storage-bar" style="height: 100%; width: 100%; background-color: var(--accent-primary); border-radius: 999px;"></div>
                   </div>
                 </div>
               </div>
@@ -5660,6 +5660,10 @@
               <span class="count-pill-num" id="import-preview-defects-cnt">0</span>
               <span class="count-pill-label">Defects</span>
             </div>
+            <div class="count-pill">
+              <span class="count-pill-num" id="import-preview-checklists-cnt">0</span>
+              <span class="count-pill-label">Checklists</span>
+            </div>
           </div>
         </div>
 
@@ -5742,7 +5746,7 @@
           </div>
           <div>
             <h3 id="reset-modal-title" class="modal-title" style="color: var(--color-red);">Clear All Workspace Data</h3>
-            <p class="modal-subtitle">Irreversible LocalStorage reset</p>
+            <p class="modal-subtitle">Irreversible workspace reset</p>
           </div>
         </div>
         <button id="reset-modal-close" class="modal-close-btn" aria-label="Close dialog">

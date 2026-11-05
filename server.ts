@@ -283,12 +283,40 @@ function createInMemoryDb() {
           return 'ok';
         },
         find(filter: any = {}) {
+          let sortField: string | null = null;
+          let sortDir = 1;
+          let limitCount: number | null = null;
           return {
-            sort() { return this; },
-            limit() { return this; },
+            sort(spec?: any) {
+              if (spec && typeof spec === 'object') {
+                const entries = Object.entries(spec);
+                if (entries.length > 0) {
+                  sortField = entries[0][0];
+                  sortDir = entries[0][1] === -1 ? -1 : 1;
+                }
+              }
+              return this;
+            },
+            limit(n: number) {
+              limitCount = n;
+              return this;
+            },
             skip() { return this; },
             async toArray() {
-              return store.filter((doc) => matchesFilter(doc, filter)).map((d) => ({ ...d }));
+              let res = store.filter((doc) => matchesFilter(doc, filter)).map((d) => ({ ...d }));
+              if (sortField) {
+                res.sort((a, b) => {
+                  const valA = a[sortField!];
+                  const valB = b[sortField!];
+                  if (valA < valB) return -1 * sortDir;
+                  if (valA > valB) return 1 * sortDir;
+                  return 0;
+                });
+              }
+              if (typeof limitCount === 'number' && limitCount > 0) {
+                res = res.slice(0, limitCount);
+              }
+              return res;
             }
           };
         },
@@ -837,6 +865,13 @@ async function connectToDatabase(): Promise<any> {
         console.log(`[Qavora Server] Ensured tenant-isolation indexes on checklists collection (userId, id).`);
       } catch (idxErr: any) {
         console.warn(`[Qavora Server] Warning creating tenant isolation indexes on checklists: ${sanitizeDiagnosticText(idxErr?.message)}`);
+      }
+      try {
+        await db.collection("recovery_snapshots").createIndex({ userId: 1, createdAt: -1 });
+        await db.collection("recovery_snapshots").createIndex({ userId: 1, snapshotId: 1 });
+        console.log(`[Qavora Server] Ensured tenant-isolation indexes on recovery_snapshots collection (userId, createdAt).`);
+      } catch (idxErr: any) {
+        console.warn(`[Qavora Server] Warning creating indexes on recovery_snapshots: ${sanitizeDiagnosticText(idxErr?.message)}`);
       }
 
       return db;
@@ -1507,28 +1542,546 @@ app.post("/api/data/reset", requireAuth, async (req: Request, res: Response) => 
     const authReq = req as AuthenticatedRequest;
     const userId = authReq.user!.userId;
 
-    const [projRes, artRes, chkRes] = await Promise.all([
-      db.collection("projects").deleteMany({ userId }),
-      db.collection("project_artifacts").deleteMany({ userId }),
-      db.collection("checklists").deleteMany({ userId })
-    ]);
+    let txSuccess = false;
+    let deletedCounts = { projects: 0, artifacts: 0, checklists: 0 };
+
+    if (mongoClientInstance && typeof mongoClientInstance.startSession === 'function') {
+      let session: any = null;
+      try {
+        session = mongoClientInstance.startSession();
+        await session.withTransaction(async () => {
+          const projRes = await db.collection("projects").deleteMany({ userId }, { session });
+          const artRes = await db.collection("project_artifacts").deleteMany({ userId }, { session });
+          const chkRes = await db.collection("checklists").deleteMany({ userId }, { session });
+          deletedCounts = {
+            projects: projRes.deletedCount,
+            artifacts: artRes.deletedCount,
+            checklists: chkRes.deletedCount
+          };
+        });
+        txSuccess = true;
+      } catch (txErr: any) {
+        console.warn(`[Qavora Server] Reset transaction unsupported or failed: ${sanitizeDiagnosticText(txErr?.message)}`);
+      } finally {
+        if (session) await session.endSession().catch(() => {});
+      }
+    }
+
+    if (!txSuccess) {
+      const [projRes, artRes, chkRes] = await Promise.all([
+        db.collection("projects").deleteMany({ userId }),
+        db.collection("project_artifacts").deleteMany({ userId }),
+        db.collection("checklists").deleteMany({ userId })
+      ]);
+      deletedCounts = {
+        projects: projRes.deletedCount,
+        artifacts: artRes.deletedCount,
+        checklists: chkRes.deletedCount
+      };
+    }
 
     return res.json({
       success: true,
       message: "Workspace test data reset successfully.",
-      deleted: {
-        projects: projRes.deletedCount,
-        artifacts: artRes.deletedCount,
-        checklists: chkRes.deletedCount
+      deleted: deletedCounts
+    });
+  } catch (error: any) {
+    const safeError = sanitizeDiagnosticText(error?.message || "Internal server error");
+    console.error(`Error in workspace reset: ${safeError}`);
+    return res.status(500).json({ error: "Failed to reset workspace." });
+  }
+});
+
+// 8. GET /api/data/recovery-snapshot - Retrieve latest recovery snapshot metadata for user
+app.get("/api/data/recovery-snapshot", requireAuth, async (req: Request, res: Response) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
+    }
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user!.userId;
+
+    const snapshots = await db.collection("recovery_snapshots")
+      .find({ userId })
+      .sort({ createdAt: -1 })
+      .limit(1)
+      .toArray();
+
+    if (!snapshots || snapshots.length === 0) {
+      return res.json({ success: true, snapshot: null });
+    }
+
+    const snap = snapshots[0];
+    return res.json({
+      success: true,
+      snapshot: {
+        snapshotId: snap.snapshotId,
+        createdAt: snap.createdAt,
+        timestamp: snap.timestamp,
+        metadata: snap.metadata || {},
+        projectsCount: Array.isArray(snap.projects) ? snap.projects.length : 0,
+        checklistsCount: Array.isArray(snap.checklists) ? snap.checklists.length : 0
       }
     });
   } catch (error: any) {
-    const safeError = (error?.message || "Internal server error").replace(
-      /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
-      "mongodb+srv://[credentials-hidden]@"
-    );
-    console.error(`Error in workspace reset: ${safeError}`);
-    return res.status(500).json({ error: "Failed to reset workspace." });
+    const safeError = sanitizeDiagnosticText(error?.message || "Internal server error");
+    console.error(`Error retrieving recovery snapshot: ${safeError}`);
+    return res.status(500).json({ error: "Failed to retrieve recovery snapshot." });
+  }
+});
+
+// 9. DELETE /api/data/recovery-snapshot - Explicitly clear recovery snapshot for user
+app.delete("/api/data/recovery-snapshot", requireAuth, async (req: Request, res: Response) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
+    }
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user!.userId;
+
+    const result = await db.collection("recovery_snapshots").deleteMany({ userId });
+    return res.json({
+      success: true,
+      message: "Recovery snapshot cleared successfully.",
+      deletedCount: result.deletedCount
+    });
+  } catch (error: any) {
+    const safeError = sanitizeDiagnosticText(error?.message || "Internal server error");
+    console.error(`Error deleting recovery snapshot: ${safeError}`);
+    return res.status(500).json({ error: "Failed to clear recovery snapshot." });
+  }
+});
+
+// 10. POST /api/data/rollback - Restore workspace state from durable recovery snapshot
+app.post("/api/data/rollback", requireAuth, async (req: Request, res: Response) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
+    }
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user!.userId;
+
+    const snapshots = await db.collection("recovery_snapshots")
+      .find({ userId })
+      .sort({ createdAt: -1 })
+      .limit(1)
+      .toArray();
+
+    if (!snapshots || snapshots.length === 0) {
+      return res.status(404).json({ error: "No recovery snapshot found to restore." });
+    }
+
+    const targetSnapshot = snapshots[0];
+    const restoredProjects = Array.isArray(targetSnapshot.projects) ? targetSnapshot.projects : [];
+    const restoredChecklists = Array.isArray(targetSnapshot.checklists) ? targetSnapshot.checklists : [];
+
+    let txSuccess = false;
+    if (mongoClientInstance && typeof mongoClientInstance.startSession === 'function') {
+      let session: any = null;
+      try {
+        session = mongoClientInstance.startSession();
+        await session.withTransaction(async () => {
+          await db.collection("projects").deleteMany({ userId }, { session });
+          await db.collection("checklists").deleteMany({ userId }, { session });
+          if (restoredProjects.length > 0) {
+            const projs = restoredProjects.map((p: any) => ({ ...p, userId }));
+            await db.collection("projects").insertMany(projs, { session });
+          }
+          if (restoredChecklists.length > 0) {
+            const chks = restoredChecklists.map((c: any) => ({ ...c, userId }));
+            await db.collection("checklists").insertMany(chks, { session });
+          }
+          await db.collection("recovery_snapshots").deleteOne({ _id: targetSnapshot._id }, { session });
+        });
+        txSuccess = true;
+      } catch (txErr: any) {
+        console.warn(`[Qavora Server] Rollback transaction unsupported or failed: ${sanitizeDiagnosticText(txErr?.message)}`);
+      } finally {
+        if (session) await session.endSession().catch(() => {});
+      }
+    }
+
+    if (!txSuccess) {
+      const currentProjects = await db.collection("projects").find({ userId }).toArray();
+      const currentChecklists = await db.collection("checklists").find({ userId }).toArray();
+
+      try {
+        await db.collection("projects").deleteMany({ userId });
+        await db.collection("checklists").deleteMany({ userId });
+        if (restoredProjects.length > 0) {
+          const projs = restoredProjects.map((p: any) => ({ ...p, userId }));
+          await db.collection("projects").insertMany(projs);
+        }
+        if (restoredChecklists.length > 0) {
+          const chks = restoredChecklists.map((c: any) => ({ ...c, userId }));
+          await db.collection("checklists").insertMany(chks);
+        }
+        await db.collection("recovery_snapshots").deleteOne({ _id: targetSnapshot._id });
+      } catch (opErr: any) {
+        console.error(`[Qavora Server] Rollback failed midway; restoring pre-rollback state...`);
+        try {
+          await db.collection("projects").deleteMany({ userId });
+          await db.collection("checklists").deleteMany({ userId });
+          if (currentProjects.length > 0) {
+            await db.collection("projects").insertMany(currentProjects);
+          }
+          if (currentChecklists.length > 0) {
+            await db.collection("checklists").insertMany(currentChecklists);
+          }
+        } catch (rescueErr: any) {
+          console.error(`[Qavora Server FATAL] Rollback rescue failed: ${rescueErr?.message}`);
+        }
+        return res.status(500).json({ error: "Failed to execute rollback. Pre-rollback workspace state was preserved." });
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: "Rollback executed successfully. Workspace restored to snapshot state.",
+      restored: {
+        projects: restoredProjects.length,
+        checklists: restoredChecklists.length
+      }
+    });
+  } catch (error: any) {
+    const safeError = sanitizeDiagnosticText(error?.message || "Internal server error");
+    console.error(`Error in rollback execution: ${safeError}`);
+    return res.status(500).json({ error: "Failed to execute rollback." });
+  }
+});
+
+// 11. POST /api/data/import - Safe merge or atomic replace import with pre-replacement snapshot
+app.post("/api/data/import", requireAuth, async (req: Request, res: Response) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
+    }
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user!.userId;
+
+    const { mode, projects, checklists } = req.body || {};
+
+    if (mode !== 'merge' && mode !== 'replace') {
+      return res.status(400).json({ error: "Field 'mode' must be either 'merge' or 'replace'." });
+    }
+
+    if (projects !== undefined && !Array.isArray(projects)) {
+      return res.status(400).json({ error: "Field 'projects' must be an array if provided." });
+    }
+
+    if (checklists !== undefined && !Array.isArray(checklists)) {
+      return res.status(400).json({ error: "Field 'checklists' must be an array if provided." });
+    }
+
+    const rawProjects = Array.isArray(projects) ? projects : [];
+    const rawChecklists = Array.isArray(checklists) ? checklists : [];
+
+    if (rawProjects.length === 0 && rawChecklists.length === 0) {
+      return res.status(400).json({ error: "Import payload must contain at least one project or checklist." });
+    }
+
+    const now = new Date().toISOString();
+
+    // Validate and normalize all projects BEFORE touching the database
+    const normalizedProjects: any[] = [];
+    for (let idx = 0; idx < rawProjects.length; idx++) {
+      const p = rawProjects[idx];
+      if (!p || typeof p !== 'object') {
+        return res.status(400).json({ error: `Project at index ${idx} is not a valid object.` });
+      }
+      if (typeof p.name !== 'string' || p.name.trim() === '') {
+        return res.status(400).json({ error: `Project at index ${idx} must have a non-empty 'name' string.` });
+      }
+
+      const projId = (typeof p.id === 'string' && p.id.trim())
+        ? p.id.trim()
+        : `proj_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`;
+      const projName = p.name.trim();
+
+      // Normalize testPlan and root-level phases
+      let testPlan = p.testPlan && typeof p.testPlan === 'object' ? { ...p.testPlan } : null;
+      if (!testPlan) {
+        testPlan = {
+          id: `plan_${projId}`,
+          name: `${projName} Master Test Plan`,
+          description: '',
+          objective: '',
+          scope: '',
+          notes: '',
+          createdAt: p.createdAt || now,
+          updatedAt: now,
+          phases: []
+        };
+      }
+      if (!Array.isArray(testPlan.phases)) {
+        testPlan.phases = [];
+      }
+
+      let testSuites = Array.isArray(p.testSuites) ? [...p.testSuites] : [];
+
+      // Convert root-level phases into testPlan.phases and extract nested suites
+      if (Array.isArray(p.phases)) {
+        p.phases.forEach((ph: any, pIdx: number) => {
+          if (!ph || typeof ph !== 'object') return;
+          const phaseId = (typeof ph.id === 'string' && ph.id.trim()) ? ph.id.trim() : `ph_${projId}_${pIdx}`;
+          const phaseName = (typeof ph.name === 'string' && ph.name.trim()) ? ph.name.trim() : (ph.title || `Phase ${pIdx + 1}`);
+
+          if (!testPlan.phases.some((existing: any) => existing.id === phaseId)) {
+            testPlan.phases.push({
+              id: phaseId,
+              name: phaseName,
+              status: ph.status || 'Active',
+              order: typeof ph.order === 'number' ? ph.order : pIdx,
+              description: ph.description || ''
+            });
+          }
+
+          if (Array.isArray(ph.suites)) {
+            ph.suites.forEach((su: any, sIdx: number) => {
+              if (!su || typeof su !== 'object') return;
+              const suiteId = (typeof su.id === 'string' && su.id.trim()) ? su.id.trim() : `su_${phaseId}_${sIdx}`;
+              if (!testSuites.some((existing: any) => existing.id === suiteId)) {
+                testSuites.push({
+                  id: suiteId,
+                  phaseId,
+                  title: su.title || su.name || `Suite ${sIdx + 1}`,
+                  description: su.description || '',
+                  cases: Array.isArray(su.cases) ? su.cases : (Array.isArray(su.testCases) ? su.testCases : []),
+                  tags: Array.isArray(su.tags) ? su.tags : [],
+                  createdAt: su.createdAt || now,
+                  updatedAt: now
+                });
+              }
+            });
+          }
+        });
+      }
+
+      // Normalize testSuites cases
+      testSuites = testSuites.map((su: any, sIdx: number) => {
+        const rawCases = Array.isArray(su.cases) ? su.cases : (Array.isArray(su.testCases) ? su.testCases : []);
+        const normalizedCases = rawCases.map((tc: any, cIdx: number) => ({
+          id: tc?.id || `tc_${su.id || sIdx}_${cIdx}`,
+          title: tc?.title || tc?.name || `Test Case ${cIdx + 1}`,
+          description: tc?.description || '',
+          preconditions: tc?.preconditions || '',
+          steps: Array.isArray(tc?.steps) ? tc.steps : [],
+          expectedResult: tc?.expectedResult || '',
+          status: tc?.status || 'Active',
+          priority: tc?.priority || 'Medium',
+          severity: tc?.severity || 'Medium',
+          tags: Array.isArray(tc?.tags) ? tc.tags : [],
+          createdAt: tc?.createdAt || now,
+          updatedAt: now
+        }));
+
+        return {
+          id: su?.id || `su_${projId}_${sIdx}`,
+          phaseId: su?.phaseId || (testPlan.phases[0]?.id || `ph_${projId}_0`),
+          title: su?.title || su?.name || `Suite ${sIdx + 1}`,
+          description: su?.description || '',
+          cases: normalizedCases,
+          tags: Array.isArray(su?.tags) ? su.tags : [],
+          createdAt: su?.createdAt || now,
+          updatedAt: now
+        };
+      });
+
+      const phases = testPlan.phases.map((ph: any) => ({ ...ph }));
+      const executions = Array.isArray(p.executions) ? p.executions : [];
+      const defects = Array.isArray(p.defects) ? p.defects : [];
+
+      const cleanProj: any = {
+        id: projId,
+        userId,
+        name: projName,
+        description: typeof p.description === 'string' ? p.description : '',
+        projectType: typeof p.projectType === 'string' ? p.projectType : 'Web Application',
+        status: typeof p.status === 'string' ? p.status : 'Active',
+        testPlan,
+        testSuites,
+        phases,
+        executions,
+        defects,
+        createdAt: p.createdAt || now,
+        updatedAt: now
+      };
+      if (p.sourceChecklistId) cleanProj.sourceChecklistId = p.sourceChecklistId;
+      if (p.promotedFromChecklistTitle) cleanProj.promotedFromChecklistTitle = p.promotedFromChecklistTitle;
+      if (p.promotedAt) cleanProj.promotedAt = p.promotedAt;
+
+      delete cleanProj._id;
+      normalizedProjects.push(cleanProj);
+    }
+
+    // Validate and normalize all checklists BEFORE touching the database
+    const normalizedChecklists: any[] = [];
+    for (let idx = 0; idx < rawChecklists.length; idx++) {
+      const c = rawChecklists[idx];
+      if (!c || typeof c !== 'object') {
+        return res.status(400).json({ error: `Checklist at index ${idx} is not a valid object.` });
+      }
+      if (typeof c.title !== 'string' || c.title.trim() === '') {
+        return res.status(400).json({ error: `Checklist at index ${idx} must have a non-empty 'title' string.` });
+      }
+
+      const chkId = (typeof c.id === 'string' && c.id.trim())
+        ? c.id.trim()
+        : `chk_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`;
+
+      const cleanChk: any = {
+        id: chkId,
+        userId,
+        schemaVersion: typeof c.schemaVersion === 'number' ? c.schemaVersion : 1,
+        title: c.title.trim(),
+        documentNotes: Array.isArray(c.documentNotes) ? c.documentNotes : [],
+        phases: Array.isArray(c.phases) ? c.phases : [],
+        promotedProjectId: c.promotedProjectId || null,
+        promotedAt: c.promotedAt || null,
+        createdAt: c.createdAt || now,
+        updatedAt: now
+      };
+      delete cleanChk._id;
+      normalizedChecklists.push(cleanChk);
+    }
+
+    if (mode === 'replace') {
+      // 1. Fetch current user data and persist durable pre-replacement snapshot
+      const existingProjects = await db.collection("projects").find({ userId }).toArray();
+      const existingChecklists = await db.collection("checklists").find({ userId }).toArray();
+
+      const snapshotDoc = {
+        userId,
+        snapshotId: `snap_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        createdAt: now,
+        timestamp: new Date().toLocaleString(),
+        metadata: {
+          totalProjects: existingProjects.length,
+          totalChecklists: existingChecklists.length,
+          source: 'replace_import',
+          description: `Pre-replacement snapshot (${existingProjects.length} projects, ${existingChecklists.length} checklists)`
+        },
+        projects: existingProjects.map((p: any) => { const copy = { ...p }; delete copy._id; return copy; }),
+        checklists: existingChecklists.map((c: any) => { const copy = { ...c }; delete copy._id; return copy; })
+      };
+
+      await db.collection("recovery_snapshots").insertOne(snapshotDoc);
+
+      // 2. Perform replace atomically with MongoDB transaction if available
+      let txSuccess = false;
+      if (mongoClientInstance && typeof mongoClientInstance.startSession === 'function') {
+        let session: any = null;
+        try {
+          session = mongoClientInstance.startSession();
+          await session.withTransaction(async () => {
+            await db.collection("projects").deleteMany({ userId }, { session });
+            await db.collection("checklists").deleteMany({ userId }, { session });
+            if (normalizedProjects.length > 0) {
+              await db.collection("projects").insertMany(normalizedProjects, { session });
+            }
+            if (normalizedChecklists.length > 0) {
+              await db.collection("checklists").insertMany(normalizedChecklists, { session });
+            }
+          });
+          txSuccess = true;
+        } catch (txErr: any) {
+          console.warn(`[Qavora Server] Import transaction unsupported or failed: ${sanitizeDiagnosticText(txErr?.message)}`);
+        } finally {
+          if (session) await session.endSession().catch(() => {});
+        }
+      }
+
+      if (!txSuccess) {
+        // Safe non-transactional replace with snapshot rollback recovery if anything fails:
+        try {
+          await db.collection("projects").deleteMany({ userId });
+          await db.collection("checklists").deleteMany({ userId });
+          if (normalizedProjects.length > 0) {
+            const resP = await db.collection("projects").insertMany(normalizedProjects);
+            if (resP.insertedCount !== normalizedProjects.length) {
+              throw new Error(`Incomplete project insertion: expected ${normalizedProjects.length}, inserted ${resP.insertedCount}`);
+            }
+          }
+          if (normalizedChecklists.length > 0) {
+            const resC = await db.collection("checklists").insertMany(normalizedChecklists);
+            if (resC.insertedCount !== normalizedChecklists.length) {
+              throw new Error(`Incomplete checklist insertion: expected ${normalizedChecklists.length}, inserted ${resC.insertedCount}`);
+            }
+          }
+        } catch (replaceErr: any) {
+          console.error(`[Qavora Server] Replace import failed midway; restoring from snapshot...`);
+          try {
+            await db.collection("projects").deleteMany({ userId });
+            await db.collection("checklists").deleteMany({ userId });
+            if (snapshotDoc.projects.length > 0) {
+              await db.collection("projects").insertMany(snapshotDoc.projects.map((p: any) => ({ ...p, userId })));
+            }
+            if (snapshotDoc.checklists.length > 0) {
+              await db.collection("checklists").insertMany(snapshotDoc.checklists.map((c: any) => ({ ...c, userId })));
+            }
+          } catch (rescueErr: any) {
+            console.error(`[Qavora Server FATAL] Auto-recovery failed: ${rescueErr?.message}`);
+          }
+          return res.status(500).json({
+            error: "Failed to replace import data. Workspace restored from pre-replacement snapshot.",
+            details: sanitizeDiagnosticText(replaceErr?.message)
+          });
+        }
+      }
+
+      return res.json({
+        success: true,
+        mode: "replace",
+        message: `Successfully replaced workspace with ${normalizedProjects.length} project(s) and ${normalizedChecklists.length} checklist(s).`,
+        imported: {
+          projects: normalizedProjects.length,
+          checklists: normalizedChecklists.length
+        },
+        snapshotCreated: true,
+        snapshotId: snapshotDoc.snapshotId
+      });
+    } else {
+      // Merge mode: resolve ID collisions for authenticated user
+      const existingProjects = await db.collection("projects").find({ userId }).toArray();
+      const existingChecklists = await db.collection("checklists").find({ userId }).toArray();
+      const existingProjIds = new Set(existingProjects.map((p: any) => p.id));
+      const existingChkIds = new Set(existingChecklists.map((c: any) => c.id));
+
+      for (const p of normalizedProjects) {
+        if (existingProjIds.has(p.id)) {
+          p.id = `proj_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+          p.name = `${p.name} (Imported)`;
+        }
+      }
+
+      for (const c of normalizedChecklists) {
+        if (existingChkIds.has(c.id)) {
+          c.id = `chk_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+          c.title = `${c.title} (Imported)`;
+        }
+      }
+
+      if (normalizedProjects.length > 0) {
+        await db.collection("projects").insertMany(normalizedProjects);
+      }
+      if (normalizedChecklists.length > 0) {
+        await db.collection("checklists").insertMany(normalizedChecklists);
+      }
+
+      return res.json({
+        success: true,
+        mode: "merge",
+        message: `Successfully merged ${normalizedProjects.length} project(s) and ${normalizedChecklists.length} checklist(s).`,
+        imported: {
+          projects: normalizedProjects.length,
+          checklists: normalizedChecklists.length
+        }
+      });
+    }
+  } catch (error: any) {
+    const safeError = sanitizeDiagnosticText(error?.message || "Internal server error");
+    console.error(`Error in import handler: ${safeError}`);
+    return res.status(500).json({ error: "Failed to process import." });
   }
 });
 

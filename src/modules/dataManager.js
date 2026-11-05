@@ -13,7 +13,6 @@ import { showToast, navigateTo } from './uiRenderer.js';
 import { escapeHtml } from './utils.js';
 
 let _dataListenersBound = false;
-let _rollbackSnapshot = null;
 let _stagedImportData = null;
 
 // Formula injection sanitizer and CSV generator
@@ -86,21 +85,20 @@ export function renderDataManagementWorkspace() {
     }
   }).catch(() => {});
 
-  // Compute Footprint
+  // Compute Footprint: Estimated serialized data payload size in memory
   const serialized = JSON.stringify(projects);
   const bytes = new Blob([serialized]).size;
   const kb = (bytes / 1024).toFixed(1);
-  const pct = Math.min(100, Math.max(0.1, (bytes / (5 * 1024 * 1024)) * 100)).toFixed(1);
 
   setEl('data-stat-storage-size', `${kb} KB`);
-  setEl('data-stat-storage-percent', `${pct}% used`);
+  setEl('data-stat-storage-percent', `Serialized JSON`);
   const bar = document.getElementById('data-stat-storage-bar');
-  if (bar) bar.style.width = `${Math.min(100, parseFloat(pct))}%`;
+  if (bar) bar.style.width = `100%`;
 
   // 2. Populate Dropdowns
   populateDataProjectDropdowns(projects);
 
-  // 3. Update Rollback Card
+  // 3. Update Rollback Card from durable MongoDB snapshot
   updateRollbackUI();
 }
 
@@ -141,37 +139,48 @@ function populateDataProjectDropdowns(projects) {
   }
 }
 
-function updateRollbackUI() {
+async function updateRollbackUI() {
   const badge = document.getElementById('rollback-status-badge');
   const title = document.getElementById('rollback-snapshot-title');
   const meta = document.getElementById('rollback-snapshot-meta');
   const btn = document.getElementById('btn-execute-rollback');
 
-  if (_rollbackSnapshot) {
-    if (badge) {
-      badge.textContent = '1 Snapshot Available';
-      badge.className = 'panel-tag badge-pass';
+  try {
+    const res = await apiFetch('/api/data/recovery-snapshot');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.snapshot) {
+        const snap = data.snapshot;
+        if (badge) {
+          badge.textContent = '1 Snapshot Available';
+          badge.className = 'panel-tag badge-pass';
+        }
+        if (title) {
+          title.textContent = `Pre-replacement snapshot: ${snap.projectsCount || 0} projects, ${snap.checklistsCount || 0} checklists preserved`;
+        }
+        if (meta) {
+          const dateStr = snap.createdAt ? new Date(snap.createdAt).toLocaleString() : (snap.timestamp || 'Recently');
+          meta.textContent = `Captured on ${dateStr} before replace import. Stored durably in MongoDB Atlas.`;
+        }
+        if (btn) btn.disabled = false;
+        return;
+      }
     }
-    if (title) {
-      title.textContent = `Pre-restore snapshot: ${_rollbackSnapshot.projects?.length || 0} projects preserved`;
-    }
-    if (meta) {
-      meta.textContent = `Captured on ${_rollbackSnapshot.timestamp} before overwrite restore.`;
-    }
-    if (btn) btn.disabled = false;
-  } else {
-    if (badge) {
-      badge.textContent = 'No Snapshot';
-      badge.className = 'panel-tag';
-    }
-    if (title) {
-      title.textContent = 'No recovery snapshot currently stored.';
-    }
-    if (meta) {
-      meta.textContent = 'Snapshots are created automatically before any replace/overwrite import.';
-    }
-    if (btn) btn.disabled = true;
+  } catch (err) {
+    console.warn('Could not query recovery snapshot:', err);
   }
+
+  if (badge) {
+    badge.textContent = 'No Snapshot';
+    badge.className = 'panel-tag';
+  }
+  if (title) {
+    title.textContent = 'No recovery snapshot currently stored in MongoDB Atlas.';
+  }
+  if (meta) {
+    meta.textContent = 'Snapshots are saved durably in MongoDB Atlas before every replace/overwrite import.';
+  }
+  if (btn) btn.disabled = true;
 }
 
 // ----------------------------------------------------------------------------
@@ -449,10 +458,14 @@ function parseAndValidateImportPayload(fileText, fileName, fileSize) {
 
   // Detect payload type: Full backup vs Single Project vs Raw projects array
   let projects = [];
+  let checklists = [];
   let formatType = 'Custom JSON';
 
   if (Array.isArray(parsed.projects)) {
     projects = parsed.projects;
+    if (Array.isArray(parsed.checklists)) {
+      checklists = parsed.checklists;
+    }
     formatType = parsed.application === 'Qavora' ? 'Full Application Backup' : 'Multi-Project Archive';
   } else if (parsed.name && (parsed.phases || parsed.testSuites || parsed.id)) {
     // Single project export
@@ -461,32 +474,118 @@ function parseAndValidateImportPayload(fileText, fileName, fileSize) {
   } else if (Array.isArray(parsed)) {
     projects = parsed;
     formatType = 'Projects List';
+  } else if (Array.isArray(parsed.checklists)) {
+    checklists = parsed.checklists;
+    formatType = 'Checklist Archive';
   } else {
     throw new Error('Unrecognized Qavora schema: Missing "projects" array or valid project document.');
   }
 
-  // Normalize project structure
+  const now = new Date().toISOString();
+
+  // Normalize project structure: convert root-level phases into testPlan.phases while preserving suites, cases, executions, and defects
   const normalizedProjects = projects.map((p, idx) => {
+    const projId = (p.id && String(p.id).trim()) || `proj_${Date.now()}_${idx}`;
+    const projName = (p.name && String(p.name).trim()) || `Imported Project ${idx + 1}`;
+
+    let testPlan = p.testPlan && typeof p.testPlan === 'object' ? { ...p.testPlan } : null;
+    if (!testPlan) {
+      testPlan = {
+        id: `plan_${projId}`,
+        name: `${projName} Master Test Plan`,
+        description: '',
+        objective: '',
+        scope: '',
+        notes: '',
+        createdAt: p.createdAt || now,
+        updatedAt: now,
+        phases: []
+      };
+    }
+    if (!Array.isArray(testPlan.phases)) {
+      testPlan.phases = [];
+    }
+
+    let phases = Array.isArray(p.phases) ? [...p.phases] : [];
+    let testSuites = Array.isArray(p.testSuites) ? [...p.testSuites] : [];
+
+    // Convert root-level phases into testPlan.phases and extract nested suites
+    if (phases.length > 0) {
+      phases.forEach((ph, pIdx) => {
+        if (!ph || typeof ph !== 'object') return;
+        const phaseId = (ph.id && String(ph.id).trim()) || `ph_${projId}_${pIdx}`;
+        const phaseName = (ph.name && String(ph.name).trim()) || ph.title || `Phase ${pIdx + 1}`;
+
+        if (!testPlan.phases.some(existing => existing.id === phaseId)) {
+          testPlan.phases.push({
+            id: phaseId,
+            name: phaseName,
+            status: ph.status || 'Active',
+            order: typeof ph.order === 'number' ? ph.order : pIdx,
+            description: ph.description || ''
+          });
+        }
+
+        if (Array.isArray(ph.suites)) {
+          ph.suites.forEach((su, sIdx) => {
+            if (!su || typeof su !== 'object') return;
+            const suiteId = (su.id && String(su.id).trim()) || `su_${phaseId}_${sIdx}`;
+            if (!testSuites.some(existing => existing.id === suiteId)) {
+              testSuites.push({
+                id: suiteId,
+                phaseId,
+                title: su.title || su.name || `Suite ${sIdx + 1}`,
+                description: su.description || '',
+                cases: Array.isArray(su.cases) ? su.cases : (Array.isArray(su.testCases) ? su.testCases : []),
+                tags: Array.isArray(su.tags) ? su.tags : [],
+                createdAt: su.createdAt || now,
+                updatedAt: now
+              });
+            }
+          });
+        }
+      });
+    }
+
+    if (phases.length === 0 && testPlan.phases.length > 0) {
+      phases = testPlan.phases.map(ph => ({ ...ph }));
+    }
+
     return {
-      id: p.id || `proj_${Date.now()}_${idx}`,
-      name: p.name || `Imported Project ${idx + 1}`,
+      id: projId,
+      name: projName,
       description: p.description || '',
       projectType: p.projectType || 'Web Application',
       status: p.status || 'Active',
-      phases: Array.isArray(p.phases) ? p.phases : [],
+      testPlan,
+      testSuites,
+      phases,
       executions: Array.isArray(p.executions) ? p.executions : [],
       defects: Array.isArray(p.defects) ? p.defects : [],
-      createdAt: p.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      createdAt: p.createdAt || now,
+      updatedAt: now
     };
   });
+
+  const normalizedChecklists = checklists.map((c, idx) => ({
+    id: (c.id && String(c.id).trim()) || `chk_${Date.now()}_${idx}`,
+    title: (c.title && String(c.title).trim()) || `Imported Checklist ${idx + 1}`,
+    schemaVersion: typeof c.schemaVersion === 'number' ? c.schemaVersion : 1,
+    documentNotes: Array.isArray(c.documentNotes) ? c.documentNotes : [],
+    phases: Array.isArray(c.phases) ? c.phases : [],
+    promotedProjectId: c.promotedProjectId || null,
+    promotedAt: c.promotedAt || null,
+    createdAt: c.createdAt || now,
+    updatedAt: now
+  }));
 
   return {
     fileName,
     fileSize: `${(fileSize / 1024).toFixed(1)} KB`,
     formatType,
     exportedAt: parsed.exportedAt || 'Unknown',
-    projects: normalizedProjects
+    projects: normalizedProjects,
+    checklists: normalizedChecklists
   };
 }
 
@@ -509,15 +608,15 @@ function openImportPreviewModal(importData) {
   let defects = 0;
 
   for (const p of importData.projects) {
-    if (p.phases.length > 0) plans++;
-    for (const ph of p.phases) {
+    if ((p.phases || []).length > 0) plans++;
+    for (const ph of (p.phases || [])) {
       suites += (ph.suites || []).length;
       for (const su of (ph.suites || [])) {
-        cases += (su.testCases || []).length;
+        cases += (su.testCases || su.cases || []).length;
       }
     }
-    execs += p.executions.length;
-    defects += p.defects.length;
+    execs += (p.executions || []).length;
+    defects += (p.defects || []).length;
   }
 
   setEl('import-preview-projects-cnt', importData.projects.length);
@@ -526,15 +625,22 @@ function openImportPreviewModal(importData) {
   setEl('import-preview-cases-cnt', cases);
   setEl('import-preview-execs-cnt', execs);
   setEl('import-preview-defects-cnt', defects);
+  setEl('import-preview-checklists-cnt', (importData.checklists || []).length);
 
   // Render project pills
   const listEl = document.getElementById('import-preview-projects-list');
   if (listEl) {
-    listEl.innerHTML = importData.projects.map(p => `
+    const projPills = importData.projects.map(p => `
       <div style="padding: 6px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-sm); font-size: 0.8125rem; font-weight: 500;">
         ${escapeHtml(p.name)} (${(p.phases || []).length} phases)
       </div>
     `).join('');
+    const chkPills = (importData.checklists || []).map(c => `
+      <div style="padding: 6px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-sm); font-size: 0.8125rem; font-weight: 500; color: var(--color-purple);">
+        📋 ${escapeHtml(c.title)} (Checklist)
+      </div>
+    `).join('');
+    listEl.innerHTML = projPills + chkPills;
   }
 
   modal.classList.add('active');
@@ -551,54 +657,41 @@ function closeImportPreviewModal() {
 }
 
 async function executeConfirmedImport() {
-  if (!_stagedImportData || !_stagedImportData.projects) return;
+  if (!_stagedImportData) return;
 
   const modeRadio = document.querySelector('input[name="import-mode"]:checked');
   const mode = modeRadio ? modeRadio.value : 'merge';
-  const existing = getProjects() || [];
 
-  if (mode === 'replace') {
-    // Preserve rollback snapshot first
-    _rollbackSnapshot = {
-      timestamp: new Date().toLocaleString(),
-      projects: JSON.parse(JSON.stringify(existing))
-    };
+  try {
+    const res = await apiFetch('/api/data/import', {
+      method: 'POST',
+      body: JSON.stringify({
+        mode,
+        projects: _stagedImportData.projects || [],
+        checklists: _stagedImportData.checklists || []
+      })
+    });
 
-    // Save each imported project to backend
-    // Delete existing projects from backend
-    for (const p of existing) {
-      await apiFetch(`/api/projects/${p.id}`, { method: 'DELETE' }).catch(() => {});
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Failed to complete import.', 'error');
+      return;
     }
 
-    // Insert imported projects
-    for (const p of _stagedImportData.projects) {
-      await apiFetch('/api/projects', {
-        method: 'POST',
-        body: JSON.stringify(p)
-      }).catch(() => {});
-    }
-  } else {
-    // Merge mode: re-assign unique ID if colliding
-    const existingIds = new Set(existing.map(p => p.id));
-    for (const p of _stagedImportData.projects) {
-      let targetProject = { ...p };
-      if (existingIds.has(targetProject.id)) {
-        targetProject.id = `proj_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-        targetProject.name = `${targetProject.name} (Imported)`;
-      }
-      await apiFetch('/api/projects', {
-        method: 'POST',
-        body: JSON.stringify(targetProject)
-      }).catch(() => {});
-    }
+    const result = await res.json();
+    closeImportPreviewModal();
+    await loadProjectsFromBackend();
+    updateSidebarProjectCounters();
+    renderProjectsGrid();
+    renderDataManagementWorkspace();
+    updateRollbackUI();
+
+    const countP = result.imported?.projects ?? _stagedImportData.projects.length;
+    const countC = result.imported?.checklists ?? (_stagedImportData.checklists || []).length;
+    showToast(`Successfully imported ${countP} project(s) and ${countC} checklist(s) via ${mode} mode`, 'success');
+  } catch (err) {
+    showToast(err.message || 'Error executing import.', 'error');
   }
-
-  closeImportPreviewModal();
-  await loadProjectsFromBackend();
-  updateSidebarProjectCounters();
-  renderProjectsGrid();
-  renderDataManagementWorkspace();
-  showToast(`Successfully imported ${_stagedImportData.projects.length} project(s) via ${mode} mode`, 'success');
 }
 
 // ----------------------------------------------------------------------------
@@ -720,11 +813,22 @@ export function initDataManagementEventListeners() {
   const btnChecklistsCsv = document.getElementById('btn-export-checklists-csv');
   if (btnChecklistsCsv) btnChecklistsCsv.addEventListener('click', exportChecklistsCsv);
 
-  // 5. Full Backup Download
+  // 5. Full Backup Download (Includes Projects & Checklists)
   const btnFullBackup = document.getElementById('btn-create-full-backup');
   if (btnFullBackup) {
-    btnFullBackup.addEventListener('click', () => {
+    btnFullBackup.addEventListener('click', async () => {
       const projects = getProjects() || [];
+      let checklists = [];
+      try {
+        const res = await apiFetch('/api/checklists');
+        if (res.ok) {
+          const chk = await res.json();
+          if (Array.isArray(chk)) checklists = chk;
+        }
+      } catch (err) {
+        console.warn('Could not fetch checklists for full backup:', err);
+      }
+
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const backupData = {
         application: 'Qavora',
@@ -733,9 +837,11 @@ export function initDataManagementEventListeners() {
         exportedAt: new Date().toISOString(),
         metadata: {
           totalProjects: projects.length,
+          totalChecklists: checklists.length,
           exportedBy: authController.getCurrentUser()?.email || 'authenticated_user'
         },
-        projects
+        projects,
+        checklists
       };
 
       const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
@@ -747,7 +853,7 @@ export function initDataManagementEventListeners() {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      showToast('Full backup downloaded successfully', 'success');
+      showToast(`Full backup downloaded (${projects.length} projects, ${checklists.length} checklists)`, 'success');
     });
   }
 
@@ -836,29 +942,25 @@ export function initDataManagementEventListeners() {
     confirmPreviewBtn.addEventListener('click', executeConfirmedImport);
   }
 
-  // 8. Rollback Snapshot Execution
+  // 8. Durable Rollback Snapshot Execution
   const btnRollback = document.getElementById('btn-execute-rollback');
   if (btnRollback) {
     btnRollback.addEventListener('click', async () => {
-      if (!_rollbackSnapshot) return;
       try {
-        const existing = getProjects() || [];
-        for (const p of existing) {
-          await apiFetch(`/api/projects/${p.id}`, { method: 'DELETE' }).catch(() => {});
-        }
-        for (const p of _rollbackSnapshot.projects) {
-          await apiFetch('/api/projects', {
-            method: 'POST',
-            body: JSON.stringify(p)
-          }).catch(() => {});
+        const res = await apiFetch('/api/data/rollback', { method: 'POST' });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          showToast(err.error || 'Failed to execute rollback.', 'error');
+          return;
         }
 
-        _rollbackSnapshot = null;
+        const data = await res.json();
         await loadProjectsFromBackend();
         updateSidebarProjectCounters();
         renderProjectsGrid();
         renderDataManagementWorkspace();
-        showToast('Rollback successful: Workspace restored to previous snapshot state', 'success');
+        updateRollbackUI();
+        showToast(data.message || 'Rollback successful: Workspace restored to previous snapshot state', 'success');
       } catch (err) {
         showToast(err.message || 'Error executing rollback.', 'error');
       }
