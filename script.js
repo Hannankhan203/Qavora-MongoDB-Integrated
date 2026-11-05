@@ -127,13 +127,21 @@ async function init() {
       }
 
       if (typeof initChecklistGenerator === 'function') {
-        initChecklistGenerator();
+        initChecklistGenerator({
+          navigateTo,
+          notify: showToast
+        });
       }
       if (typeof initQARunnerAndChecklists === 'function') {
-        initQARunnerAndChecklists();
+        initQARunnerAndChecklists({
+          navigateTo,
+          notify: showToast
+        });
       }
       if (typeof initQAChecklistTransferUI === 'function') {
-        initQAChecklistTransferUI();
+        initQAChecklistTransferUI({
+          notify: showToast
+        });
       }
     },
     onUnauthenticated: () => {

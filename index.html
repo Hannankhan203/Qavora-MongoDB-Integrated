@@ -1891,6 +1891,19 @@
             </div>
 
             <div class="plans-top-actions">
+              <button id="exec-start-run-btn" class="btn btn-primary btn-sm">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                </svg>
+                <span>Start Test Run</span>
+              </button>
+              <button id="exec-runs-history-btn" class="btn btn-secondary btn-sm">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <polyline points="12 6 12 12 16 14"></polyline>
+                </svg>
+                <span>Run History</span>
+              </button>
               <button id="exec-jump-defects-btn" class="btn btn-secondary btn-sm">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <circle cx="12" cy="12" r="10"></circle>
@@ -1929,6 +1942,9 @@
 
           <!-- Execution Main Body Container -->
           <div id="exec-main-content">
+            <!-- Active Test Run Banner (Rendered dynamically when a run is active) -->
+            <div id="exec-active-run-banner" style="display: none; margin-bottom: 16px;"></div>
+
             <!-- Execution Metrics Summary Bar -->
             <div class="plan-metrics-bar exec-metrics-bar">
               <div class="metric-item">
@@ -2232,6 +2248,18 @@
                 </select>
               </div>
 
+              <!-- Priority Filter -->
+              <div class="filter-select-wrapper">
+                <label for="defects-filter-priority" class="filter-label">Priority:</label>
+                <select id="defects-filter-priority" class="filter-select">
+                  <option value="ALL">All Priorities</option>
+                  <option value="Critical">Critical</option>
+                  <option value="High">High</option>
+                  <option value="Medium">Medium</option>
+                  <option value="Low">Low</option>
+                </select>
+              </div>
+
               <!-- Sort By -->
               <div class="filter-select-wrapper">
                 <label for="defects-sort-by" class="filter-label">Sort:</label>
@@ -2240,6 +2268,7 @@
                   <option value="oldest">Oldest First</option>
                   <option value="severity-desc">Severity: High to Low</option>
                   <option value="id-desc">Defect ID: Descending</option>
+                  <option value="title-asc">Title: A to Z</option>
                 </select>
               </div>
 
@@ -4594,6 +4623,12 @@
         </div>
 
         <div class="modal-footer">
+          <button type="button" id="view-case-execute-btn" class="btn btn-primary" title="Record execution result for this test case">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+            <span>Execute Case</span>
+          </button>
           <button type="button" id="view-case-duplicate-btn" class="btn btn-secondary">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
@@ -4601,7 +4636,7 @@
             </svg>
             <span>Duplicate Case</span>
           </button>
-          <button type="button" id="view-case-edit-btn" class="btn btn-primary">
+          <button type="button" id="view-case-edit-btn" class="btn btn-ghost">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
               <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
@@ -4788,6 +4823,7 @@
                   <option value="Fail">Fail (Behavior differs from expected)</option>
                   <option value="Blocked">Blocked (Blocked by dependency/bug)</option>
                   <option value="Skipped">Skipped (Intentionally skipped)</option>
+                  <option value="Not Run">Not Run (Reset status)</option>
                 </select>
                 <svg class="select-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <polyline points="6 9 12 15 18 9"></polyline>
@@ -5012,6 +5048,127 @@
     </div>
   </div>
 
+  <!-- 9b. Start Execution Run Modal -->
+  <div id="execution-run-modal" class="modal-backdrop" aria-hidden="true">
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="exec-run-modal-title">
+      <div class="modal-header">
+        <div class="modal-header-info">
+          <div class="modal-icon icon-blue">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+          </div>
+          <div>
+            <h3 id="exec-run-modal-title" class="modal-title">Start Test Run</h3>
+            <p class="modal-subtitle">Initiate a formal testing cycle to track progress</p>
+          </div>
+        </div>
+        <button id="exec-run-modal-close" class="modal-close-btn" aria-label="Close dialog">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <form id="execution-run-form" class="modal-form" novalidate>
+        <div class="form-group">
+          <label for="exec-run-name-input" class="form-label">
+            Run Name <span class="required-mark">*</span>
+          </label>
+          <input
+            type="text"
+            id="exec-run-name-input"
+            class="form-control"
+            placeholder="e.g. Sprint 24 Regression Run"
+            required
+            maxlength="100"
+          />
+        </div>
+
+        <div class="form-row-2">
+          <div class="form-group">
+            <label for="exec-run-env-input" class="form-label">Environment</label>
+            <input
+              type="text"
+              id="exec-run-env-input"
+              class="form-control"
+              placeholder="e.g. Staging, QA, Production"
+              maxlength="50"
+            />
+          </div>
+          <div class="form-group">
+            <label for="exec-run-build-input" class="form-label">Build / Release Version</label>
+            <input
+              type="text"
+              id="exec-run-build-input"
+              class="form-control"
+              placeholder="e.g. v2.4.0-rc1"
+              maxlength="50"
+            />
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="exec-run-notes-input" class="form-label">Goal / Scope Notes</label>
+          <textarea
+            id="exec-run-notes-input"
+            class="form-control form-textarea"
+            placeholder="e.g. Full smoke test of checkout, payments, and user settings."
+            rows="2"
+            maxlength="300"
+          ></textarea>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" id="exec-run-modal-cancel" class="btn btn-secondary">Cancel</button>
+          <button type="submit" id="exec-run-modal-submit" class="btn btn-primary">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+            <span>Start Run</span>
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 9c. Project Runs History Modal -->
+  <div id="project-runs-history-modal" class="modal-backdrop" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-lg" role="dialog" aria-modal="true" aria-labelledby="project-runs-title">
+      <div class="modal-header">
+        <div class="modal-header-info">
+          <div class="modal-icon icon-purple">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+          </div>
+          <div>
+            <h3 id="project-runs-title" class="modal-title">Execution Runs History</h3>
+            <p id="project-runs-subtitle" class="modal-subtitle">Historical test cycles and completion metrics</p>
+          </div>
+        </div>
+        <button id="project-runs-modal-close" class="modal-close-btn" aria-label="Close dialog">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <div class="modal-form" style="max-height: 75vh; overflow-y: auto;">
+        <div id="project-runs-list-container" class="history-runs-list">
+          <!-- Rendered dynamically -->
+        </div>
+
+        <div class="modal-footer" style="margin-top: 10px;">
+          <button type="button" id="project-runs-close-btn" class="btn btn-secondary">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- 10. Create / Edit Defect Modal (Prompt 4) -->
   <div id="defect-modal" class="modal-backdrop" aria-hidden="true">
     <div class="modal-dialog modal-dialog-lg" role="dialog" aria-modal="true" aria-labelledby="defect-modal-title">
@@ -5097,8 +5254,8 @@
           />
         </div>
 
-        <!-- Severity & Status Row -->
-        <div class="form-row-2">
+        <!-- Severity, Priority & Status Row -->
+        <div class="form-row-3" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px;">
           <div class="form-group">
             <label for="defect-severity-select" class="form-label">Severity <span class="required-mark">*</span></label>
             <div class="select-wrapper">
@@ -5107,6 +5264,21 @@
                 <option value="High" selected>High</option>
                 <option value="Medium">Medium</option>
                 <option value="Low">Low</option>
+              </select>
+              <svg class="select-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="6 9 12 15 18 9"></polyline>
+              </svg>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="defect-priority-select" class="form-label">Priority <span class="required-mark">*</span></label>
+            <div class="select-wrapper">
+              <select id="defect-priority-select" class="form-control" required>
+                <option value="Critical">Critical (P1)</option>
+                <option value="High" selected>High (P2)</option>
+                <option value="Medium">Medium (P3)</option>
+                <option value="Low">Low (P4)</option>
               </select>
               <svg class="select-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="6 9 12 15 18 9"></polyline>
@@ -5218,6 +5390,7 @@
             <h3 id="view-defect-title" class="modal-title">Defect Title</h3>
             <div class="view-case-badges">
               <span id="view-defect-severity" class="priority-badge p-critical">Critical</span>
+              <span id="view-defect-priority" class="priority-badge p-high">P2 - High</span>
               <span id="view-defect-status" class="status-badge status-active">Open</span>
               <span id="view-defect-project-badge" class="project-badge badge-web">Project</span>
             </div>

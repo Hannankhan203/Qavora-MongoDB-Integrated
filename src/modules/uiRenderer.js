@@ -31,7 +31,7 @@ import {
   loadProjectsFromBackend
 } from './projectManager.js';
 import { renderDashboard } from './dashboardManager.js';
-import { renderExecutionWorkspace, initExecutionEventListeners } from './executionManager.js';
+import { renderExecutionWorkspace, initExecutionEventListeners, openExecutionModal, getExecutionFilterState } from './executionManager.js';
 import { renderDefectsWorkspace, initDefectEventListeners, getDefectFilterState } from './defectManager.js';
 import {
   populateProjectsDropdown,
@@ -171,13 +171,18 @@ export function navigateTo(route, pushState = true) {
     }
     if (viewSlug === 'execution') {
       let targetId = null;
+      let targetSuite = null;
       if (cleanRoute.includes('?')) {
         const queryStr = cleanRoute.split('?')[1];
         const params = new URLSearchParams(queryStr);
         targetId = params.get('id');
+        targetSuite = params.get('suite');
       }
       if (targetId) {
         setActiveProjectId(targetId);
+      }
+      if (targetSuite) {
+        getExecutionFilterState().suite = targetSuite;
       }
       renderExecutionWorkspace();
     }
@@ -728,6 +733,22 @@ export function initUIEventListeners() {
   detailSuitesContainer?.addEventListener('click', (e) => {
     const target = e.target;
     if (!(target instanceof HTMLElement)) return;
+
+    const runSuiteBtn = target.closest('[data-action="run-suite-exec"]');
+    if (runSuiteBtn) {
+      e.stopPropagation();
+      const suiteId = runSuiteBtn.getAttribute('data-suite-id');
+      const current = getActiveProject();
+      if (current) {
+        setActiveProjectId(current.id);
+        populateProjectsDropdown();
+      }
+      if (suiteId) {
+        getExecutionFilterState().suite = suiteId;
+      }
+      navigateTo(current ? `/execution?id=${encodeURIComponent(current.id)}&suite=${encodeURIComponent(suiteId || '')}` : '/execution');
+      return;
+    }
 
     const openSuiteBtn = target.closest('[data-action="open-suite-plan"]');
     if (openSuiteBtn) {
@@ -1321,6 +1342,15 @@ export function initUIEventListeners() {
     const caseId = target.closest('[data-case-id]')?.getAttribute('data-case-id');
     const testCase = suite?.cases?.find((c) => c.id === caseId);
 
+    // Execute case directly from plans workspace
+    if (target.closest('[data-action="execute-case"]')) {
+      e.stopPropagation();
+      if (testCase) {
+        openExecutionModal({ ...testCase, suiteId, suiteName: suite?.name || 'Suite' }, project?.id);
+      }
+      return;
+    }
+
     // View / inspect case
     if (target.closest('[data-action="view-case"]')) {
       e.stopPropagation();
@@ -1378,10 +1408,21 @@ export function initUIEventListeners() {
   const viewCaseCloseBtn = document.getElementById('view-case-close');
   const viewCaseDupBtn = document.getElementById('view-case-duplicate-btn');
   const viewCaseEditBtn = document.getElementById('view-case-edit-btn');
+  const viewCaseExecBtn = document.getElementById('view-case-execute-btn');
 
   viewCaseCloseBtn?.addEventListener('click', closeTestCaseViewModal);
   viewCaseModal?.addEventListener('click', (e) => {
     if (e.target === viewCaseModal) closeTestCaseViewModal();
+  });
+
+  viewCaseExecBtn?.addEventListener('click', () => {
+    const currentCase = getCurrentViewingCase();
+    const currentSuite = getCurrentViewingSuite();
+    const currentProj = getActiveProject();
+    if (currentCase) {
+      closeTestCaseViewModal();
+      openExecutionModal({ ...currentCase, suiteId: currentSuite?.id, suiteName: currentSuite?.name || 'Suite' }, currentProj?.id);
+    }
   });
 
   viewCaseDupBtn?.addEventListener('click', async () => {

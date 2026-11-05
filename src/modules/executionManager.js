@@ -17,6 +17,7 @@ let _activeExecutingProjectId = null;
 let _stepStatuses = {}; // { [stepIndex]: 'Passed' | 'Failed' | 'Not Run' }
 let _isSubmittingExecution = false;
 let _listenersBound = false;
+const _pendingQuickOutcomes = new Set(); // Guard against rapid duplicate clicks
 
 // Filter state for execution workspace
 const _filterState = {
@@ -31,6 +32,192 @@ const _filterState = {
 
 export function getExecutionFilterState() {
   return _filterState;
+}
+
+/**
+ * Starts a new formal test execution run for the current project.
+ */
+export async function startExecutionRun({ name, environment, buildVersion, notes }, projectId = null) {
+  const currentProject = projectId
+    ? getProjects().find((p) => p.id === projectId)
+    : getActiveProject();
+
+  if (!currentProject) return { ok: false, error: 'No active project selected.' };
+
+  const activeRun = {
+    id: generateStableId('run'),
+    name: name?.trim() || `Test Run — ${formatDate(new Date())}`,
+    environment: environment?.trim() || '',
+    buildVersion: buildVersion?.trim() || '',
+    notes: notes?.trim() || '',
+    startedAt: new Date().toISOString(),
+    status: 'In Progress'
+  };
+
+  return saveProjectData(currentProject.id, { activeRun });
+}
+
+/**
+ * Completes the active test run, computes final stats, and moves it to executionRuns history.
+ */
+export async function completeExecutionRun(projectId = null) {
+  const currentProject = projectId
+    ? getProjects().find((p) => p.id === projectId)
+    : getActiveProject();
+
+  if (!currentProject || !currentProject.activeRun) {
+    return { ok: false, error: 'No active test run in progress to complete.' };
+  }
+
+  const activeRun = currentProject.activeRun;
+  const suites = Array.isArray(currentProject.testSuites) ? currentProject.testSuites : [];
+  let totalCases = 0;
+  let passedCases = 0;
+  let failedCases = 0;
+  let blockedCases = 0;
+  let skippedCases = 0;
+
+  suites.forEach((s) => {
+    if (Array.isArray(s.cases)) {
+      totalCases += s.cases.length;
+      s.cases.forEach((c) => {
+        const st = (c.status || '').toLowerCase();
+        if (st === 'passed' || st === 'pass') passedCases++;
+        else if (st === 'failed' || st === 'fail') failedCases++;
+        else if (st === 'blocked') blockedCases++;
+        else if (st === 'skipped') skippedCases++;
+      });
+    }
+  });
+
+  const executedCount = passedCases + failedCases + blockedCases + skippedCases;
+  const passRate = executedCount > 0 ? Math.round((passedCases / executedCount) * 100) : 0;
+
+  const completedRun = {
+    ...activeRun,
+    status: 'Completed',
+    completedAt: new Date().toISOString(),
+    metrics: {
+      totalCases,
+      executedCount,
+      passedCases,
+      failedCases,
+      blockedCases,
+      skippedCases,
+      passRate
+    }
+  };
+
+  const executionRuns = Array.isArray(currentProject.executionRuns)
+    ? [completedRun, ...currentProject.executionRuns]
+    : [completedRun];
+
+  return saveProjectData(currentProject.id, {
+    activeRun: null,
+    executionRuns
+  });
+}
+
+/**
+ * Discards or cancels the current active test run.
+ */
+export async function discardActiveRun(projectId = null) {
+  const currentProject = projectId
+    ? getProjects().find((p) => p.id === projectId)
+    : getActiveProject();
+
+  if (!currentProject) return { ok: false, error: 'No active project selected.' };
+
+  return saveProjectData(currentProject.id, { activeRun: null });
+}
+
+export function openStartRunModal() {
+  if (typeof document === 'undefined') return;
+  const modal = document.getElementById('execution-run-modal');
+  const form = document.getElementById('execution-run-form');
+  if (form) form.reset();
+  if (modal) {
+    modal.classList.add('open');
+    modal.setAttribute('aria-hidden', 'false');
+  }
+}
+
+export function closeStartRunModal() {
+  if (typeof document === 'undefined') return;
+  const modal = document.getElementById('execution-run-modal');
+  if (modal) {
+    modal.classList.remove('open');
+    modal.setAttribute('aria-hidden', 'true');
+  }
+}
+
+export function openProjectRunsHistoryModal() {
+  if (typeof document === 'undefined') return;
+  const currentProject = getActiveProject();
+  const modal = document.getElementById('project-runs-history-modal');
+  const subtitleEl = document.getElementById('project-runs-subtitle');
+  const listContainer = document.getElementById('project-runs-list-container');
+
+  if (subtitleEl && currentProject) {
+    subtitleEl.textContent = `Completed cycles for "${currentProject.name || 'Current Project'}"`;
+  }
+
+  if (listContainer) {
+    const runs = Array.isArray(currentProject?.executionRuns) ? currentProject.executionRuns : [];
+    if (runs.length === 0) {
+      listContainer.innerHTML = `
+        <div class="empty-state" style="padding: 32px 16px;">
+          <h4 class="empty-state-title" style="font-size: 0.95rem;">No Completed Test Runs Yet</h4>
+          <p class="empty-state-desc" style="font-size: 0.8rem; margin-bottom: 0;">
+            Use "Start Test Run" in the top bar to begin a test cycle, run test cases, and click "Complete Run" to archive historical execution metrics.
+          </p>
+        </div>`;
+    } else {
+      listContainer.innerHTML = runs
+        .map((r, idx) => {
+          const m = r.metrics || {};
+          const runNum = runs.length - idx;
+          return `
+            <div class="history-run-card" style="padding: 14px; margin-bottom: 10px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-surface-2);">
+              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <strong style="font-size: 0.9rem; color: var(--text-primary);">#${runNum} ${escapeHtml(r.name || 'Test Run')}</strong>
+                  <span class="status-badge status-pass">Completed</span>
+                </div>
+                <span style="font-size: 0.75rem; color: var(--text-muted);">${formatDate(r.completedAt || r.startedAt)}</span>
+              </div>
+              <div style="display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 6px;">
+                <span>Total: <strong>${m.totalCases ?? 0}</strong></span>
+                <span style="color: var(--color-green);">Passed: <strong>${m.passedCases ?? 0}</strong></span>
+                <span style="color: var(--color-red);">Failed: <strong>${m.failedCases ?? 0}</strong></span>
+                <span style="color: var(--color-amber);">Blocked: <strong>${m.blockedCases ?? 0}</strong></span>
+                <span>Pass Rate: <strong>${m.passRate ?? 0}%</strong></span>
+              </div>
+              ${r.notes ? `<p style="font-size: 0.76rem; color: var(--text-muted); margin: 4px 0 0 0;"><strong>Scope:</strong> ${escapeHtml(r.notes)}</p>` : ''}
+              <div style="display: flex; gap: 12px; font-size: 0.72rem; color: var(--text-muted); margin-top: 6px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 4px;">
+                ${r.environment ? `<span>Env: <strong>${escapeHtml(r.environment)}</strong></span>` : ''}
+                ${r.buildVersion ? `<span>Build: <strong>${escapeHtml(r.buildVersion)}</strong></span>` : ''}
+                <span>Started: ${formatDate(r.startedAt)}</span>
+              </div>
+            </div>`;
+        })
+        .join('');
+    }
+  }
+
+  if (modal) {
+    modal.classList.add('open');
+    modal.setAttribute('aria-hidden', 'false');
+  }
+}
+
+export function closeProjectRunsHistoryModal() {
+  if (typeof document === 'undefined') return;
+  const modal = document.getElementById('project-runs-history-modal');
+  if (modal) {
+    modal.classList.remove('open');
+    modal.setAttribute('aria-hidden', 'true');
+  }
 }
 
 /**
@@ -204,6 +391,50 @@ export function renderExecutionWorkspace() {
   if (statCompletion) statCompletion.textContent = `${completionRate}%`;
   if (statCompletionBar) statCompletionBar.style.width = `${completionRate}%`;
   if (statPassRate) statPassRate.textContent = `${passRate}%`;
+
+  // 3b. Render Active Test Run Banner if exists
+  const activeRunBanner = document.getElementById('exec-active-run-banner');
+  const activeRun = currentProject.activeRun;
+  if (activeRunBanner) {
+    if (activeRun) {
+      activeRunBanner.style.display = 'block';
+      activeRunBanner.innerHTML = `
+        <div class="active-run-card" style="display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 18px; background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(168, 85, 247, 0.08)); border: 1px solid rgba(99, 102, 241, 0.35); border-radius: 8px;">
+          <div style="display: flex; align-items: center; gap: 12px; min-width: 0;">
+            <div style="width: 36px; height: 36px; border-radius: 8px; background: var(--accent-primary, #6366f1); display: flex; align-items: center; justify-content: center; color: #fff; flex-shrink: 0;">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 18px; height: 18px;">
+                <polygon points="5 3 19 12 5 21 5 3"></polygon>
+              </svg>
+            </div>
+            <div style="min-width: 0;">
+              <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <strong style="font-size: 0.92rem; color: var(--text-primary);">${escapeHtml(activeRun.name || 'Active Test Run')}</strong>
+                <span class="status-badge status-inprogress" style="font-size: 0.68rem;">In Progress</span>
+                ${activeRun.environment ? `<span class="project-badge badge-web" style="font-size: 0.68rem;">Env: ${escapeHtml(activeRun.environment)}</span>` : ''}
+                ${activeRun.buildVersion ? `<span class="project-badge badge-qa" style="font-size: 0.68rem;">Build: ${escapeHtml(activeRun.buildVersion)}</span>` : ''}
+              </div>
+              <div style="font-size: 0.74rem; color: var(--text-muted); margin-top: 2px;">
+                Started ${formatDate(activeRun.startedAt)} · Progress: <strong>${completionRate}%</strong> (${executedCount}/${totalCases} executed, ${passedCount} passed)
+              </div>
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
+            <button type="button" id="btn-complete-active-run" class="btn btn-primary btn-sm" title="Finish and archive this test run cycle">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="20 6 9 17 4 12"></polyline>
+              </svg>
+              <span>Complete Run</span>
+            </button>
+            <button type="button" id="btn-discard-active-run" class="btn btn-ghost btn-sm text-red" title="Cancel this test run">
+              <span>Discard</span>
+            </button>
+          </div>
+        </div>`;
+    } else {
+      activeRunBanner.style.display = 'none';
+      activeRunBanner.innerHTML = '';
+    }
+  }
 
   // 4. Populate Dropdown Filters (preserving selection)
   const filterPhaseEl = document.getElementById('exec-filter-phase');
@@ -678,48 +909,58 @@ export async function quickRecordOutcome(caseId, status, projectId = null) {
     return;
   }
 
-  let foundCase = null;
-  let foundSuiteId = null;
+  const guardKey = `${currentProject.id}_${caseId}`;
+  if (_pendingQuickOutcomes.has(guardKey)) {
+    return; // Ignore rapid duplicate clicks
+  }
+  _pendingQuickOutcomes.add(guardKey);
 
-  if (Array.isArray(currentProject.testSuites)) {
-    for (const s of currentProject.testSuites) {
-      if (Array.isArray(s.cases)) {
-        const c = s.cases.find((item) => item.id === caseId);
-        if (c) {
-          foundCase = c;
-          foundSuiteId = s.id;
-          break;
+  try {
+    let foundCase = null;
+    let foundSuiteId = null;
+
+    if (Array.isArray(currentProject.testSuites)) {
+      for (const s of currentProject.testSuites) {
+        if (Array.isArray(s.cases)) {
+          const c = s.cases.find((item) => item.id === caseId);
+          if (c) {
+            foundCase = c;
+            foundSuiteId = s.id;
+            break;
+          }
         }
       }
     }
-  }
 
-  if (!foundCase) {
-    showToast('Test case not found in project suites.', 'error');
-    return;
-  }
+    if (!foundCase) {
+      showToast('Test case not found in project suites.', 'error');
+      return;
+    }
 
-  const execPayload = {
-    caseId: foundCase.id,
-    testCaseId: foundCase.id,
-    caseTitle: foundCase.title,
-    suiteId: foundSuiteId,
-    status: status, // 'Pass' | 'Fail' | 'Blocked' | 'Skipped'
-    actualResult:
-      status === 'Pass'
-        ? `Quick Pass: Verified against expected result "${foundCase.expectedResult || 'matches spec'}".`
-        : `Quick ${status}: Recorded without detailed notes.`,
-    executedAt: new Date().toISOString()
-  };
+    const execPayload = {
+      caseId: foundCase.id,
+      testCaseId: foundCase.id,
+      caseTitle: foundCase.title,
+      suiteId: foundSuiteId,
+      status: status, // 'Pass' | 'Fail' | 'Blocked' | 'Skipped' | 'Not Run'
+      actualResult:
+        status === 'Pass'
+          ? `Quick Pass: Verified against expected result "${foundCase.expectedResult || 'matches spec'}".`
+          : `Quick ${status}: Recorded without detailed notes.`,
+      executedAt: new Date().toISOString()
+    };
 
-  const res = await saveExecutionResult(execPayload, currentProject.id);
-  if (res.ok) {
-    updateSidebarProjectCounters();
-    renderExecutionWorkspace();
-    renderDashboard();
-    showToast(`Recorded outcome ${status} for ${foundCase.testCaseId || foundCase.id}.`, 'success');
-  } else {
-    showToast(res.error || 'Failed to record execution.', 'error');
+    const res = await saveExecutionResult(execPayload, currentProject.id);
+    if (res.ok) {
+      updateSidebarProjectCounters();
+      renderExecutionWorkspace();
+      renderDashboard();
+      showToast(`Recorded outcome ${status} for ${foundCase.testCaseId || foundCase.id}.`, 'success');
+    } else {
+      showToast(res.error || 'Failed to record execution.', 'error');
+    }
+  } finally {
+    _pendingQuickOutcomes.delete(guardKey);
   }
 }
 
@@ -848,7 +1089,88 @@ export function initExecutionEventListeners() {
     }
   });
 
-  // 2. Navigation buttons
+  // 2. Navigation & Test Run buttons
+  document.getElementById('exec-start-run-btn')?.addEventListener('click', () => {
+    openStartRunModal();
+  });
+
+  document.getElementById('exec-runs-history-btn')?.addEventListener('click', () => {
+    openProjectRunsHistoryModal();
+  });
+
+  document.getElementById('exec-run-modal-close')?.addEventListener('click', closeStartRunModal);
+  document.getElementById('exec-run-modal-cancel')?.addEventListener('click', closeStartRunModal);
+  document.getElementById('execution-run-modal')?.addEventListener('click', (e) => {
+    if (e.target === document.getElementById('execution-run-modal')) closeStartRunModal();
+  });
+
+  document.getElementById('project-runs-modal-close')?.addEventListener('click', closeProjectRunsHistoryModal);
+  document.getElementById('project-runs-close-btn')?.addEventListener('click', closeProjectRunsHistoryModal);
+  document.getElementById('project-runs-history-modal')?.addEventListener('click', (e) => {
+    if (e.target === document.getElementById('project-runs-history-modal')) closeProjectRunsHistoryModal();
+  });
+
+  // Active run banner actions (delegated)
+  const activeRunBanner = document.getElementById('exec-active-run-banner');
+  activeRunBanner?.addEventListener('click', async (e) => {
+    const target = e.target;
+    if (!(target instanceof HTMLElement)) return;
+
+    if (target.closest('#btn-complete-active-run')) {
+      const res = await completeExecutionRun();
+      if (res.ok) {
+        showToast('Test run cycle completed and archived to history.', 'success');
+        renderExecutionWorkspace();
+        renderDashboard();
+      } else {
+        showToast(res.error || 'Failed to complete test run.', 'error');
+      }
+      return;
+    }
+
+    if (target.closest('#btn-discard-active-run')) {
+      const res = await discardActiveRun();
+      if (res.ok) {
+        showToast('Test run discarded.', 'info');
+        renderExecutionWorkspace();
+      } else {
+        showToast(res.error || 'Failed to discard test run.', 'error');
+      }
+      return;
+    }
+  });
+
+  // Start test run form submit
+  document.getElementById('execution-run-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const nameInput = document.getElementById('exec-run-name-input');
+    const envInput = document.getElementById('exec-run-env-input');
+    const buildInput = document.getElementById('exec-run-build-input');
+    const notesInput = document.getElementById('exec-run-notes-input');
+
+    const name = nameInput?.value?.trim();
+    if (!name) {
+      showToast('Run name is required.', 'error');
+      nameInput?.focus();
+      return;
+    }
+
+    const res = await startExecutionRun({
+      name,
+      environment: envInput?.value?.trim() || '',
+      buildVersion: buildInput?.value?.trim() || '',
+      notes: notesInput?.value?.trim() || ''
+    });
+
+    if (res.ok) {
+      showToast(`Started test run: "${name}"`, 'success');
+      closeStartRunModal();
+      renderExecutionWorkspace();
+    } else {
+      showToast(res.error || 'Failed to start test run.', 'error');
+    }
+  });
+
   document.getElementById('exec-jump-defects-btn')?.addEventListener('click', () => {
     const cur = getActiveProject();
     if (cur) {

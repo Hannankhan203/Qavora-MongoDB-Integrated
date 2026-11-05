@@ -519,12 +519,20 @@ function renderSuiteCard(s) {
           <span style="color: var(--color-green, #22c55e); font-weight: 500;">✓ ${cPassed}</span>
           <span style="color: var(--color-red, #ef4444); font-weight: 500;">✕ ${cFailed}</span>
         </div>
-        <button type="button" class="btn btn-ghost btn-xs" data-action="open-suite-plan" data-suite-id="${escapeHtml(s.id)}" style="font-size: 0.72rem; padding: 2px 8px;">
-          <span>Open in Workspace</span>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 12px; height: 12px;">
-            <polyline points="9 18 15 12 9 6"></polyline>
-          </svg>
-        </button>
+        <div style="display: inline-flex; gap: 4px; align-items: center;">
+          <button type="button" class="btn btn-primary btn-xs" data-action="run-suite-exec" data-suite-id="${escapeHtml(s.id)}" style="font-size: 0.72rem; padding: 2px 8px;" title="Execute this suite in Runner">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 10px; height: 10px;">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+            <span>Run Suite</span>
+          </button>
+          <button type="button" class="btn btn-ghost btn-xs" data-action="open-suite-plan" data-suite-id="${escapeHtml(s.id)}" style="font-size: 0.72rem; padding: 2px 8px;">
+            <span>Plan</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 12px; height: 12px;">
+              <polyline points="9 18 15 12 9 6"></polyline>
+            </svg>
+          </button>
+        </div>
       </div>
     </div>`;
 }

@@ -21,6 +21,7 @@ let _listenersBound = false;
 const _filterState = {
   search: '',
   severity: 'ALL',
+  priority: 'ALL',
   status: 'ALL',
   sort: 'newest',
   projectId: 'ALL'
@@ -54,6 +55,7 @@ export async function saveDefect(defectData, projectId = null) {
     defectId: displayId,
     status: defectData.status || 'Open',
     severity: defectData.severity || 'High',
+    priority: defectData.priority || 'High',
     updatedAt: new Date().toISOString(),
     ...defectData
   };
@@ -208,6 +210,13 @@ export function renderDefectsWorkspace() {
       }
     }
 
+    // Priority filter
+    if (_filterState.priority !== 'ALL') {
+      if ((d.priority || 'Medium').toLowerCase() !== _filterState.priority.toLowerCase()) {
+        return false;
+      }
+    }
+
     // Status filter
     if (_filterState.status !== 'ALL') {
       if ((d.status || 'Open').toLowerCase() !== _filterState.status.toLowerCase()) {
@@ -228,6 +237,8 @@ export function renderDefectsWorkspace() {
         return (SEVERITY_WEIGHT[b.severity || 'Medium'] || 2) - (SEVERITY_WEIGHT[a.severity || 'Medium'] || 2);
       case 'id-desc':
         return (b.defectId || b.id || '').localeCompare(a.defectId || a.id || '');
+      case 'title-asc':
+        return (a.title || '').localeCompare(b.title || '');
       case 'newest':
       default:
         return new Date(b.updatedAt || b.createdAt || 0).getTime() - new Date(a.updatedAt || a.createdAt || 0).getTime();
@@ -241,7 +252,7 @@ export function renderDefectsWorkspace() {
   }
 
   const clearFiltersBtn = document.getElementById('defects-clear-filters-btn');
-  const isFiltered = Boolean(_filterState.search) || _filterState.severity !== 'ALL' || _filterState.status !== 'ALL';
+  const isFiltered = Boolean(_filterState.search) || _filterState.severity !== 'ALL' || _filterState.priority !== 'ALL' || _filterState.status !== 'ALL';
   if (clearFiltersBtn) {
     clearFiltersBtn.style.display = isFiltered ? 'inline-flex' : 'none';
   }
@@ -300,11 +311,12 @@ export function renderDefectsWorkspace() {
           <th style="width: 100px;">Defect ID</th>
           <th>Defect Title</th>
           <th style="width: 130px;">Project</th>
-          <th style="width: 100px;">Severity</th>
-          <th style="width: 120px;">Status</th>
-          <th style="width: 120px;">Linked Test</th>
-          <th style="width: 120px;">Last Modified</th>
-          <th style="width: 160px; text-align: right;">Actions</th>
+          <th style="width: 95px;">Severity</th>
+          <th style="width: 95px;">Priority</th>
+          <th style="width: 110px;">Status</th>
+          <th style="width: 110px;">Linked Test</th>
+          <th style="width: 115px;">Last Modified</th>
+          <th style="width: 150px; text-align: right;">Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -312,6 +324,7 @@ export function renderDefectsWorkspace() {
           .map((d) => {
             const displayId = d.defectId || (d.id.startsWith('def_') ? 'DEF-' + d.id.slice(-4).toUpperCase() : d.id);
             const severityClass = `p-${(d.severity || 'medium').toLowerCase()}`;
+            const priorityClass = `p-${(d.priority || 'medium').toLowerCase()}`;
             const rawStatus = (d.status || 'Open').toLowerCase();
             const statusClass =
               rawStatus === 'resolved' || rawStatus === 'closed'
@@ -338,6 +351,9 @@ export function renderDefectsWorkspace() {
                 </td>
                 <td>
                   <span class="priority-badge ${severityClass}">${escapeHtml(d.severity || 'High')}</span>
+                </td>
+                <td>
+                  <span class="priority-badge ${priorityClass}">${escapeHtml(d.priority || 'High')}</span>
                 </td>
                 <td>
                   <span class="status-badge ${statusClass}">${escapeHtml(d.status || 'Open')}</span>
@@ -431,6 +447,10 @@ export function openCreateDefectModal(initialData = {}) {
     const sevSelect = document.getElementById('defect-severity-select');
     if (sevSelect) sevSelect.value = initialData.severity;
   }
+  if (initialData.priority) {
+    const priSelect = document.getElementById('defect-priority-select');
+    if (priSelect) priSelect.value = initialData.priority;
+  }
   if (initialData.steps) {
     const stepsInput = document.getElementById('defect-steps-input');
     if (stepsInput) stepsInput.value = initialData.steps;
@@ -490,6 +510,7 @@ export function openEditDefectModal(defect, projectId) {
   // Fill form inputs
   const titleInput = document.getElementById('defect-title-input');
   const severitySelect = document.getElementById('defect-severity-select');
+  const prioritySelect = document.getElementById('defect-priority-select');
   const statusSelect = document.getElementById('defect-status-select');
   const stepsInput = document.getElementById('defect-steps-input');
   const expectedInput = document.getElementById('defect-expected-input');
@@ -499,6 +520,7 @@ export function openEditDefectModal(defect, projectId) {
 
   if (titleInput) titleInput.value = defect.title || '';
   if (severitySelect) severitySelect.value = defect.severity || 'High';
+  if (prioritySelect) prioritySelect.value = defect.priority || 'High';
   if (statusSelect) statusSelect.value = defect.status || 'Open';
   if (stepsInput) stepsInput.value = defect.steps || '';
   if (expectedInput) expectedInput.value = defect.expectedResult || '';
@@ -581,6 +603,13 @@ export function openDefectViewModal(defect, projectId) {
   if (severityEl) {
     severityEl.textContent = defect.severity || 'High';
     severityEl.className = `priority-badge p-${(defect.severity || 'high').toLowerCase()}`;
+  }
+
+  const priorityEl = document.getElementById('view-defect-priority');
+  if (priorityEl) {
+    const p = defect.priority || 'High';
+    priorityEl.textContent = `P: ${p}`;
+    priorityEl.className = `priority-badge p-${p.toLowerCase()}`;
   }
 
   if (statusEl) {
@@ -713,6 +742,7 @@ export function initDefectEventListeners() {
   const searchInput = document.getElementById('defects-search-input');
   const clearSearchBtn = document.getElementById('defects-search-clear-btn');
   const filterSeverity = document.getElementById('defects-filter-severity');
+  const filterPriority = document.getElementById('defects-filter-priority');
   const filterStatus = document.getElementById('defects-filter-status');
   const sortBy = document.getElementById('defects-sort-by');
   const clearFiltersBtn = document.getElementById('defects-clear-filters-btn');
@@ -733,6 +763,11 @@ export function initDefectEventListeners() {
     renderDefectsWorkspace();
   });
 
+  filterPriority?.addEventListener('change', () => {
+    _filterState.priority = filterPriority.value;
+    renderDefectsWorkspace();
+  });
+
   filterStatus?.addEventListener('change', () => {
     _filterState.status = filterStatus.value;
     renderDefectsWorkspace();
@@ -746,11 +781,13 @@ export function initDefectEventListeners() {
   const resetAllDefectFilters = () => {
     _filterState.search = '';
     _filterState.severity = 'ALL';
+    _filterState.priority = 'ALL';
     _filterState.status = 'ALL';
     _filterState.sort = 'newest';
 
     if (searchInput) searchInput.value = '';
     if (filterSeverity) filterSeverity.value = 'ALL';
+    if (filterPriority) filterPriority.value = 'ALL';
     if (filterStatus) filterStatus.value = 'ALL';
     if (sortBy) sortBy.value = 'newest';
 
@@ -857,6 +894,7 @@ export function initDefectEventListeners() {
     try {
       const linkedCaseSelect = document.getElementById('defect-linked-case-select');
       const severitySelect = document.getElementById('defect-severity-select');
+      const prioritySelect = document.getElementById('defect-priority-select');
       const statusSelect = document.getElementById('defect-status-select');
       const stepsInput = document.getElementById('defect-steps-input');
       const expectedInput = document.getElementById('defect-expected-input');
@@ -870,6 +908,7 @@ export function initDefectEventListeners() {
         projectId,
         linkedTestCaseId: linkedCaseSelect?.value || null,
         severity: severitySelect?.value || 'High',
+        priority: prioritySelect?.value || 'High',
         status: statusSelect?.value || 'Open',
         steps: stepsInput?.value?.trim() || '',
         expectedResult: expectedInput?.value?.trim() || '',

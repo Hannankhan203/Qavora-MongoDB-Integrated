@@ -607,6 +607,12 @@ export function renderTestCasesTable(suiteParam = null) {
           </td>
           <td style="text-align: right;">
             <div class="case-actions-cell" style="justify-content: flex-end;">
+              <button type="button" class="btn btn-primary btn-xs btn-case-execute" data-action="execute-case" data-case-id="${escapeHtml(tc.id)}" title="Execute Test Case" style="font-size: 0.7rem; padding: 2px 7px;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:11px;height:11px;">
+                  <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                </svg>
+                <span>Run</span>
+              </button>
               <button type="button" class="btn btn-ghost btn-xs btn-case-view" data-action="view-case" data-case-id="${escapeHtml(tc.id)}" title="Inspect Case">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px;">
                   <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
