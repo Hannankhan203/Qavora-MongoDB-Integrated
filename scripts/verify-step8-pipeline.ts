@@ -71,45 +71,13 @@ async function runStep3Verification() {
   assert(serverTs.includes("VITE_BASE_PATH"), 'Server respects VITE_BASE_PATH configuration');
   assert(serverTs.includes("res.sendFile(indexPath)"), 'SPA route sends index.html via res.sendFile');
 
-  // --- Task 4: Live HTTP Server Simulation of Production Static & SPA Routes ---
-  console.log('\n--- Task 4: Live HTTP Server Simulation (Static Assets & SPA Routing) ---');
-  const app = express();
-  app.use(express.json());
-
-  // Health check endpoint (reproduced from server.ts)
-  app.get("/api/health", (_req: Request, res: Response) => {
-    res.json({
-      success: true,
-      message: "Qavora backend is running successfully.",
-      database: "connected"
-    });
-  });
-
-  // Dedicated API 404 guard (Express 5 compatible)
-  app.use('/api', (req: Request, res: Response) => {
-    return res.status(404).json({
-      error: 'Not Found',
-      message: `API endpoint '${req.method} ${req.originalUrl || req.path}' does not exist.`
-    });
-  });
-
-  // Static serving matching server.ts production branch
-  const rawBasePath = process.env.VITE_BASE_PATH || '/';
-  const basePath = rawBasePath.startsWith('/') ? rawBasePath : `/${rawBasePath}`;
-  const cleanBasePath = basePath.endsWith('/') ? basePath.slice(0, -1) : basePath;
-
-  if (cleanBasePath && cleanBasePath !== '') {
-    app.use(cleanBasePath, express.static(distPath, { maxAge: '1h', index: false }));
-  }
-  app.use(express.static(distPath, { maxAge: '1h', index: false }));
-
-  // SPA fallback (Express 5 compatible)
-  app.use((req: Request, res: Response, next: NextFunction) => {
-    if (req.method === 'GET' && !req.path.startsWith('/api')) {
-      return res.sendFile(indexPath);
-    }
-    next();
-  });
+  // --- Task 4: Live HTTP Server with Actual server.ts Production Static & SPA Routes ---
+  console.log('\n--- Task 4: Live HTTP Server (Actual server.ts Static Assets & SPA Routing) ---');
+  process.env.VERCEL = '1';
+  process.env.NODE_ENV = 'production';
+  const serverModule = await import('../server.ts');
+  const app = serverModule.default;
+  serverModule.configureStaticAndSpa(app);
 
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));

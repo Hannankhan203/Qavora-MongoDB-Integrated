@@ -6,10 +6,8 @@
 
 import fs from 'fs';
 import path from 'path';
-import express, { Request, Response } from 'express';
 import { MongoClient, Db } from 'mongodb';
 import { MongoMemoryServer } from 'mongodb-memory-server';
-import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import http from 'http';
 
@@ -477,142 +475,18 @@ async function runTests() {
   await usersCollection.createIndex({ email: 1 }, { unique: true });
 
   const JWT_SECRET = 'qavora_step5_super_secret_jwt_key_2026';
+  process.env.VERCEL = '1';
+  process.env.NODE_ENV = 'production';
+  process.env.MONGODB_URI = mongoUri;
+  process.env.MONGODB_DB = 'qavora_test_step5';
+  process.env.JWT_SECRET = JWT_SECRET;
 
-  const app = express();
-  app.use(express.json());
+  const serverModule = await import('../server.ts');
+  const app = serverModule.default;
+  const connectToDatabase = serverModule.connectToDatabase;
+  const closeDatabase = serverModule.closeDatabase;
 
-  // Backend Auth Routes
-  app.post('/api/auth/register', async (req: Request, res: Response) => {
-    try {
-      const { name, email, password, role } = req.body;
-      if (!name || typeof name !== 'string' || !name.trim()) {
-        return res.status(400).json({ error: 'Full name is required.' });
-      }
-      if (!email || typeof email !== 'string' || !email.trim()) {
-        return res.status(400).json({ error: 'Valid email address is required.' });
-      }
-      if (!password || typeof password !== 'string' || password.length < 8) {
-        return res.status(400).json({ error: 'Password must be at least 8 characters long.' });
-      }
-
-      const normalizedEmail = email.trim().toLowerCase();
-      const existing = await usersCollection.findOne({ email: normalizedEmail });
-      if (existing) {
-        return res.status(409).json({ error: 'A user with this email address already exists.' });
-      }
-
-      const passwordHash = await bcrypt.hash(password, 10);
-      const userId = 'usr_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
-      const userRole = (role && typeof role === 'string' && role.trim()) ? role.trim() : 'QA Tester';
-
-      const initials = name.trim().split(/\s+/).map((p: string) => p[0]).join('').toUpperCase().slice(0, 2) || 'QA';
-
-      const newUser = {
-        userId,
-        email: normalizedEmail,
-        name: name.trim(),
-        role: userRole,
-        avatarInitials: initials,
-        passwordHash,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        lastLoginAt: new Date().toISOString()
-      };
-
-      await usersCollection.insertOne(newUser);
-
-      const token = jwt.sign(
-        { userId, email: normalizedEmail, name: name.trim(), role: userRole },
-        JWT_SECRET,
-        { expiresIn: '7d' }
-      );
-
-      return res.status(201).json({
-        message: 'Registration successful.',
-        token,
-        user: {
-          userId,
-          email: normalizedEmail,
-          name: name.trim(),
-          role: userRole,
-          avatarInitials: initials
-        }
-      });
-    } catch (err: any) {
-      if (err.code === 11000) {
-        return res.status(409).json({ error: 'A user with this email address already exists.' });
-      }
-      return res.status(500).json({ error: 'Internal registration failure.' });
-    }
-  });
-
-  app.post('/api/auth/login', async (req: Request, res: Response) => {
-    try {
-      const { email, password } = req.body;
-      if (!email || !password) {
-        return res.status(400).json({ error: 'Email and password are required.' });
-      }
-
-      const normalizedEmail = String(email).trim().toLowerCase();
-      const user = await usersCollection.findOne({ email: normalizedEmail });
-      if (!user) {
-        return res.status(401).json({ error: 'Invalid email or password.' });
-      }
-
-      const match = await bcrypt.compare(String(password), user.passwordHash);
-      if (!match) {
-        return res.status(401).json({ error: 'Invalid email or password.' });
-      }
-
-      await usersCollection.updateOne({ _id: user._id }, { $set: { lastLoginAt: new Date().toISOString() } });
-
-      const token = jwt.sign(
-        { userId: user.userId, email: user.email, name: user.name, role: user.role },
-        JWT_SECRET,
-        { expiresIn: '7d' }
-      );
-
-      return res.status(200).json({
-        message: 'Login successful.',
-        token,
-        user: {
-          userId: user.userId,
-          email: user.email,
-          name: user.name,
-          role: user.role,
-          avatarInitials: user.avatarInitials
-        }
-      });
-    } catch (err) {
-      return res.status(500).json({ error: 'Internal login failure.' });
-    }
-  });
-
-  app.get('/api/auth/me', async (req: Request, res: Response) => {
-    const authHeader = req.headers['authorization'];
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Authentication token required.' });
-    }
-    const token = authHeader.split(' ')[1];
-    try {
-      const decoded = jwt.verify(token, JWT_SECRET) as any;
-      const user = await usersCollection.findOne({ userId: decoded.userId });
-      if (!user) {
-        return res.status(401).json({ error: 'User not found or deleted.' });
-      }
-      return res.status(200).json({
-        user: {
-          userId: user.userId,
-          email: user.email,
-          name: user.name,
-          role: user.role,
-          avatarInitials: user.avatarInitials
-        }
-      });
-    } catch (err) {
-      return res.status(401).json({ error: 'Invalid or expired authentication token.' });
-    }
-  });
+  await connectToDatabase();
 
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -623,6 +497,7 @@ async function runTests() {
   const mockStorage = new MockLocalStorage();
   (globalThis as any).localStorage = mockStorage;
 
+  let ipCounter = 1;
   // Intercept fetch to route to our test server
   const originalFetch = globalThis.fetch;
   (globalThis as any).fetch = async (url: string | URL | Request, init?: RequestInit) => {
@@ -630,7 +505,18 @@ async function runTests() {
     if (fullUrl.startsWith('/api/')) {
       fullUrl = `${baseUrl}${fullUrl}`;
     }
-    return originalFetch(fullUrl, init);
+    const customHeaders = init?.headers
+      ? init.headers instanceof Headers
+        ? Object.fromEntries((init.headers as any).entries())
+        : { ...(init.headers as any) }
+      : {};
+    return originalFetch(fullUrl, {
+      ...init,
+      headers: {
+        'X-Forwarded-For': `198.51.100.${ipCounter++}`,
+        ...customHeaders
+      }
+    });
   };
 
   const { authController } = await import('../authController.js');
@@ -786,6 +672,7 @@ async function runTests() {
   assert(mockEnv.authContainer.style.display === 'flex', 'Auth view shown when token is invalid');
 
   // Cleanup
+  await closeDatabase();
   server.close();
   await mongoClient.close();
   await mongod.stop();

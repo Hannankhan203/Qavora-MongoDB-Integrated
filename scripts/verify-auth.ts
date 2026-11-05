@@ -1,6 +1,6 @@
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { MongoClient } from 'mongodb';
-import express from 'express';
+import http from 'http';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 
@@ -28,243 +28,36 @@ async function runVerification() {
   await db.collection("projects").createIndex({ id: 1 }, { unique: true });
   console.log('[Setup] Created unique indexes on users (email, userId) and projects (id)\n');
 
-  // Build the Express app matching server.ts logic exactly
-  const app = express();
-  app.use(express.json());
+  // Launch and interact with the actual Express server defined in server.ts
+  process.env.VERCEL = '1';
+  process.env.NODE_ENV = 'production';
+  process.env.MONGODB_URI = uri;
+  process.env.MONGODB_DB = dbName;
+  process.env.JWT_SECRET = jwtSecret;
 
-  const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const serverModule = await import('../server.ts');
+  const app = serverModule.default;
+  const connectToDatabase = serverModule.connectToDatabase;
+  const closeDatabase = serverModule.closeDatabase;
 
-  function getJwtSecret(): string {
-    const secret = process.env.JWT_SECRET;
-    if (!secret || typeof secret !== 'string' || secret.trim() === '') {
-      throw new Error('JWT_SECRET environment variable is missing.');
-    }
-    return secret.trim();
-  }
+  await connectToDatabase();
 
-  function getAvatarInitials(name: string): string {
-    if (!name || typeof name !== 'string') return 'QA';
-    const parts = name.trim().split(/\s+/).filter(Boolean);
-    if (parts.length === 1) {
-      return parts[0].substring(0, 2).toUpperCase();
-    }
-    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-  }
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const port = (server.address() as any).port;
+  const BASE_URL = `http://127.0.0.1:${port}`;
 
-  function toSafeUser(user: any) {
-    return {
-      userId: String(user.userId),
-      email: String(user.email),
-      name: String(user.name),
-      role: String(user.role || 'QA Tester'),
-      avatarInitials: String(user.avatarInitials || getAvatarInitials(user.name)),
-      createdAt: String(user.createdAt),
-      updatedAt: String(user.updatedAt),
-      lastLoginAt: String(user.lastLoginAt)
-    };
-  }
-
-  // Register
-  app.post("/api/auth/register", async (req, res) => {
-    try {
-      if (!db) {
-        return res.status(503).json({ error: "Authentication service unavailable (database offline)." });
-      }
-      let secret: string;
-      try {
-        secret = getJwtSecret();
-      } catch {
-        return res.status(500).json({ error: "Authentication service misconfigured: JWT_SECRET is missing." });
-      }
-
-      const { name, email, password } = req.body || {};
-      if (typeof name !== 'string' || name.trim() === '') {
-        return res.status(400).json({ error: "Full name is required and must be a non-empty string." });
-      }
-      if (typeof email !== 'string' || !EMAIL_REGEX.test(email.trim().toLowerCase())) {
-        return res.status(400).json({ error: "A valid email address is required." });
-      }
-      if (typeof password !== 'string' || password.length < 8) {
-        return res.status(400).json({ error: "Password must be at least 8 characters long." });
-      }
-
-      const normalizedEmail = email.trim().toLowerCase();
-      const trimmedName = name.trim();
-
-      const existingUser = await db.collection("users").findOne({ email: normalizedEmail });
-      if (existingUser) {
-        return res.status(409).json({ error: "An account with this email address already exists." });
-      }
-
-      const passwordHash = await bcrypt.hash(password, 10);
-      const userId = `usr_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-      const now = new Date().toISOString();
-
-      const newUser = {
-        userId,
-        email: normalizedEmail,
-        passwordHash,
-        name: trimmedName,
-        role: 'QA Tester',
-        avatarInitials: getAvatarInitials(trimmedName),
-        createdAt: now,
-        updatedAt: now,
-        lastLoginAt: now
-      };
-
-      try {
-        await db.collection("users").insertOne(newUser);
-      } catch (insertErr: any) {
-        if (insertErr?.code === 11000) {
-          return res.status(409).json({ error: "An account with this email address already exists." });
-        }
-        throw insertErr;
-      }
-
-      const token = jwt.sign(
-        { userId: newUser.userId, email: newUser.email, name: newUser.name, role: newUser.role },
-        secret,
-        { expiresIn: '7d' } as any
-      );
-
-      return res.status(201).json({ success: true, token, user: toSafeUser(newUser) });
-    } catch (err: any) {
-      return res.status(500).json({ error: "Failed to register user." });
-    }
-  });
-
-  // Login
-  app.post("/api/auth/login", async (req, res) => {
-    try {
-      if (!db) {
-        return res.status(503).json({ error: "Authentication service unavailable (database offline)." });
-      }
-      let secret: string;
-      try {
-        secret = getJwtSecret();
-      } catch {
-        return res.status(500).json({ error: "Authentication service misconfigured: JWT_SECRET is missing." });
-      }
-
-      const { email, password } = req.body || {};
-      if (typeof email !== 'string' || typeof password !== 'string' || email.trim() === '' || password === '') {
-        return res.status(400).json({ error: "Email and password are required." });
-      }
-
-      const normalizedEmail = email.trim().toLowerCase();
-      const user = await db.collection("users").findOne({ email: normalizedEmail });
-      if (!user) {
-        return res.status(401).json({ error: "Invalid email or password." });
-      }
-
-      const isMatch = await bcrypt.compare(password, user.passwordHash);
-      if (!isMatch) {
-        return res.status(401).json({ error: "Invalid email or password." });
-      }
-
-      const now = new Date().toISOString();
-      await db.collection("users").updateOne(
-        { userId: user.userId },
-        { $set: { lastLoginAt: now, updatedAt: now } }
-      );
-      user.lastLoginAt = now;
-      user.updatedAt = now;
-
-      const token = jwt.sign(
-        { userId: user.userId, email: user.email, name: user.name, role: user.role || 'QA Tester' },
-        secret,
-        { expiresIn: '7d' } as any
-      );
-
-      return res.json({ success: true, token, user: toSafeUser(user) });
-    } catch (err: any) {
-      return res.status(500).json({ error: "Failed to authenticate user." });
-    }
-  });
-
-  // Me
-  app.get("/api/auth/me", async (req, res) => {
-    try {
-      let secret: string;
-      try {
-        secret = getJwtSecret();
-      } catch {
-        return res.status(500).json({ error: "Authentication service misconfigured: JWT_SECRET is missing." });
-      }
-
-      const authHeader = req.headers.authorization;
-      if (!authHeader || typeof authHeader !== 'string' || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ error: "Authentication token missing or invalid." });
-      }
-
-      const token = authHeader.substring(7).trim();
-      if (!token) {
-        return res.status(401).json({ error: "Authentication token missing or invalid." });
-      }
-
-      let decoded: any;
-      try {
-        decoded = jwt.verify(token, secret);
-      } catch (jwtErr: any) {
-        if (jwtErr?.name === 'TokenExpiredError') {
-          return res.status(401).json({ error: "Session expired. Please log in again." });
-        }
-        return res.status(401).json({ error: "Invalid authentication token." });
-      }
-
-      if (!decoded || !decoded.userId) {
-        return res.status(401).json({ error: "Invalid authentication token payload." });
-      }
-
-      if (!db) {
-        return res.status(503).json({ error: "Authentication service unavailable (database offline)." });
-      }
-
-      const user = await db.collection("users").findOne({ userId: decoded.userId });
-      if (!user) {
-        return res.status(401).json({ error: "User account no longer exists." });
-      }
-
-      return res.json({ success: true, user: toSafeUser(user) });
-    } catch (err: any) {
-      return res.status(500).json({ error: "Failed to verify session." });
-    }
-  });
-
-  // Projects endpoint for Test 10
-  app.get("/api/projects", async (req, res) => {
-    const list = await db.collection("projects").find({}).toArray();
-    res.json(list);
-  });
-  app.post("/api/projects", async (req, res) => {
-    const { name, type } = req.body;
-    const doc = {
-      id: `proj_${Date.now()}_test`,
-      name: name || 'Test Project',
-      type: type || 'Web Application',
-      status: 'Active',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-    await db.collection("projects").insertOne(doc);
-    res.status(201).json(doc);
-  });
-  app.delete("/api/projects/:id", async (req, res) => {
-    await db.collection("projects").deleteOne({ id: req.params.id });
-    res.json({ success: true });
-  });
-
-  // Start HTTP server on local port
-  const server = await new Promise<any>((resolve) => {
-    const s = app.listen(3333, '127.0.0.1', () => resolve(s));
-  });
-  const BASE_URL = 'http://127.0.0.1:3333';
-
+  let ipCounter = 10;
   // Helper fetch wrapper
   async function api(path: string, options: any = {}) {
+    const { headers: customHeaders, ...restOptions } = options;
     const res = await fetch(`${BASE_URL}${path}`, {
-      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-      ...options
+      ...restOptions,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': `198.51.100.${ipCounter++}`,
+        ...(customHeaders || {})
+      }
     });
     const status = res.status;
     let data = null;
@@ -471,19 +264,25 @@ async function runVerification() {
   // TEST 10: Existing project APIs continue working unchanged
   // --------------------------------------------------------------------------
   console.log('\n--- Running Test 10: Existing project APIs continue working unchanged ---');
-  const getProjRes = await api('/api/projects');
+  const getProjRes = await api('/api/projects', {
+    headers: { Authorization: `Bearer ${activeToken}` }
+  });
   assert(getProjRes.status === 200, 'GET /api/projects returns 200');
   assert(Array.isArray(getProjRes.data), 'GET /api/projects returns array');
 
   const createProjRes = await api('/api/projects', {
     method: 'POST',
+    headers: { Authorization: `Bearer ${activeToken}` },
     body: JSON.stringify({ name: 'Regression Sanity Project', type: 'Web Application' })
   });
   assert(createProjRes.status === 201, 'POST /api/projects creates project with 201 Created');
   const createdProjId = createProjRes.data?.id;
 
   if (createdProjId) {
-    const delProjRes = await api(`/api/projects/${createdProjId}`, { method: 'DELETE' });
+    const delProjRes = await api(`/api/projects/${createdProjId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${activeToken}` }
+    });
     assert(delProjRes.status === 200, 'DELETE /api/projects/:id cleans up project');
   }
 
@@ -509,6 +308,7 @@ async function runVerification() {
   console.log(`[Cleanup] Removed ${deleteResult.deletedCount} temporary test user(s) from collection`);
 
   await new Promise<void>((resolve) => server.close(() => resolve()));
+  await closeDatabase();
   await client.close();
   await mongod.stop();
   console.log('[Cleanup] Stopped MongoDB instance and test HTTP server.\n');

@@ -6,7 +6,6 @@
 
 import fs from 'fs';
 import path from 'path';
-import express, { Request, Response, NextFunction } from 'express';
 import { MongoClient, Db, ObjectId } from 'mongodb';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import bcrypt from 'bcryptjs';
@@ -121,291 +120,18 @@ async function runEndToEndVerification() {
   await db.collection('tests').createIndex({ userId: 1 });
 
   const JWT_SECRET = 'qavora_final_step6_audit_jwt_secret_999!';
+  process.env.VERCEL = '1';
+  process.env.NODE_ENV = 'production';
+  process.env.MONGODB_URI = mongoUri;
+  process.env.MONGODB_DB = 'qavora_final_e2e';
+  process.env.JWT_SECRET = JWT_SECRET;
 
-  // Build Express app with exact server.ts logic
-  const app = express();
-  app.use(express.json({ limit: '10mb' }));
+  const serverModule = await import('../server.ts');
+  const app = serverModule.default;
+  const connectToDatabase = serverModule.connectToDatabase;
+  const closeDatabase = serverModule.closeDatabase;
 
-  let isDatabaseOnline = true;
-
-  // requireAuth middleware
-  const requireAuthMiddleware = async (req: Request, res: Response, next: NextFunction) => {
-    if (!isDatabaseOnline) {
-      return res.status(503).json({ error: 'Authentication service unavailable (database offline).' });
-    }
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Authentication token missing or invalid.' });
-    }
-    const token = authHeader.substring(7).trim();
-    if (!token) {
-      return res.status(401).json({ error: 'Authentication token missing or invalid.' });
-    }
-    try {
-      const decoded = jwt.verify(token, JWT_SECRET) as any;
-      if (!decoded || !decoded.userId) {
-        return res.status(401).json({ error: 'Invalid authentication token payload.' });
-      }
-      const user = await db.collection('users').findOne({ userId: decoded.userId });
-      if (!user) {
-        return res.status(401).json({ error: 'User account no longer exists.' });
-      }
-      (req as any).user = {
-        userId: String(user.userId),
-        email: String(user.email),
-        name: String(user.name),
-        role: String(user.role || 'QA Tester')
-      };
-      next();
-    } catch (jwtErr: any) {
-      if (jwtErr?.name === 'TokenExpiredError') {
-        return res.status(401).json({ error: 'Session expired. Please log in again.' });
-      }
-      return res.status(401).json({ error: 'Invalid authentication token.' });
-    }
-  };
-
-  function toSafeUser(user: any) {
-    return {
-      userId: String(user.userId),
-      email: String(user.email),
-      name: String(user.name),
-      role: String(user.role || 'QA Tester'),
-      avatarInitials: String(user.avatarInitials || 'QA'),
-      createdAt: String(user.createdAt),
-      updatedAt: String(user.updatedAt),
-      lastLoginAt: String(user.lastLoginAt)
-    };
-  }
-
-  function buildUserProjectQuery(idParam: string | string[], userId: string) {
-    const cleanId = Array.isArray(idParam) ? idParam[0] : idParam;
-    if (ObjectId.isValid(cleanId) && cleanId.length === 24) {
-      return {
-        $or: [
-          { id: cleanId, userId },
-          { _id: new ObjectId(cleanId), userId }
-        ]
-      };
-    }
-    return { id: cleanId, userId };
-  }
-
-  // Auth Routes
-  app.post('/api/auth/register', async (req: Request, res: Response) => {
-    if (!isDatabaseOnline) return res.status(503).json({ error: 'Database offline' });
-    const { name, email, password, role } = req.body || {};
-    if (!name || typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'Full name required' });
-    if (!email || typeof email !== 'string' || !email.trim()) return res.status(400).json({ error: 'Email required' });
-    if (!password || typeof password !== 'string' || password.length < 8) return res.status(400).json({ error: 'Password min 8 chars' });
-
-    const normalizedEmail = email.trim().toLowerCase();
-    const existing = await db.collection('users').findOne({ email: normalizedEmail });
-    if (existing) return res.status(409).json({ error: 'A user with this email address already exists.' });
-
-    const passwordHash = await bcrypt.hash(password, 10);
-    const userId = `usr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const initials = name.trim().split(/\s+/).map((p: string) => p[0]).join('').toUpperCase().slice(0, 2) || 'QA';
-    const now = new Date().toISOString();
-
-    const newUser = {
-      userId,
-      email: normalizedEmail,
-      name: name.trim(),
-      role: (role && typeof role === 'string' && role.trim()) ? role.trim() : 'QA Tester',
-      avatarInitials: initials,
-      passwordHash,
-      createdAt: now,
-      updatedAt: now,
-      lastLoginAt: now
-    };
-
-    await db.collection('users').insertOne(newUser);
-    const token = jwt.sign(
-      { userId, email: normalizedEmail, name: name.trim(), role: newUser.role },
-      JWT_SECRET,
-      { expiresIn: '7d' }
-    );
-
-    return res.status(201).json({ success: true, token, user: toSafeUser(newUser) });
-  });
-
-  app.post('/api/auth/login', async (req: Request, res: Response) => {
-    if (!isDatabaseOnline) return res.status(503).json({ error: 'Database offline' });
-    const { email, password } = req.body || {};
-    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
-
-    const normalizedEmail = String(email).trim().toLowerCase();
-    const user = await db.collection('users').findOne({ email: normalizedEmail });
-    if (!user) return res.status(401).json({ error: 'Invalid email or password.' });
-
-    const match = await bcrypt.compare(String(password), user.passwordHash);
-    if (!match) return res.status(401).json({ error: 'Invalid email or password.' });
-
-    const now = new Date().toISOString();
-    await db.collection('users').updateOne({ _id: user._id }, { $set: { lastLoginAt: now, updatedAt: now } });
-    user.lastLoginAt = now;
-
-    const token = jwt.sign(
-      { userId: user.userId, email: user.email, name: user.name, role: user.role },
-      JWT_SECRET,
-      { expiresIn: '7d' }
-    );
-
-    return res.json({ success: true, token, user: toSafeUser(user) });
-  });
-
-  app.get('/api/auth/me', requireAuthMiddleware, async (req: Request, res: Response) => {
-    const authReq = req as any;
-    const user = await db.collection('users').findOne({ userId: authReq.user.userId });
-    if (!user) return res.status(401).json({ error: 'User account no longer exists.' });
-    return res.json({ success: true, user: toSafeUser(user) });
-  });
-
-  // Project Routes
-  app.get('/api/projects', requireAuthMiddleware, async (req: Request, res: Response) => {
-    const authReq = req as any;
-    const projects = await db.collection('projects').find({ userId: authReq.user.userId }).toArray();
-    return res.json(projects);
-  });
-
-  app.get('/api/projects/:id', requireAuthMiddleware, async (req: Request, res: Response) => {
-    const authReq = req as any;
-    const query = buildUserProjectQuery(req.params.id, authReq.user.userId);
-    const project = await db.collection('projects').findOne(query);
-    if (!project) return res.status(404).json({ error: 'Project not found.' });
-    return res.json(project);
-  });
-
-  app.post('/api/projects', requireAuthMiddleware, async (req: Request, res: Response) => {
-    const authReq = req as any;
-    const userId = authReq.user.userId;
-    const { name, type, version, description, status, id, userId: _ignoredUserId, ...extraData } = req.body || {};
-    if (!name || typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'Name required' });
-
-    const projectId = id ? String(id).trim() : `proj_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const now = new Date().toISOString();
-
-    const newProject = {
-      id: projectId,
-      userId,
-      name: name.trim(),
-      type: type || 'Web Application',
-      status: status || 'Active',
-      version: version || '',
-      description: description || '',
-      createdAt: now,
-      updatedAt: now,
-      testPlan: extraData.testPlan || { id: `plan_${projectId}`, name: `${name.trim()} Plan`, phases: [] },
-      testSuites: extraData.testSuites || [],
-      executions: extraData.executions || [],
-      defects: extraData.defects || []
-    };
-
-    try {
-      const result = await db.collection('projects').insertOne(newProject);
-      return res.status(201).json({ _id: result.insertedId, ...newProject });
-    } catch (err: any) {
-      if (err.code === 11000) return res.status(409).json({ error: 'Project ID exists' });
-      return res.status(500).json({ error: 'Server error' });
-    }
-  });
-
-  app.put('/api/projects/:id', requireAuthMiddleware, async (req: Request, res: Response) => {
-    const authReq = req as any;
-    const userId = authReq.user.userId;
-    const query = buildUserProjectQuery(req.params.id, userId);
-    const { name, type, version, description, status } = req.body || {};
-    const updates: any = { updatedAt: new Date().toISOString() };
-    if (name) updates.name = name;
-    if (type) updates.type = type;
-    if (status) updates.status = status;
-
-    const result = await db.collection('projects').findOneAndUpdate(query, { $set: updates }, { returnDocument: 'after' });
-    if (!result) return res.status(404).json({ error: 'Project not found.' });
-    return res.json(result);
-  });
-
-  app.patch('/api/projects/:id/status', requireAuthMiddleware, async (req: Request, res: Response) => {
-    const authReq = req as any;
-    const userId = authReq.user.userId;
-    const query = buildUserProjectQuery(req.params.id, userId);
-    const { status } = req.body || {};
-    if (!['Active', 'Completed', 'Archived'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
-
-    const result = await db.collection('projects').findOneAndUpdate(
-      query,
-      { $set: { status, updatedAt: new Date().toISOString() } },
-      { returnDocument: 'after' }
-    );
-    if (!result) return res.status(404).json({ error: 'Project not found.' });
-    return res.json(result);
-  });
-
-  app.patch('/api/projects/:id/data', requireAuthMiddleware, async (req: Request, res: Response) => {
-    const authReq = req as any;
-    const userId = authReq.user.userId;
-    const query = buildUserProjectQuery(req.params.id, userId);
-    const { _id, id, userId: _ignoredUserId, ...allowedData } = req.body || {};
-    allowedData.updatedAt = new Date().toISOString();
-
-    const result = await db.collection('projects').findOneAndUpdate(
-      query,
-      { $set: allowedData },
-      { returnDocument: 'after' }
-    );
-    if (!result) return res.status(404).json({ error: 'Project not found.' });
-    return res.json(result);
-  });
-
-  app.delete('/api/projects/:id', requireAuthMiddleware, async (req: Request, res: Response) => {
-    const authReq = req as any;
-    const userId = authReq.user.userId;
-    const query = buildUserProjectQuery(req.params.id, userId);
-    const result = await db.collection('projects').deleteOne(query);
-    if (result.deletedCount === 0) return res.status(404).json({ error: 'Project not found.' });
-    return res.json({ success: true, message: 'Deleted' });
-  });
-
-  app.post('/api/projects/sync-local', requireAuthMiddleware, async (req: Request, res: Response) => {
-    const authReq = req as any;
-    const userId = authReq.user.userId;
-    const rawList = Array.isArray(req.body) ? req.body : req.body?.projects;
-    if (!Array.isArray(rawList)) return res.status(400).json({ error: 'Array required' });
-
-    const operations = rawList.map(item => {
-      const projId = item.id || `proj_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      const doc = { ...item, id: projId, userId };
-      delete doc._id;
-      return {
-        updateOne: {
-          filter: { id: projId, userId },
-          update: { $setOnInsert: doc },
-          upsert: true
-        }
-      };
-    });
-
-    if (operations.length === 0) return res.json({ success: true, count: 0 });
-    const bulk = await db.collection('projects').bulkWrite(operations);
-    return res.json({ success: true, insertedCount: bulk.upsertedCount, matchedCount: bulk.matchedCount });
-  });
-
-  // Tests Routes
-  app.get('/api/tests', requireAuthMiddleware, async (req: Request, res: Response) => {
-    const authReq = req as any;
-    const tests = await db.collection('tests').find({ userId: authReq.user.userId }).toArray();
-    return res.json(tests);
-  });
-
-  app.post('/api/tests', requireAuthMiddleware, async (req: Request, res: Response) => {
-    const authReq = req as any;
-    const { name, status } = req.body || {};
-    if (!name || !status) return res.status(400).json({ error: 'Name and status required' });
-    const newTest = { name: name.trim(), status: status.trim(), userId: authReq.user.userId };
-    const result = await db.collection('tests').insertOne(newTest);
-    return res.status(201).json({ _id: result.insertedId, ...newTest });
-  });
+  await connectToDatabase();
 
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -415,14 +141,29 @@ async function runEndToEndVerification() {
   // Configure fetch interception and mock storage for client
   const mockStorage = new MockLocalStorage();
   (globalThis as any).localStorage = mockStorage;
-  const originalFetch = globalThis.fetch;
-  (globalThis as any).fetch = async (url: string | URL | Request, init?: RequestInit) => {
+
+  let ipCounter = 1;
+  const rawFetch = globalThis.fetch;
+  const testFetch = async (url: string | URL | Request, init?: RequestInit) => {
     let fullUrl = String(url);
     if (fullUrl.startsWith('/api/')) {
       fullUrl = `${baseUrl}${fullUrl}`;
     }
-    return originalFetch(fullUrl, init);
+    const customHeaders = init?.headers
+      ? init.headers instanceof Headers
+        ? Object.fromEntries((init.headers as any).entries())
+        : { ...(init.headers as any) }
+      : {};
+    return rawFetch(fullUrl, {
+      ...init,
+      headers: {
+        'X-Forwarded-For': `198.51.100.${ipCounter++}`,
+        ...customHeaders
+      }
+    });
   };
+  (globalThis as any).fetch = testFetch;
+  const originalFetch = testFetch;
 
   const { authController } = await import('../authController.js');
 
@@ -722,7 +463,8 @@ async function runEndToEndVerification() {
   console.log('\n--- Section 6: Database Offline & Security Resilience ---');
 
   // Simulate Database Offline
-  isDatabaseOnline = false;
+  await closeDatabase();
+  delete process.env.MONGODB_URI;
 
   const offlineAuthMe = await originalFetch(`${baseUrl}/api/auth/me`, {
     headers: { 'Authorization': `Bearer ${aliceToken}` }
@@ -736,13 +478,15 @@ async function runEndToEndVerification() {
   });
   assert(offlineRegister.status === 503, 'Offline database registration returns HTTP 503');
 
-  isDatabaseOnline = true;
+  process.env.MONGODB_URI = mongoUri;
+  await connectToDatabase();
 
   // Cleanup
+  await closeDatabase();
   server.close();
   await mongoClient.close();
   await mongod.stop();
-  (globalThis as any).fetch = originalFetch;
+  (globalThis as any).fetch = rawFetch;
 
   console.log('\n========================================================================');
   console.log(`TOTAL PASSES: ${passedCount}`);

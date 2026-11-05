@@ -83,31 +83,18 @@ async function runHardeningVerification() {
   assert(serverTs.includes("script-src 'self' 'unsafe-inline'"), 'CSP script-src accommodates application script requirements');
   assert(serverTs.includes("style-src 'self' 'unsafe-inline'"), 'CSP style-src accommodates fonts/inline styles');
 
-  // Test live headers on Express app
-  const testApp = express();
-  // Simulate the middleware extracted from server.ts
-  const isProduction = true;
-  testApp.use((req: Request, res: Response, next: NextFunction) => {
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
-    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
-    res.setHeader(
-      'Content-Security-Policy',
-      "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; manifest-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
-    );
-    next();
-  });
-  testApp.get('/test-headers', (_req, res) => res.json({ ok: true }));
+  // Test live headers on actual Express server.ts app
+  process.env.VERCEL = '1';
+  process.env.NODE_ENV = 'production';
+  const serverModule = await import('../server.ts');
+  const actualApp = serverModule.default;
 
-  const server = http.createServer(testApp);
+  const server = http.createServer(actualApp);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
   const addr = server.address() as any;
   const port = addr.port;
 
-  const res = await fetch(`http://127.0.0.1:${port}/test-headers`);
+  const res = await fetch(`http://127.0.0.1:${port}/api/health`);
   assert(res.headers.get('x-content-type-options') === 'nosniff', 'Live HTTP response contains nosniff');
   assert(res.headers.get('x-frame-options') === 'DENY', 'Live HTTP response contains DENY');
   assert(res.headers.get('referrer-policy') === 'strict-origin-when-cross-origin', 'Live HTTP response contains strict referrer policy');

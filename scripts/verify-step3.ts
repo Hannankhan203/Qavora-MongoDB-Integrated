@@ -1,6 +1,6 @@
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { MongoClient, ObjectId } from 'mongodb';
-import express, { Request, Response, NextFunction } from 'express';
+import http from 'http';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 
@@ -41,339 +41,36 @@ async function runStep3Verification() {
   await db.collection("tests").createIndex({ userId: 1 });
   console.log('[Setup] Created all required indexes on users, projects, and tests.\n');
 
-  // Build Express app matching server.ts exactly
-  const app = express();
-  app.use(express.json());
+  // Launch and interact with the actual Express server defined in server.ts
+  process.env.VERCEL = '1';
+  process.env.NODE_ENV = 'production';
+  process.env.MONGODB_URI = uri;
+  process.env.MONGODB_DB = dbName;
+  process.env.JWT_SECRET = jwtSecret;
 
-  const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const serverModule = await import('../server.ts');
+  const app = serverModule.default;
+  const connectToDatabase = serverModule.connectToDatabase;
+  const closeDatabase = serverModule.closeDatabase;
 
-  function getJwtSecret(): string {
-    const secret = process.env.JWT_SECRET;
-    if (!secret || typeof secret !== 'string' || secret.trim() === '') {
-      throw new Error('JWT_SECRET environment variable is missing.');
-    }
-    return secret.trim();
-  }
+  await connectToDatabase();
 
-  function getAvatarInitials(name: string): string {
-    if (!name || typeof name !== 'string') return 'QA';
-    const parts = name.trim().split(/\s+/).filter(Boolean);
-    if (parts.length === 1) {
-      return parts[0].substring(0, 2).toUpperCase();
-    }
-    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-  }
-
-  function toSafeUser(user: any) {
-    return {
-      userId: String(user.userId),
-      email: String(user.email),
-      name: String(user.name),
-      role: String(user.role || 'QA Tester'),
-      avatarInitials: String(user.avatarInitials || getAvatarInitials(user.name)),
-      createdAt: String(user.createdAt),
-      updatedAt: String(user.updatedAt),
-      lastLoginAt: String(user.lastLoginAt)
-    };
-  }
-
-  // requireAuth middleware
-  async function requireAuth(req: Request, res: Response, next: NextFunction) {
-    try {
-      if (!db) {
-        return res.status(503).json({ error: "Authentication service unavailable (database offline)." });
-      }
-
-      let secret: string;
-      try {
-        secret = getJwtSecret();
-      } catch {
-        return res.status(500).json({ error: "Authentication service misconfigured: JWT_SECRET is missing." });
-      }
-
-      const authHeader = req.headers.authorization;
-      if (!authHeader || typeof authHeader !== 'string' || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ error: "Authentication token missing or invalid." });
-      }
-
-      const token = authHeader.substring(7).trim();
-      if (!token) {
-        return res.status(401).json({ error: "Authentication token missing or invalid." });
-      }
-
-      let decoded: any;
-      try {
-        decoded = jwt.verify(token, secret);
-      } catch (jwtErr: any) {
-        if (jwtErr?.name === 'TokenExpiredError') {
-          return res.status(401).json({ error: "Session expired. Please log in again." });
-        }
-        return res.status(401).json({ error: "Invalid authentication token." });
-      }
-
-      if (!decoded || !decoded.userId) {
-        return res.status(401).json({ error: "Invalid authentication token payload." });
-      }
-
-      const user = await db.collection("users").findOne({ userId: decoded.userId });
-      if (!user) {
-        return res.status(401).json({ error: "User account no longer exists." });
-      }
-
-      (req as AuthenticatedRequest).user = {
-        userId: String(user.userId),
-        email: String(user.email),
-        name: String(user.name),
-        role: String(user.role || 'QA Tester')
-      };
-
-      next();
-    } catch (error: any) {
-      return res.status(500).json({ error: "Failed to authenticate request." });
-    }
-  }
-
-  function buildUserProjectQuery(idParam: string | string[], userId: string) {
-    const cleanId = Array.isArray(idParam) ? idParam[0] : idParam;
-    if (ObjectId.isValid(cleanId) && cleanId.length === 24) {
-      return {
-        $or: [
-          { id: cleanId, userId },
-          { _id: new ObjectId(cleanId), userId }
-        ]
-      };
-    }
-    return { id: cleanId, userId };
-  }
-
-  // --- Auth endpoints ---
-  app.post("/api/auth/register", async (req, res) => {
-    try {
-      if (!db) return res.status(503).json({ error: "Database offline" });
-      const secret = getJwtSecret();
-      const { name, email, password } = req.body || {};
-      if (!name || !email || !password || password.length < 8) {
-        return res.status(400).json({ error: "Validation error" });
-      }
-      const normalizedEmail = email.trim().toLowerCase();
-      const existing = await db.collection("users").findOne({ email: normalizedEmail });
-      if (existing) return res.status(409).json({ error: "Email exists" });
-
-      const passwordHash = await bcrypt.hash(password, 10);
-      const userId = `usr_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-      const now = new Date().toISOString();
-      const newUser = {
-        userId,
-        email: normalizedEmail,
-        passwordHash,
-        name: name.trim(),
-        role: 'QA Tester',
-        avatarInitials: getAvatarInitials(name),
-        createdAt: now,
-        updatedAt: now,
-        lastLoginAt: now
-      };
-      await db.collection("users").insertOne(newUser);
-      const token = jwt.sign(
-        { userId: newUser.userId, email: newUser.email, name: newUser.name, role: newUser.role },
-        secret,
-        { expiresIn: '7d' } as any
-      );
-      return res.status(201).json({ success: true, token, user: toSafeUser(newUser) });
-    } catch (e: any) {
-      return res.status(500).json({ error: "Error" });
-    }
+  // Mount actual server.ts app on ephemeral HTTP port
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve());
   });
+  const port = (server.address() as any).port;
+  const BASE = `http://127.0.0.1:${port}`;
 
-  app.post("/api/auth/login", async (req, res) => {
-    try {
-      if (!db) return res.status(503).json({ error: "Database offline" });
-      const secret = getJwtSecret();
-      const { email, password } = req.body || {};
-      const normalizedEmail = String(email || '').trim().toLowerCase();
-      const user = await db.collection("users").findOne({ email: normalizedEmail });
-      if (!user) return res.status(401).json({ error: "Invalid credentials" });
-      const match = await bcrypt.compare(String(password || ''), user.passwordHash);
-      if (!match) return res.status(401).json({ error: "Invalid credentials" });
-
-      const now = new Date().toISOString();
-      await db.collection("users").updateOne({ userId: user.userId }, { $set: { lastLoginAt: now, updatedAt: now } });
-      const token = jwt.sign(
-        { userId: user.userId, email: user.email, name: user.name, role: user.role || 'QA Tester' },
-        secret,
-        { expiresIn: '7d' } as any
-      );
-      return res.json({ success: true, token, user: toSafeUser(user) });
-    } catch {
-      return res.status(500).json({ error: "Error" });
-    }
-  });
-
-  app.get("/api/auth/me", requireAuth, (req, res) => {
-    const authReq = req as AuthenticatedRequest;
-    return res.json({ success: true, user: authReq.user });
-  });
-
-  // --- Project endpoints ---
-  app.get("/api/projects", requireAuth, async (req, res) => {
-    if (!db) return res.status(503).json({ error: "Database offline" });
-    const authReq = req as AuthenticatedRequest;
-    const filter: any = { userId: authReq.user!.userId };
-    if (typeof req.query.status === 'string' && req.query.status.trim()) {
-      filter.status = req.query.status.trim();
-    }
-    const projects = await db.collection("projects").find(filter).toArray();
-    res.json(projects);
-  });
-
-  app.get("/api/projects/:id", requireAuth, async (req, res) => {
-    if (!db) return res.status(503).json({ error: "Database offline" });
-    const authReq = req as AuthenticatedRequest;
-    const query = buildUserProjectQuery(req.params.id, authReq.user!.userId);
-    const project = await db.collection("projects").findOne(query);
-    if (!project) return res.status(404).json({ error: "Project not found." });
-    res.json(project);
-  });
-
-  app.post("/api/projects", requireAuth, async (req, res) => {
-    if (!db) return res.status(503).json({ error: "Database offline" });
-    const authReq = req as AuthenticatedRequest;
-    const userId = authReq.user!.userId;
-    console.log('DEBUG req.body in POST /api/projects:', req.body, 'Content-Type:', req.headers['content-type']);
-    const { name, type, version, description, status, id, userId: _ignored, ...extra } = req.body || {};
-    if (!name || typeof name !== 'string' || name.trim() === '') {
-      return res.status(400).json({ error: "Field 'name' is required" });
-    }
-    const now = new Date().toISOString();
-    const projId = (id && typeof id === 'string') ? id.trim() : `proj_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const newDoc: any = {
-      id: projId,
-      userId,
-      name: name.trim(),
-      type: type || 'Web Application',
-      version: version || '',
-      description: description || '',
-      status: status || 'Active',
-      createdAt: now,
-      updatedAt: now,
-      testPlan: { id: `plan_${projId}`, name: `${name.trim()} Master Plan`, phases: [] },
-      testSuites: [],
-      executions: [],
-      defects: []
-    };
-    try {
-      const result = await db.collection("projects").insertOne(newDoc);
-      res.status(201).json({ _id: result.insertedId, ...newDoc });
-    } catch (e: any) {
-      console.error('DEBUG POST /api/projects error:', e);
-      if (e?.code === 11000) return res.status(409).json({ error: "Project already exists" });
-      res.status(500).json({ error: "Error creating project", details: e?.message });
-    }
-  });
-
-  app.put("/api/projects/:id", requireAuth, async (req, res) => {
-    if (!db) return res.status(503).json({ error: "Database offline" });
-    const authReq = req as AuthenticatedRequest;
-    const userId = authReq.user!.userId;
-    const { name, type, version, description, status } = req.body || {};
-    const updateFields: any = { updatedAt: new Date().toISOString() };
-    if (name !== undefined) updateFields.name = name;
-    if (type !== undefined) updateFields.type = type;
-    if (version !== undefined) updateFields.version = version;
-    if (description !== undefined) updateFields.description = description;
-    if (status !== undefined) updateFields.status = status;
-
-    const query = buildUserProjectQuery(req.params.id, userId);
-    const result = await db.collection("projects").findOneAndUpdate(
-      query,
-      { $set: updateFields },
-      { returnDocument: 'after' }
-    );
-    if (!result) return res.status(404).json({ error: "Project not found." });
-    res.json(result);
-  });
-
-  app.patch("/api/projects/:id/status", requireAuth, async (req, res) => {
-    if (!db) return res.status(503).json({ error: "Database offline" });
-    const authReq = req as AuthenticatedRequest;
-    const userId = authReq.user!.userId;
-    const { status } = req.body || {};
-    if (!status) return res.status(400).json({ error: "Status required" });
-    const query = buildUserProjectQuery(req.params.id, userId);
-    const result = await db.collection("projects").findOneAndUpdate(
-      query,
-      { $set: { status, updatedAt: new Date().toISOString() } },
-      { returnDocument: 'after' }
-    );
-    if (!result) return res.status(404).json({ error: "Project not found." });
-    res.json(result);
-  });
-
-  app.patch("/api/projects/:id/data", requireAuth, async (req, res) => {
-    if (!db) return res.status(503).json({ error: "Database offline" });
-    const authReq = req as AuthenticatedRequest;
-    const userId = authReq.user!.userId;
-    const { _id, id, userId: _ignored, ...allowedData } = req.body || {};
-    allowedData.updatedAt = new Date().toISOString();
-
-    const query = buildUserProjectQuery(req.params.id, userId);
-    const result = await db.collection("projects").findOneAndUpdate(
-      query,
-      { $set: allowedData },
-      { returnDocument: 'after' }
-    );
-    if (!result) return res.status(404).json({ error: "Project not found." });
-    res.json(result);
-  });
-
-  app.delete("/api/projects/:id", requireAuth, async (req, res) => {
-    if (!db) return res.status(503).json({ error: "Database offline" });
-    const authReq = req as AuthenticatedRequest;
-    const userId = authReq.user!.userId;
-    const query = buildUserProjectQuery(req.params.id, userId);
-    const result = await db.collection("projects").deleteOne(query);
-    if (result.deletedCount === 0) return res.status(404).json({ error: "Project not found." });
-    res.json({ success: true, message: "Project deleted successfully." });
-  });
-
-  app.post("/api/projects/sync-local", requireAuth, async (req, res) => {
-    if (!db) return res.status(503).json({ error: "Database offline" });
-    const authReq = req as AuthenticatedRequest;
-    const userId = authReq.user!.userId;
-    const rawList = Array.isArray(req.body) ? req.body : req.body?.projects;
-    if (!Array.isArray(rawList)) return res.status(400).json({ error: "Bad format" });
-
-    const ops = [];
-    for (const item of rawList) {
-      if (!item) continue;
-      const projId = item.id || `proj_${Date.now()}`;
-      const doc = { ...item, id: projId, userId };
-      delete doc._id;
-      ops.push({
-        updateOne: {
-          filter: { id: projId, userId },
-          update: { $setOnInsert: doc },
-          upsert: true
-        }
-      });
-    }
-    if (ops.length === 0) return res.json({ success: true, count: 0 });
-    const bulk = await db.collection("projects").bulkWrite(ops);
-    res.json({ success: true, count: ops.length, insertedCount: bulk.upsertedCount, matchedCount: bulk.matchedCount });
-  });
-
-  // Start test server
-  const server = await new Promise<any>((resolve) => {
-    const s = app.listen(3334, '127.0.0.1', () => resolve(s));
-  });
-  const BASE = 'http://127.0.0.1:3334';
-
+  let ipCounter = 1;
   async function api(path: string, options: any = {}) {
     const { headers, ...restOptions } = options;
     const res = await fetch(`${BASE}${path}`, {
       ...restOptions,
       headers: {
         'Content-Type': 'application/json',
+        'X-Forwarded-For': `198.51.100.${ipCounter++}`,
         ...(headers || {})
       }
     });
@@ -381,6 +78,7 @@ async function runStep3Verification() {
     try { data = await res.json(); } catch {}
     return { status: res.status, data };
   }
+
 
   let testCount = 0;
   let passCount = 0;
@@ -649,14 +347,16 @@ async function runStep3Verification() {
 
   // Scenario 12: Database Offline Behavior (HTTP 503)
   console.log("\n--- Scenario 12: Database Offline Behavior (HTTP 503) ---");
-  const originalDb = db;
-  db = null; // Simulate database offline
+  await closeDatabase();
+  delete process.env.MONGODB_URI;
   const offlineGetRes = await api('/api/projects', { headers: { Authorization: `Bearer ${tokenA}` } });
   assert(offlineGetRes.status === 503, "Database offline returns 503 Service Unavailable");
-  db = originalDb; // Restore db
+  process.env.MONGODB_URI = uri;
+  await connectToDatabase();
 
   // Clean up
   console.log('\n[Cleanup] Cleaning up test database and stopping server...');
+  await closeDatabase();
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await client.close();
   await mongod.stop();

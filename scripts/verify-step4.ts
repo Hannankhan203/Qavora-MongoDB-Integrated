@@ -3,21 +3,10 @@
  * Tests all 10 frontend auth controller requirements and workflows.
  */
 
-import express, { Request, Response, NextFunction } from 'express';
-import { MongoClient, Db, ObjectId } from 'mongodb';
+import { MongoClient } from 'mongodb';
 import { MongoMemoryServer } from 'mongodb-memory-server';
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
 import http from 'http';
-
-interface AuthenticatedRequest extends Request {
-  user?: {
-    userId: string;
-    email: string;
-    name: string;
-    role: string;
-  };
-}
+import jwt from 'jsonwebtoken';
 
 let passedCount = 0;
 let failedCount = 0;
@@ -83,189 +72,31 @@ async function runStep4Verification() {
   await db.collection('projects').createIndex({ id: 1 }, { unique: true });
 
   const JWT_SECRET = 'step4-test-jwt-secret-key-32chars!';
+  process.env.VERCEL = '1';
+  process.env.NODE_ENV = 'production';
+  process.env.MONGODB_URI = uri;
+  process.env.MONGODB_DB = 'qavora_step4_verify';
   process.env.JWT_SECRET = JWT_SECRET;
 
-  function toSafeUser(userDoc: any) {
-    return {
-      userId: userDoc.userId,
-      email: userDoc.email,
-      name: userDoc.name,
-      role: userDoc.role || 'QA Tester',
-      avatarInitials: userDoc.avatarInitials || 'QA',
-      createdAt: userDoc.createdAt,
-      updatedAt: userDoc.updatedAt,
-      lastLoginAt: userDoc.lastLoginAt
-    };
-  }
+  const serverModule = await import('../server.ts');
+  const app = serverModule.default;
+  const connectToDatabase = serverModule.connectToDatabase;
+  const closeDatabase = serverModule.closeDatabase;
 
-  // Auth Middleware
-  async function requireAuth(req: Request, res: Response, next: NextFunction) {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || typeof authHeader !== 'string' || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: "Authentication token missing or invalid." });
-    }
+  await connectToDatabase();
 
-    const token = authHeader.substring(7).trim();
-    if (!token) {
-      return res.status(401).json({ error: "Authentication token missing or invalid." });
-    }
-
-    let decoded: any;
-    try {
-      decoded = jwt.verify(token, JWT_SECRET);
-    } catch (jwtErr: any) {
-      if (jwtErr?.name === 'TokenExpiredError') {
-        return res.status(401).json({ error: "Session expired. Please log in again." });
-      }
-      return res.status(401).json({ error: "Invalid authentication token." });
-    }
-
-    if (!decoded || !decoded.userId) {
-      return res.status(401).json({ error: "Invalid authentication token payload." });
-    }
-
-    const user = await db.collection("users").findOne({ userId: decoded.userId });
-    if (!user) {
-      return res.status(401).json({ error: "User account no longer exists." });
-    }
-
-    (req as AuthenticatedRequest).user = {
-      userId: String(user.userId),
-      email: String(user.email),
-      name: String(user.name),
-      role: String(user.role || 'QA Tester')
-    };
-
-    next();
-  }
-
-  // 2. Setup Express test server
-  const app = express();
-  app.use(express.json());
-
-  // POST /api/auth/register
-  app.post('/api/auth/register', async (req: Request, res: Response) => {
-    try {
-      const { name, email, password, role } = req.body || {};
-      if (!name || typeof name !== 'string' || !name.trim()) {
-        return res.status(400).json({ error: "Full name is required." });
-      }
-      if (!email || typeof email !== 'string' || !email.trim()) {
-        return res.status(400).json({ error: "Email is required." });
-      }
-      if (!password || typeof password !== 'string' || password.length < 8) {
-        return res.status(400).json({ error: "Password must be at least 8 characters long." });
-      }
-
-      const normalizedEmail = email.trim().toLowerCase();
-      const existing = await db.collection('users').findOne({ email: normalizedEmail });
-      if (existing) {
-        return res.status(409).json({ error: "An account with this email address already exists." });
-      }
-
-      const passwordHash = await bcrypt.hash(password, 10);
-      const userId = `usr_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-      const now = new Date().toISOString();
-
-      const initials = name.trim().split(/\s+/).map((n: string) => n[0]).join('').substring(0, 2).toUpperCase() || 'QA';
-
-      const userDoc = {
-        userId,
-        email: normalizedEmail,
-        passwordHash,
-        name: name.trim(),
-        role: role ? String(role).trim() : 'QA Tester',
-        avatarInitials: initials,
-        createdAt: now,
-        updatedAt: now,
-        lastLoginAt: now
-      };
-
-      await db.collection('users').insertOne(userDoc);
-
-      const token = jwt.sign(
-        { userId, email: normalizedEmail, name: name.trim(), role: userDoc.role },
-        JWT_SECRET,
-        { expiresIn: '7d' }
-      );
-
-      return res.status(201).json({
-        success: true,
-        token,
-        user: toSafeUser(userDoc)
-      });
-    } catch (e: any) {
-      return res.status(500).json({ error: e.message });
-    }
-  });
-
-  // POST /api/auth/login
-  app.post('/api/auth/login', async (req: Request, res: Response) => {
-    try {
-      const { email, password } = req.body || {};
-      if (!email || !password) {
-        return res.status(400).json({ error: "Email and password are required." });
-      }
-
-      const normalizedEmail = email.trim().toLowerCase();
-      const user = await db.collection('users').findOne({ email: normalizedEmail });
-      if (!user) {
-        return res.status(401).json({ error: "Invalid email or password." });
-      }
-
-      const matches = await bcrypt.compare(password, user.passwordHash);
-      if (!matches) {
-        return res.status(401).json({ error: "Invalid email or password." });
-      }
-
-      const now = new Date().toISOString();
-      await db.collection('users').updateOne({ userId: user.userId }, { $set: { lastLoginAt: now } });
-      user.lastLoginAt = now;
-
-      const token = jwt.sign(
-        { userId: user.userId, email: user.email, name: user.name, role: user.role || 'QA Tester' },
-        JWT_SECRET,
-        { expiresIn: '7d' }
-      );
-
-      return res.json({
-        success: true,
-        token,
-        user: toSafeUser(user)
-      });
-    } catch (e: any) {
-      return res.status(500).json({ error: e.message });
-    }
-  });
-
-  // GET /api/auth/me
-  app.get('/api/auth/me', requireAuth, async (req: Request, res: Response) => {
-    const authReq = req as AuthenticatedRequest;
-    const user = await db.collection('users').findOne({ userId: authReq.user!.userId });
-    if (!user) {
-      return res.status(401).json({ error: "User account no longer exists." });
-    }
-    return res.json({ success: true, user: toSafeUser(user) });
-  });
-
-  // GET /api/projects (Protected)
-  app.get('/api/projects', requireAuth, async (req: Request, res: Response) => {
-    const authReq = req as AuthenticatedRequest;
-    const projects = await db.collection('projects').find({ userId: authReq.user!.userId }).toArray();
-    return res.json(projects);
-  });
-
-  // Start HTTP server on dynamic port
+  // Start HTTP server on dynamic port using actual server.ts app
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const port = (server.address() as any).port;
   const baseUrl = `http://127.0.0.1:${port}`;
-  console.log(`[Setup] Express test server running on ${baseUrl}`);
+  console.log(`[Setup] Actual server.ts test server running on ${baseUrl}`);
 
   // Setup environment mocks
   const mockStorage = new MockLocalStorage();
   (globalThis as any).localStorage = mockStorage;
 
+  let ipCounter = 1;
   // Intercept fetch so relative URLs like '/api/auth/me' hit baseUrl
   const originalFetch = globalThis.fetch;
   (globalThis as any).fetch = async (url: string | URL | Request, init?: RequestInit) => {
@@ -273,7 +104,18 @@ async function runStep4Verification() {
     if (fullUrl.startsWith('/')) {
       fullUrl = `${baseUrl}${fullUrl}`;
     }
-    return originalFetch(fullUrl, init);
+    const customHeaders = init?.headers
+      ? init.headers instanceof Headers
+        ? Object.fromEntries((init.headers as any).entries())
+        : { ...(init.headers as any) }
+      : {};
+    return originalFetch(fullUrl, {
+      ...init,
+      headers: {
+        'X-Forwarded-For': `198.51.100.${ipCounter++}`,
+        ...customHeaders
+      }
+    });
   };
 
   // Import authController module dynamically
@@ -496,6 +338,7 @@ async function runStep4Verification() {
   unsubscribe();
 
   // Cleanup
+  await closeDatabase();
   server.close();
   await client.close();
   await mongod.stop();
