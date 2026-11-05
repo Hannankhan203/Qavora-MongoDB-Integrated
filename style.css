@@ -9495,3 +9495,988 @@ body.mobile-nav-open {
 .btn-icon-spin {
   animation: authSpin 0.75s linear infinite;
 }
+
+/* ==========================================================================
+   Phase 1: Complete Mobile UI/UX Refinement (320px - 599px & Landscape)
+   ========================================================================== */
+
+/* 1. Global Mobile Foundation (max-width: 599px) */
+@media (max-width: 599px) {
+  /* Zero horizontal overflow constraint across document tree */
+  html,
+  body,
+  .app-container,
+  .main-wrapper,
+  .content-viewport,
+  .view-section {
+    max-width: 100vw !important;
+    overflow-x: hidden !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+
+  /* Safe Area Insets for notched and home-bar mobile devices */
+  body {
+    padding-bottom: max(12px, env(safe-area-inset-bottom)) !important;
+  }
+
+  .content-viewport {
+    padding-left: max(12px, env(safe-area-inset-left)) !important;
+    padding-right: max(12px, env(safe-area-inset-right)) !important;
+    padding-bottom: max(24px, env(safe-area-inset-bottom)) !important;
+    padding-top: 12px !important;
+  }
+
+  .sidebar {
+    padding-top: max(14px, env(safe-area-inset-top)) !important;
+    padding-bottom: max(20px, env(safe-area-inset-bottom)) !important;
+    padding-left: max(12px, env(safe-area-inset-left)) !important;
+    width: min(85vw, 300px) !important;
+    max-width: 320px !important;
+  }
+
+  .toast-container {
+    bottom: max(16px, env(safe-area-inset-bottom)) !important;
+    left: max(12px, env(safe-area-inset-left)) !important;
+    right: max(12px, env(safe-area-inset-right)) !important;
+    width: auto !important;
+  }
+
+  /* Touch Ergonomics: Prevent iOS Safari Auto-Zoom on form control focus */
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+
+  /* Minimum touch target sizes (>= 44px) for primary interactive elements */
+  .btn,
+  .nav-link,
+  .icon-btn,
+  .auth-submit-btn,
+  .auth-tab-btn,
+  .modal-close-btn,
+  .sidebar-close-btn,
+  .sidebar-logout-btn,
+  .clear-filters-btn {
+    min-height: 44px !important;
+    box-sizing: border-box !important;
+  }
+
+  .icon-btn,
+  .modal-close-btn,
+  .sidebar-close-btn {
+    min-width: 44px !important;
+    min-height: 44px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+
+  /* 2. Top Navigation Bar (.top-nav) */
+  .top-nav {
+    height: 56px !important;
+    padding-left: max(10px, env(safe-area-inset-left)) !important;
+    padding-right: max(10px, env(safe-area-inset-right)) !important;
+    gap: 8px !important;
+    justify-content: space-between !important;
+  }
+
+  .top-nav-left {
+    min-width: 0 !important;
+    flex: 1 1 auto !important;
+    gap: 8px !important;
+    display: flex !important;
+    align-items: center !important;
+  }
+
+  .page-title {
+    font-size: clamp(0.88rem, 3.8vw, 1.05rem) !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    max-width: calc(100vw - 190px) !important;
+    line-height: 1.25 !important;
+  }
+
+  .page-subtitle {
+    display: none !important;
+  }
+
+  .top-nav-center {
+    display: none !important;
+  }
+
+  .top-nav-right {
+    gap: 6px !important;
+    flex-shrink: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+  }
+
+  .top-nav-right #header-create-btn span,
+  .header-logout-btn span {
+    display: none !important;
+  }
+
+  .top-nav-right #header-create-btn,
+  .header-logout-btn {
+    width: 40px !important;
+    height: 40px !important;
+    min-width: 40px !important;
+    min-height: 40px !important;
+    padding: 0 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    border-radius: var(--radius-sm) !important;
+  }
+
+  .header-logout-btn svg.logout-icon {
+    width: 17px !important;
+    height: 17px !important;
+    margin: 0 !important;
+  }
+
+  .user-profile .user-meta {
+    display: none !important;
+  }
+
+  .user-profile {
+    padding: 2px !important;
+  }
+
+  .notification-panel {
+    position: fixed !important;
+    top: calc(56px + 6px) !important;
+    left: 8px !important;
+    right: 8px !important;
+    width: auto !important;
+    max-width: calc(100vw - 16px) !important;
+    max-height: calc(85dvh) !important;
+    z-index: 1200 !important;
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.45) !important;
+  }
+
+  /* 3. Screen 1: Dashboard (#view-dashboard) */
+  .welcome-banner {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    padding: 16px !important;
+    gap: 14px !important;
+  }
+
+  .welcome-actions {
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+  }
+
+  .welcome-actions .btn {
+    width: 100% !important;
+    min-height: 44px !important;
+    justify-content: center !important;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+  }
+
+  .charts-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 14px !important;
+  }
+
+  .chart-card canvas {
+    max-width: 100% !important;
+    width: 100% !important;
+    height: auto !important;
+  }
+
+  .quick-actions-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 10px !important;
+  }
+
+  .quick-action-card {
+    min-height: 48px !important;
+    padding: 12px 14px !important;
+  }
+
+  .activity-item {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 4px !important;
+  }
+
+  /* 4. Screen 2: Projects (#view-projects) */
+  .section-hero {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 12px !important;
+    padding: 16px !important;
+  }
+
+  .section-hero-actions {
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+  }
+
+  .section-hero-actions .btn {
+    width: 100% !important;
+    min-height: 44px !important;
+    justify-content: center !important;
+  }
+
+  .filter-toolbar {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 10px !important;
+  }
+
+  .filter-search-group,
+  .filter-search-box {
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .filter-dropdowns {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 8px !important;
+  }
+
+  .projects-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 12px !important;
+  }
+
+  .project-card-footer {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 8px !important;
+  }
+
+  .project-card-footer .btn {
+    width: 100% !important;
+    min-height: 44px !important;
+    justify-content: center !important;
+  }
+
+  /* 5. Screen 3: Project Details (#view-project-details) */
+  .detail-header-card {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 14px !important;
+    padding: 16px !important;
+  }
+
+  .detail-header-actions {
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+  }
+
+  .detail-header-actions .btn {
+    width: 100% !important;
+    min-height: 44px !important;
+    justify-content: center !important;
+  }
+
+  .detail-meta-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 8px !important;
+  }
+
+  .detail-suites-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 10px !important;
+  }
+
+  /* 6. Screen 4: Test Plans (#view-plans) */
+  .plans-top-bar {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 12px !important;
+  }
+
+  .plans-project-picker-group,
+  .project-selector-group {
+    width: 100% !important;
+    min-width: 0 !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 6px !important;
+  }
+
+  .project-selector-group .select-wrapper,
+  .picker-select-wrapper {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+  }
+
+  .plans-top-actions {
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+  }
+
+  .plans-top-actions .btn {
+    width: 100% !important;
+    min-height: 44px !important;
+    justify-content: center !important;
+  }
+
+  .phase-tabs {
+    display: flex !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    scrollbar-width: none !important;
+    padding-bottom: 4px !important;
+    gap: 6px !important;
+  }
+
+  .phase-tab {
+    flex-shrink: 0 !important;
+    min-height: 44px !important;
+  }
+
+  .cases-table-wrapper {
+    width: 100% !important;
+    max-width: 100% !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+  }
+
+  .cases-table {
+    min-width: 580px !important;
+  }
+
+  .cases-table th,
+  .cases-table td {
+    padding: 10px 8px !important;
+    font-size: 0.8rem !important;
+  }
+
+  /* 7. Screen 5: Test Execution (#view-execution) */
+  .exec-top-bar {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 12px !important;
+  }
+
+  .exec-run-banner {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 12px !important;
+    padding: 14px !important;
+  }
+
+  .exec-run-actions {
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+  }
+
+  .exec-run-actions .btn {
+    width: 100% !important;
+    min-height: 44px !important;
+    justify-content: center !important;
+  }
+
+  .exec-filters-bar {
+    display: flex !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    padding-bottom: 4px !important;
+    gap: 6px !important;
+  }
+
+  .exec-filter-btn {
+    flex-shrink: 0 !important;
+    min-height: 40px !important;
+    padding: 6px 12px !important;
+  }
+
+  /* 8. Screen 6: Defects (#view-defects) */
+  .defects-top-bar {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 12px !important;
+  }
+
+  .defect-summary-pills {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px !important;
+  }
+
+  .defects-actions {
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+  }
+
+  .defects-actions .btn {
+    width: 100% !important;
+    min-height: 44px !important;
+    justify-content: center !important;
+  }
+
+  /* 9. Screen 7: Reports (#view-reports) */
+  .reports-top-bar {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 12px !important;
+  }
+
+  .reports-scope-selector {
+    width: 100% !important;
+    min-width: 0 !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 6px !important;
+  }
+
+  .reports-scope-selector .select-wrapper {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+  }
+
+  .reports-actions {
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+  }
+
+  .reports-actions .btn {
+    width: 100% !important;
+    min-height: 44px !important;
+    justify-content: center !important;
+  }
+
+  .reports-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+  }
+
+  /* 10. Screen 8: Settings (#view-settings) */
+  .settings-container,
+  .settings-form-section {
+    width: 100% !important;
+    padding: 16px !important;
+  }
+
+  .settings-field-group {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 6px !important;
+  }
+
+  .settings-field-control {
+    width: 100% !important;
+  }
+
+  .settings-btn-row {
+    flex-direction: column !important;
+    gap: 8px !important;
+  }
+
+  .settings-btn-row .btn {
+    width: 100% !important;
+    min-height: 44px !important;
+  }
+
+  .settings-storage-stats-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  /* 11. Screen 9: Data Management (#view-data) */
+  .data-mgmt-header {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 12px !important;
+  }
+
+  .data-mgmt-actions {
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+  }
+
+  .data-mgmt-actions .btn {
+    width: 100% !important;
+    min-height: 44px !important;
+    justify-content: center !important;
+  }
+
+  .mongo-storage-card {
+    padding: 16px !important;
+  }
+
+  .storage-metrics-grid,
+  .mongo-storage-metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+  }
+
+  .data-cards-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 12px !important;
+  }
+
+  .data-card {
+    padding: 16px !important;
+  }
+
+  .data-card .btn {
+    width: 100% !important;
+    min-height: 44px !important;
+  }
+
+  .transfer-devices-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  /* 12. Screen 10: Checklist Generator (#view-checklist-generator) */
+  .qa-gen-hero {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    padding: 16px !important;
+    gap: 12px !important;
+  }
+
+  .qa-gen-hero-actions {
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+  }
+
+  .qa-gen-hero-actions .btn {
+    width: 100% !important;
+    min-height: 44px !important;
+    justify-content: center !important;
+  }
+
+  .qa-gen-input-card {
+    padding: 16px !important;
+  }
+
+  .qa-gen-textarea {
+    min-height: 160px !important;
+    width: 100% !important;
+  }
+
+  .qa-gen-submit-btn {
+    width: 100% !important;
+    min-height: 48px !important;
+  }
+
+  .qa-gen-preview-toolbar {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 8px !important;
+  }
+
+  .qa-gen-preview-toolbar .btn {
+    width: 100% !important;
+    min-height: 44px !important;
+    justify-content: center !important;
+  }
+
+  /* 13. Screen 11: My Checklists (#view-my-checklists) */
+  .qa-mychk-hero {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    padding: 16px !important;
+    gap: 12px !important;
+  }
+
+  .qa-mychk-hero-actions {
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+  }
+
+  .qa-mychk-hero-actions .btn {
+    width: 100% !important;
+    min-height: 44px !important;
+    justify-content: center !important;
+  }
+
+  .qa-mychk-stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+  }
+
+  .qa-mychk-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 12px !important;
+  }
+
+  .qa-mychk-card {
+    padding: 14px !important;
+  }
+
+  .qa-mychk-card-footer {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 8px !important;
+  }
+
+  .qa-mychk-card-footer .btn {
+    width: 100% !important;
+    min-height: 44px !important;
+    justify-content: center !important;
+  }
+
+  /* 14. Screen 12: QA Test Runner (#view-qa-runner) */
+  .qa-runner-top-bar {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 12px !important;
+  }
+
+  .qa-runner-actions {
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+  }
+
+  .qa-runner-actions .btn {
+    width: 100% !important;
+    min-height: 44px !important;
+    justify-content: center !important;
+  }
+
+  .qa-runner-metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+  }
+
+  .qa-runner-item {
+    padding: 12px 10px !important;
+  }
+
+  .qa-runner-checkbox-label {
+    min-height: 44px !important;
+    display: flex !important;
+    align-items: center !important;
+  }
+
+  /* 15. Screen 13: Login & Register (#auth-container) */
+  .auth-container {
+    padding: max(16px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)) !important;
+    min-height: 100dvh !important;
+  }
+
+  .auth-card-wrapper {
+    width: 100% !important;
+    max-width: 440px !important;
+  }
+
+  .auth-card {
+    padding: 22px 18px !important;
+    border-radius: var(--radius-md) !important;
+  }
+
+  .auth-tabs {
+    margin-bottom: 18px !important;
+  }
+
+  .auth-tab-btn {
+    min-height: 44px !important;
+  }
+
+  .auth-input-wrapper input {
+    height: 46px !important;
+  }
+
+  .auth-password-toggle-btn {
+    width: 44px !important;
+    height: 44px !important;
+    min-width: 44px !important;
+    min-height: 44px !important;
+  }
+
+  .auth-submit-btn {
+    min-height: 46px !important;
+    height: 46px !important;
+  }
+
+  /* 16. All 17 Modals & Dialogs */
+  .modal-backdrop {
+    padding: 6px !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+
+  .modal-dialog,
+  .modal-dialog.modal-dialog-lg,
+  .modal-dialog.modal-dialog-md,
+  .modal-dialog.modal-dialog-sm {
+    width: 100% !important;
+    max-width: calc(100vw - 12px) !important;
+    max-height: calc(100dvh - 12px) !important;
+    margin: auto !important;
+    border-radius: var(--radius-md) !important;
+    display: flex !important;
+    flex-direction: column !important;
+    overflow: hidden !important;
+  }
+
+  .modal-header {
+    padding: 12px 14px !important;
+    flex-shrink: 0 !important;
+  }
+
+  .modal-title {
+    font-size: 0.98rem !important;
+  }
+
+  .modal-subtitle {
+    font-size: 0.74rem !important;
+  }
+
+  .modal-close-btn {
+    width: 44px !important;
+    height: 44px !important;
+    min-width: 44px !important;
+    min-height: 44px !important;
+  }
+
+  .modal-form,
+  .view-case-body,
+  .modal-body {
+    padding: 14px 12px !important;
+    gap: 12px !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    flex: 1 1 auto !important;
+  }
+
+  .form-row,
+  .form-row-2,
+  .form-row-3 {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 10px !important;
+  }
+
+  .modal-footer {
+    padding: 12px 14px !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 8px !important;
+    flex-shrink: 0 !important;
+  }
+
+  .modal-footer .btn {
+    width: 100% !important;
+    min-height: 44px !important;
+    justify-content: center !important;
+  }
+
+  /* Step Builder in Test Case Modal */
+  .step-row {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 8px !important;
+    padding: 10px !important;
+  }
+
+  .step-inputs-group {
+    width: 100% !important;
+  }
+
+  .step-actions-group {
+    flex-direction: row !important;
+    justify-content: flex-end !important;
+    gap: 8px !important;
+  }
+
+  .step-tool-btn {
+    width: 38px !important;
+    height: 38px !important;
+    min-width: 38px !important;
+    min-height: 38px !important;
+  }
+
+  /* Step Execution in Execution Modal */
+  .exec-step-row {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 8px !important;
+    padding: 10px !important;
+  }
+
+  .exec-step-actions {
+    width: 100% !important;
+    display: flex !important;
+    justify-content: flex-end !important;
+    gap: 6px !important;
+  }
+
+  .step-status-btn {
+    min-height: 38px !important;
+    padding: 6px 12px !important;
+  }
+
+  /* Promote Modal preview box */
+  .qa-promote-preview-box {
+    max-height: 180px !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+  }
+}
+
+/* 2. Small Mobile Screens (max-width: 380px) */
+@media (max-width: 380px) {
+  /* Header logout button hidden on small phones; permanently accessible in drawer */
+  .header-logout-btn {
+    display: none !important;
+  }
+
+  .page-title {
+    max-width: calc(100vw - 145px) !important;
+  }
+
+  .stats-grid,
+  .project-stats-grid,
+  .detail-qa-stats-grid,
+  .reports-kpi-grid,
+  .storage-metrics-grid,
+  .mongo-storage-metrics-grid,
+  .qa-mychk-stats-grid,
+  .qa-runner-metrics-grid,
+  .defect-summary-pills,
+  .settings-storage-stats-row {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .auth-card {
+    padding: 16px 12px !important;
+  }
+}
+
+/* 3. Smallest Mobile Screens (max-width: 335px down to 320px) */
+@media (max-width: 335px) {
+  #header-user-profile {
+    display: none !important;
+  }
+
+  .top-nav {
+    padding-left: 4px !important;
+    padding-right: 4px !important;
+    gap: 4px !important;
+  }
+
+  .content-viewport {
+    padding: 8px 6px !important;
+  }
+
+  .modal-dialog,
+  .modal-dialog.modal-dialog-lg,
+  .modal-dialog.modal-dialog-md,
+  .modal-dialog.modal-dialog-sm {
+    max-width: calc(100vw - 8px) !important;
+    max-height: calc(100dvh - 8px) !important;
+  }
+
+  .modal-header,
+  .modal-footer {
+    padding: 10px 10px !important;
+  }
+
+  .modal-form {
+    padding: 10px 8px !important;
+  }
+
+  .auth-container {
+    padding: 10px 6px !important;
+  }
+
+  .auth-card {
+    padding: 14px 10px !important;
+  }
+}
+
+/* 4. Mobile Landscape Orientation (max-height: 500px and landscape) */
+@media (max-height: 500px) and (orientation: landscape) {
+  :root {
+    --header-height: 48px;
+  }
+
+  .top-nav {
+    height: 48px !important;
+  }
+
+  .content-viewport {
+    padding: 8px 14px max(14px, env(safe-area-inset-bottom)) !important;
+  }
+
+  .auth-container {
+    padding: 8px 12px !important;
+    align-items: flex-start !important;
+    overflow-y: auto !important;
+  }
+
+  .auth-brand-header {
+    margin-bottom: 10px !important;
+    gap: 4px !important;
+  }
+
+  .auth-brand-title {
+    font-size: 1.3rem !important;
+  }
+
+  .auth-card {
+    padding: 14px 16px !important;
+  }
+
+  .auth-tabs {
+    margin-bottom: 12px !important;
+  }
+
+  .modal-dialog,
+  .modal-dialog.modal-dialog-lg,
+  .modal-dialog.modal-dialog-md,
+  .modal-dialog.modal-dialog-sm {
+    max-height: calc(100dvh - 8px) !important;
+  }
+
+  .modal-header {
+    padding: 8px 12px !important;
+  }
+
+  .modal-form,
+  .view-case-body,
+  .modal-body {
+    padding: 10px 12px !important;
+    gap: 8px !important;
+  }
+
+  .modal-footer {
+    padding: 8px 12px !important;
+    flex-direction: row !important;
+    justify-content: flex-end !important;
+    flex-wrap: wrap !important;
+  }
+
+  .modal-footer .btn {
+    width: auto !important;
+    min-height: 38px !important;
+  }
+}
