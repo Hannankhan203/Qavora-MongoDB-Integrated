@@ -56,6 +56,25 @@ export function navigateTo(route, pushState = true) {
       view.style.display = isMatch ? 'block' : 'none';
       view.classList.toggle('active', isMatch);
     });
+
+    const VIEW_TITLES = {
+      'checklist-generator': 'Create QA Checklist',
+      'my-checklists': 'My QA Checklists',
+      'qa-runner': 'QA Test Runner',
+      dashboard: 'Dashboard',
+      projects: 'My Projects',
+      'project-details': 'Project Details',
+      plans: 'Test Plan',
+      execution: 'Test Execution',
+      defects: 'Defects',
+      reports: 'Reports',
+      data: 'Data Management',
+      settings: 'Settings'
+    };
+    const pageTitleEl = document.getElementById('page-title');
+    if (pageTitleEl) {
+      pageTitleEl.textContent = VIEW_TITLES[viewSlug] || 'Qavora';
+    }
   }
 }
 
@@ -100,16 +119,15 @@ export function initUIEventListeners() {
   sidebarOverlay?.addEventListener('click', closeSidebar);
 
   // 3. Sidebar navigation links (.nav-item[data-view]) & browser popstate
-  document.addEventListener('click', (e) => {
-    const target = e.target instanceof Element ? e.target.closest('.nav-item[data-view]') : null;
-    if (target) {
+  document.querySelectorAll('.nav-item[data-view]').forEach((navEl) => {
+    navEl.addEventListener('click', (e) => {
       e.preventDefault();
-      const viewName = target.getAttribute('data-view');
+      const viewName = navEl.getAttribute('data-view');
       if (viewName) {
         navigateTo(`/${viewName}`, true);
         closeSidebar();
       }
-    }
+    });
   });
 
   if (typeof window !== 'undefined') {
@@ -185,15 +203,16 @@ export function initUIEventListeners() {
     }
   };
 
-  document.addEventListener('click', (e) => {
-    const btn = e.target instanceof Element
-      ? e.target.closest('#projects-create-btn, #panel-new-project-btn, .plans-create-project-btn, #empty-projects-create-btn, [data-action="new-project"]')
-      : null;
-    if (btn) {
-      e.preventDefault();
-      openProjectModal();
-    }
-  });
+  document
+    .querySelectorAll(
+      '#projects-create-btn, #panel-new-project-btn, .plans-create-project-btn, #empty-projects-create-btn, [data-action="new-project"]'
+    )
+    .forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        openProjectModal();
+      });
+    });
 
   modalCloseBtn?.addEventListener('click', closeProjectModal);
   modalCancelBtn?.addEventListener('click', closeProjectModal);
