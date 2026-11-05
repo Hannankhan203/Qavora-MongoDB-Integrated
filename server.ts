@@ -986,6 +986,7 @@ interface SafeUserProfile {
   createdAt: string;
   updatedAt: string;
   lastLoginAt: string;
+  preferences?: Record<string, any>;
 }
 
 interface AuthenticatedRequest extends Request {
@@ -1006,7 +1007,8 @@ function toSafeUser(user: any): SafeUserProfile {
     avatarInitials: String(user.avatarInitials || getAvatarInitials(user.name)),
     createdAt: String(user.createdAt),
     updatedAt: String(user.updatedAt),
-    lastLoginAt: String(user.lastLoginAt)
+    lastLoginAt: String(user.lastLoginAt),
+    preferences: user.preferences || {}
   };
 }
 
@@ -1360,6 +1362,173 @@ app.get("/api/auth/me", requireAuth, async (req: Request, res: Response) => {
     );
     console.error(`Error in session verification: ${safeError}`);
     return res.status(500).json({ error: "Failed to verify session." });
+  }
+});
+
+// 4. PATCH /api/auth/profile - Update user display name and QA role
+app.patch("/api/auth/profile", requireAuth, async (req: Request, res: Response) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
+    }
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user!.userId;
+    const { name, role } = req.body || {};
+
+    if (typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: "Full name is required and cannot be empty." });
+    }
+
+    const trimmedName = name.trim();
+    const cleanRole = typeof role === 'string' && role.trim() ? role.trim() : 'QA Tester';
+    const now = new Date().toISOString();
+
+    const updateFields: Record<string, any> = {
+      name: trimmedName,
+      role: cleanRole,
+      avatarInitials: getAvatarInitials(trimmedName),
+      updatedAt: now
+    };
+
+    await db.collection("users").updateOne(
+      { userId },
+      { $set: updateFields }
+    );
+
+    const updatedUser = await db.collection("users").findOne({ userId });
+    return res.json({
+      success: true,
+      message: "Profile updated successfully.",
+      user: toSafeUser(updatedUser)
+    });
+  } catch (error: any) {
+    const safeError = (error?.message || "Internal server error").replace(
+      /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
+      "mongodb+srv://[credentials-hidden]@"
+    );
+    console.error(`Error in profile update: ${safeError}`);
+    return res.status(500).json({ error: "Failed to update profile." });
+  }
+});
+
+// 5. POST /api/auth/change-password - Secure password change with current password verification
+app.post("/api/auth/change-password", requireAuth, async (req: Request, res: Response) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
+    }
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user!.userId;
+    const { currentPassword, newPassword } = req.body || {};
+
+    if (typeof currentPassword !== 'string' || !currentPassword) {
+      return res.status(400).json({ error: "Current password is required." });
+    }
+
+    if (typeof newPassword !== 'string' || newPassword.length < 8) {
+      return res.status(400).json({ error: "New password must be at least 8 characters long." });
+    }
+
+    const user = await db.collection("users").findOne({ userId });
+    if (!user) {
+      return res.status(404).json({ error: "User account not found." });
+    }
+
+    const isMatch = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!isMatch) {
+      return res.status(400).json({ error: "Current password does not match our records." });
+    }
+
+    const saltRounds = 10;
+    const passwordHash = await bcrypt.hash(newPassword, saltRounds);
+    const now = new Date().toISOString();
+
+    await db.collection("users").updateOne(
+      { userId },
+      { $set: { passwordHash, updatedAt: now } }
+    );
+
+    return res.json({
+      success: true,
+      message: "Password changed successfully."
+    });
+  } catch (error: any) {
+    const safeError = (error?.message || "Internal server error").replace(
+      /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
+      "mongodb+srv://[credentials-hidden]@"
+    );
+    console.error(`Error in password change: ${safeError}`);
+    return res.status(500).json({ error: "Failed to change password." });
+  }
+});
+
+// 6. PATCH /api/auth/preferences - Update application and UI preferences
+app.patch("/api/auth/preferences", requireAuth, async (req: Request, res: Response) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
+    }
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user!.userId;
+    const preferences = req.body?.preferences;
+
+    if (!preferences || typeof preferences !== 'object' || Array.isArray(preferences)) {
+      return res.status(400).json({ error: "Preferences must be a valid key-value object." });
+    }
+
+    const now = new Date().toISOString();
+    await db.collection("users").updateOne(
+      { userId },
+      { $set: { preferences, updatedAt: now } }
+    );
+
+    const updatedUser = await db.collection("users").findOne({ userId });
+    return res.json({
+      success: true,
+      preferences: updatedUser?.preferences || {},
+      user: toSafeUser(updatedUser)
+    });
+  } catch (error: any) {
+    const safeError = (error?.message || "Internal server error").replace(
+      /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
+      "mongodb+srv://[credentials-hidden]@"
+    );
+    console.error(`Error saving preferences: ${safeError}`);
+    return res.status(500).json({ error: "Failed to save preferences." });
+  }
+});
+
+// 7. POST /api/data/reset - Danger Zone: Reset all projects and checklists for the authenticated user
+app.post("/api/data/reset", requireAuth, async (req: Request, res: Response) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
+    }
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user!.userId;
+
+    const [projRes, artRes, chkRes] = await Promise.all([
+      db.collection("projects").deleteMany({ userId }),
+      db.collection("project_artifacts").deleteMany({ userId }),
+      db.collection("checklists").deleteMany({ userId })
+    ]);
+
+    return res.json({
+      success: true,
+      message: "Workspace test data reset successfully.",
+      deleted: {
+        projects: projRes.deletedCount,
+        artifacts: artRes.deletedCount,
+        checklists: chkRes.deletedCount
+      }
+    });
+  } catch (error: any) {
+    const safeError = (error?.message || "Internal server error").replace(
+      /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
+      "mongodb+srv://[credentials-hidden]@"
+    );
+    console.error(`Error in workspace reset: ${safeError}`);
+    return res.status(500).json({ error: "Failed to reset workspace." });
   }
 });
 

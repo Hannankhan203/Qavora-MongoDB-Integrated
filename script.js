@@ -75,6 +75,9 @@ import {
   closeDefectViewModal,
   openDeleteDefectModal
 } from './src/modules/defectManager.js';
+import { renderReportsWorkspace } from './src/modules/reportsManager.js';
+import { renderSettingsWorkspace } from './src/modules/settingsManager.js';
+import { renderDataManagementWorkspace } from './src/modules/dataManager.js';
 import {
   showToast,
   navigateTo,
@@ -124,6 +127,12 @@ async function init() {
         renderExecutionWorkspace();
       } else if (baseSlug === 'defects') {
         renderDefectsWorkspace();
+      } else if (baseSlug === 'reports') {
+        renderReportsWorkspace();
+      } else if (baseSlug === 'settings') {
+        renderSettingsWorkspace();
+      } else if (baseSlug === 'data') {
+        renderDataManagementWorkspace();
       }
 
       if (typeof initChecklistGenerator === 'function') {
@@ -153,6 +162,9 @@ async function init() {
       renderProjectDetails();
       renderExecutionWorkspace();
       renderDefectsWorkspace();
+      renderReportsWorkspace();
+      renderSettingsWorkspace();
+      renderDataManagementWorkspace();
       if (getAppState().currentRoute === '/plans') {
         renderTestPlanWorkspace();
       }
@@ -213,6 +225,9 @@ if (typeof window !== 'undefined') {
     openDefectViewModal,
     closeDefectViewModal,
     openDeleteDefectModal,
+    renderReportsWorkspace,
+    renderSettingsWorkspace,
+    renderDataManagementWorkspace,
     showToast,
     navigateTo,
     resolveInitialRoute

@@ -33,6 +33,9 @@ import {
 import { renderDashboard } from './dashboardManager.js';
 import { renderExecutionWorkspace, initExecutionEventListeners, openExecutionModal, getExecutionFilterState } from './executionManager.js';
 import { renderDefectsWorkspace, initDefectEventListeners, getDefectFilterState } from './defectManager.js';
+import { renderReportsWorkspace, initReportsEventListeners } from './reportsManager.js';
+import { renderSettingsWorkspace, initSettingsEventListeners } from './settingsManager.js';
+import { renderDataManagementWorkspace, initDataManagementEventListeners } from './dataManager.js';
 import {
   populateProjectsDropdown,
   renderTestPlanWorkspace,
@@ -199,6 +202,24 @@ export function navigateTo(route, pushState = true) {
       }
       renderDefectsWorkspace();
     }
+    if (viewSlug === 'reports') {
+      let targetId = null;
+      if (cleanRoute.includes('?')) {
+        const queryStr = cleanRoute.split('?')[1];
+        const params = new URLSearchParams(queryStr);
+        targetId = params.get('id');
+      }
+      if (targetId) {
+        setActiveProjectId(targetId);
+      }
+      renderReportsWorkspace(targetId);
+    }
+    if (viewSlug === 'settings') {
+      renderSettingsWorkspace();
+    }
+    if (viewSlug === 'data') {
+      renderDataManagementWorkspace();
+    }
   }
 }
 
@@ -216,6 +237,9 @@ export function initUIEventListeners() {
 
   initExecutionEventListeners();
   initDefectEventListeners();
+  initReportsEventListeners();
+  initSettingsEventListeners();
+  initDataManagementEventListeners();
 
   // 1. Theme toggle
   const themeBtn = document.getElementById('theme-toggle-btn');
