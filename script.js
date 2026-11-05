@@ -31,7 +31,11 @@ import {
   getStorageErrorMessage,
   safeStorageWrite,
   safeStorageRead,
-  safeStorageRemove
+  safeStorageRemove,
+  ChecklistAPI,
+  ChecklistsPersistence,
+  hydrateFromBackend,
+  clearUserChecklists
 } from './qaChecklistStore.js';
 import { authController } from './authController.js';
 import { initAuthUI } from './authUI.js';
@@ -12618,6 +12622,14 @@ import { initAuthUI } from './authUI.js';
         if (ProjectsPersistence.inFlightSync) ProjectsPersistence.inFlightSync.clear();
         if (ProjectsPersistence.pendingSync) ProjectsPersistence.pendingSync.clear();
       }
+      if (typeof ChecklistsPersistence !== 'undefined') {
+        ChecklistsPersistence.clearCache();
+      }
+      if (qaRunnerController && typeof qaRunnerController.syncFromStorage === 'function') {
+        try {
+          qaRunnerController.syncFromStorage();
+        } catch (_) {}
+      }
 
       // 4. Safely clear user-specific project & activity data from local storage
       try {
@@ -12643,6 +12655,17 @@ import { initAuthUI } from './authUI.js';
             console.warn('Qavora: Background project hydration encountered an error', err);
             updateSyncStatusIndicator();
           });
+          if (typeof ChecklistsPersistence !== 'undefined') {
+            ChecklistsPersistence.hydrateFromBackend().then(() => {
+              if (qaRunnerController && typeof qaRunnerController.syncFromStorage === 'function') {
+                try {
+                  qaRunnerController.syncFromStorage();
+                } catch (_) {}
+              }
+            }).catch(err => {
+              console.warn('Qavora: Background checklist hydration encountered an error', err);
+            });
+          }
         },
         onLogout: () => {
           clearUserSessionData();
@@ -12658,6 +12681,17 @@ import { initAuthUI } from './authUI.js';
             console.warn('Qavora: Background project hydration encountered an error', err);
             updateSyncStatusIndicator();
           });
+          if (typeof ChecklistsPersistence !== 'undefined') {
+            ChecklistsPersistence.hydrateFromBackend().then(() => {
+              if (qaRunnerController && typeof qaRunnerController.syncFromStorage === 'function') {
+                try {
+                  qaRunnerController.syncFromStorage();
+                } catch (_) {}
+              }
+            }).catch(err => {
+              console.warn('Qavora: Background checklist hydration encountered an error', err);
+            });
+          }
         } else {
           clearUserSessionData();
         }
@@ -12675,6 +12709,17 @@ import { initAuthUI } from './authUI.js';
             console.warn('Qavora: Hydration error on auth change', err);
             updateSyncStatusIndicator();
           });
+          if (typeof ChecklistsPersistence !== 'undefined') {
+            ChecklistsPersistence.hydrateFromBackend().then(() => {
+              if (qaRunnerController && typeof qaRunnerController.syncFromStorage === 'function') {
+                try {
+                  qaRunnerController.syncFromStorage();
+                } catch (_) {}
+              }
+            }).catch(err => {
+              console.warn('Qavora: Hydration error on auth change', err);
+            });
+          }
         } else {
           clearUserSessionData();
         }
@@ -12684,6 +12729,17 @@ import { initAuthUI } from './authUI.js';
         console.warn('Qavora: Background project hydration encountered an error', err);
         updateSyncStatusIndicator();
       });
+      if (typeof ChecklistsPersistence !== 'undefined') {
+        ChecklistsPersistence.hydrateFromBackend().then(() => {
+          if (qaRunnerController && typeof qaRunnerController.syncFromStorage === 'function') {
+            try {
+              qaRunnerController.syncFromStorage();
+            } catch (_) {}
+          }
+        }).catch(err => {
+          console.warn('Qavora: Background checklist hydration encountered an error', err);
+        });
+      }
     }
 
     if (typeof globalThis !== 'undefined') {
@@ -12693,6 +12749,8 @@ import { initAuthUI } from './authUI.js';
         Storage,
         ProjectsAPI,
         ProjectsPersistence,
+        ChecklistAPI,
+        ChecklistsPersistence,
         Auth: authController,
         authController,
         AuthUI: authUIController,

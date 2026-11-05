@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import { MongoClient, ObjectId } from 'mongodb';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import rateLimit from 'express-rate-limit';
 
 dotenv.config();
 
@@ -16,6 +17,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+
+// Enable reverse proxy trust (1 hop) for accurate client IP identification on Cloud Run, Vercel, and Render
+app.set('trust proxy', 1);
 
 // ============================================================================
 // 1. Dynamic Port Configuration & Validation
@@ -675,6 +679,18 @@ async function connectToDatabase(): Promise<any> {
       } catch (idxErr: any) {
         console.warn(`[Qavora Server] Warning creating unique index on users: ${sanitizeDiagnosticText(idxErr?.message)}`);
       }
+      try {
+        await db.collection("checklists").createIndex({ id: 1 }, { unique: true });
+      } catch (idxErr: any) {
+        console.warn(`[Qavora Server] Warning creating unique index on checklists.id: ${sanitizeDiagnosticText(idxErr?.message)}`);
+      }
+      try {
+        await db.collection("checklists").createIndex({ userId: 1, id: 1 });
+        await db.collection("checklists").createIndex({ userId: 1 });
+        console.log(`[Qavora Server] Ensured tenant-isolation indexes on checklists collection (userId, id).`);
+      } catch (idxErr: any) {
+        console.warn(`[Qavora Server] Warning creating tenant isolation indexes on checklists: ${sanitizeDiagnosticText(idxErr?.message)}`);
+      }
 
       return db;
     } catch (error: any) {
@@ -933,11 +949,42 @@ async function requireAuth(req: Request, res: Response, next: NextFunction) {
 }
 
 // ============================================================================
+// Authentication Rate Limiters (SEC-001)
+// ============================================================================
+// 1. Login rate limiter: Maximum 5 attempts per 15 minutes per IP
+const loginRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  limit: 5, // 5 attempts per window per IP
+  standardHeaders: true, // draft-6/draft-7 RateLimit-* headers
+  legacyHeaders: false, // Disable X-RateLimit-* headers
+  statusCode: 429,
+  message: {
+    error: 'Too many login attempts. Please try again after 15 minutes.',
+    message: 'Too many login attempts from this IP address, please try again after 15 minutes.'
+  },
+  validate: { xForwardedForHeader: false }
+});
+
+// 2. Registration rate limiter: Maximum 3 registration attempts per hour per IP
+const registerRateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  limit: 3, // 3 registration attempts per hour per IP
+  standardHeaders: true, // draft-6/draft-7 RateLimit-* headers
+  legacyHeaders: false, // Disable X-RateLimit-* headers
+  statusCode: 429,
+  message: {
+    error: 'Too many registration attempts. Please try again after an hour.',
+    message: 'Too many accounts created from this IP address, please try again after an hour.'
+  },
+  validate: { xForwardedForHeader: false }
+});
+
+// ============================================================================
 // Authentication Endpoints
 // ============================================================================
 
 // 1. POST /api/auth/register - Register a new user
-app.post("/api/auth/register", async (req: Request, res: Response) => {
+app.post("/api/auth/register", registerRateLimiter, async (req: Request, res: Response) => {
   try {
     if (!db) {
       return res.status(503).json({
@@ -1043,7 +1090,7 @@ app.post("/api/auth/register", async (req: Request, res: Response) => {
 });
 
 // 2. POST /api/auth/login - Authenticate existing user
-app.post("/api/auth/login", async (req: Request, res: Response) => {
+app.post("/api/auth/login", loginRateLimiter, async (req: Request, res: Response) => {
   try {
     if (!db) {
       return res.status(503).json({
@@ -1653,6 +1700,245 @@ app.post("/api/projects/sync-local", requireAuth, async (req: Request, res: Resp
   }
 });
 
+// ============================================================================
+// Standalone QA Checklists MongoDB API Endpoints (DAT-001)
+// ============================================================================
+
+// Helper to query checklist documents by string business 'id' or BSON '_id' scoped by authenticated userId
+function buildUserChecklistQuery(idParam: string | string[], userId: string) {
+  const cleanId = Array.isArray(idParam) ? idParam[0] : idParam;
+  if (ObjectId.isValid(cleanId) && cleanId.length === 24) {
+    return {
+      $or: [
+        { id: cleanId, userId },
+        { _id: new ObjectId(cleanId), userId }
+      ]
+    };
+  }
+  return { id: cleanId, userId };
+}
+
+// 1. GET /api/checklists - Retrieve all checklists for the authenticated user
+app.get("/api/checklists", requireAuth, async (req: Request, res: Response) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
+    }
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user!.userId;
+
+    const checklists = await db.collection("checklists").find({ userId }).toArray();
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    return res.json(checklists);
+  } catch (error: any) {
+    const safeError = (error?.message || "Internal server error").replace(
+      /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
+      "mongodb+srv://[credentials-hidden]@"
+    );
+    console.error(`Error fetching checklists: ${safeError}`);
+    return res.status(500).json({ error: "Failed to fetch checklists." });
+  }
+});
+
+// 2. GET /api/checklists/:id - Retrieve a specific checklist owned by the authenticated user
+app.get("/api/checklists/:id", requireAuth, async (req: Request, res: Response) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
+    }
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user!.userId;
+
+    const query = buildUserChecklistQuery(req.params.id, userId);
+    const checklist = await db.collection("checklists").findOne(query);
+
+    if (!checklist) {
+      return res.status(404).json({ error: "Checklist not found." });
+    }
+
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    return res.json(checklist);
+  } catch (error: any) {
+    const safeError = (error?.message || "Internal server error").replace(
+      /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
+      "mongodb+srv://[credentials-hidden]@"
+    );
+    console.error(`Error fetching checklist ${req.params.id}: ${safeError}`);
+    return res.status(500).json({ error: "Failed to fetch checklist." });
+  }
+});
+
+// 3. POST /api/checklists - Create and persist a new checklist for the authenticated user
+app.post("/api/checklists", requireAuth, async (req: Request, res: Response) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
+    }
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user!.userId;
+
+    // Never accept userId or _id from request body; always derive userId from authenticated JWT
+    const {
+      title,
+      id,
+      schemaVersion,
+      documentNotes,
+      phases,
+      promotedProjectId,
+      promotedAt,
+      userId: _ignoredUserId,
+      _id: _ignoredId,
+      ...extraData
+    } = req.body || {};
+
+    if (title !== undefined && (typeof title !== 'string' || title.trim() === '')) {
+      return res.status(400).json({ error: "Field 'title' must be a non-empty string if provided." });
+    }
+
+    const trimmedTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Untitled QA Checklist';
+    const checklistId = (typeof id === 'string' && id.trim())
+      ? id.trim()
+      : `chk_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+    const now = new Date().toISOString();
+
+    const newChecklist: any = {
+      id: checklistId,
+      userId,
+      schemaVersion: typeof schemaVersion === 'number' ? schemaVersion : 1,
+      title: trimmedTitle,
+      createdAt: extraData.createdAt || now,
+      updatedAt: now,
+      documentNotes: Array.isArray(documentNotes) ? documentNotes : [],
+      phases: Array.isArray(phases) ? phases : [],
+      promotedProjectId: typeof promotedProjectId === 'string' && promotedProjectId.trim() ? promotedProjectId.trim() : null,
+      promotedAt: typeof promotedAt === 'string' && promotedAt.trim() ? promotedAt.trim() : null,
+      ...extraData
+    };
+
+    delete newChecklist._id;
+    newChecklist.id = checklistId;
+    newChecklist.userId = userId;
+
+    const result = await db.collection("checklists").insertOne(newChecklist);
+
+    return res.status(201).json({
+      _id: result.insertedId,
+      ...newChecklist
+    });
+  } catch (error: any) {
+    if (error?.code === 11000) {
+      return res.status(409).json({ error: "A checklist with this ID already exists." });
+    }
+    const safeError = (error?.message || "Internal server error").replace(
+      /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
+      "mongodb+srv://[credentials-hidden]@"
+    );
+    console.error(`Error creating checklist: ${safeError}`);
+    return res.status(500).json({ error: "Failed to create checklist." });
+  }
+});
+
+// 4. PATCH /api/checklists/:id - Update an existing checklist using $set
+app.patch("/api/checklists/:id", requireAuth, async (req: Request, res: Response) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
+    }
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user!.userId;
+    const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+
+    if (!req.body || typeof req.body !== 'object') {
+      return res.status(400).json({ error: "Request body must be an object." });
+    }
+
+    const allowedData: any = { ...req.body };
+    // Strictly strip protected fields so clients cannot overwrite them
+    delete allowedData._id;
+    delete allowedData.userId;
+    delete allowedData.id;
+
+    if (allowedData.title !== undefined) {
+      if (typeof allowedData.title !== 'string' || allowedData.title.trim() === '') {
+        return res.status(400).json({ error: "Field 'title' must be a non-empty string." });
+      }
+      allowedData.title = allowedData.title.trim();
+    }
+
+    if (allowedData.phases !== undefined && !Array.isArray(allowedData.phases)) {
+      return res.status(400).json({ error: "Field 'phases' must be an array." });
+    }
+
+    if (allowedData.documentNotes !== undefined && !Array.isArray(allowedData.documentNotes)) {
+      return res.status(400).json({ error: "Field 'documentNotes' must be an array." });
+    }
+
+    allowedData.updatedAt = new Date().toISOString();
+
+    const query = buildUserChecklistQuery(idParam, userId);
+    const result = await db.collection("checklists").findOneAndUpdate(
+      query,
+      { $set: allowedData },
+      { returnDocument: 'after' }
+    );
+
+    if (!result) {
+      return res.status(404).json({ error: "Checklist not found." });
+    }
+
+    return res.json(result);
+  } catch (error: any) {
+    const safeError = (error?.message || "Internal server error").replace(
+      /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
+      "mongodb+srv://[credentials-hidden]@"
+    );
+    if (
+      error?.name === 'MongoNetworkError' ||
+      error?.name === 'MongoServerSelectionError' ||
+      error?.name === 'MongoTimeoutError' ||
+      (error?.message && error.message.includes('buffering timed out'))
+    ) {
+      console.error(`Database unavailable during checklist update: ${safeError}`);
+      return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
+    }
+    console.error(`Error updating checklist ${req.params.id}: ${safeError}`);
+    return res.status(500).json({ error: "Failed to update checklist." });
+  }
+});
+
+// 5. DELETE /api/checklists/:id - Delete a checklist owned by the authenticated user
+app.delete("/api/checklists/:id", requireAuth, async (req: Request, res: Response) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
+    }
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user!.userId;
+    const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+
+    const query = buildUserChecklistQuery(idParam, userId);
+    const result = await db.collection("checklists").deleteOne(query);
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ error: "Checklist not found." });
+    }
+
+    return res.json({ success: true, message: "Checklist deleted successfully." });
+  } catch (error: any) {
+    const safeError = (error?.message || "Internal server error").replace(
+      /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
+      "mongodb+srv://[credentials-hidden]@"
+    );
+    console.error(`Error deleting checklist ${req.params.id}: ${safeError}`);
+    return res.status(500).json({ error: "Failed to delete checklist." });
+  }
+});
+
 // Route-level fallback for database errors
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {
   if (err?.name === 'MongooseError' || err?.name === 'MongoNetworkError' || (err?.message && err.message.includes('buffering timed out'))) {
@@ -1784,5 +2070,5 @@ if (!isVercel) {
   setupServer();
 }
 
-export { connectToDatabase };
+export { connectToDatabase, loginRateLimiter, registerRateLimiter };
 export default app;

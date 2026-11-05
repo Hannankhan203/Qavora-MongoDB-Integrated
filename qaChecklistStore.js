@@ -2,9 +2,11 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * Qavora — QA Checklists In-Memory Data Store & Validation (MongoDB Migration Prep)
- * Manages pure in-memory data store during active session with zero browser persistence.
+ * Qavora — QA Checklists In-Memory Data Store & MongoDB Persistence (DAT-001)
+ * Manages in-memory cache and authenticated MongoDB Atlas write-through persistence.
  */
+
+import { authController } from './authController.js';
 
 export const CHECKLISTS_STORAGE_KEY = 'qavora_qa_checklists_v1';
 export const ACTIVE_RUNNER_STORAGE_KEY = 'qavora_qa_active_runner_v1';
@@ -690,8 +692,311 @@ export function loadAllChecklists() {
   }
 }
 
-export function saveAllChecklists(checklistsArray) {
+// ============================================================================
+// Centralized Checklists MongoDB REST API Client (DAT-001)
+// ============================================================================
+export const ChecklistAPI = {
+  baseUrl: '/api/checklists',
+
+  async _request(url, options = {}) {
+    const headers = {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    };
+
+    try {
+      const fetchFn = (typeof authController !== 'undefined' && typeof authController.authenticatedFetch === 'function')
+        ? authController.authenticatedFetch.bind(authController)
+        : fetch;
+
+      const res = await fetchFn(url, {
+        ...options,
+        headers,
+        cache: 'no-store'
+      });
+
+      const status = res.status;
+      let data = null;
+      try {
+        data = await res.json();
+      } catch (_) {}
+
+      if (res.ok) {
+        return { ok: true, status, data, error: null };
+      }
+
+      const errorMsg = (data && (data.error || data.message)) || `Request failed with HTTP ${status}`;
+      return { ok: false, status, data, error: errorMsg };
+    } catch (err) {
+      return {
+        ok: false,
+        status: 0,
+        data: null,
+        error: err?.message || 'Network request failed'
+      };
+    }
+  },
+
+  async list() {
+    return this._request(this.baseUrl, { method: 'GET' });
+  },
+
+  async get(id) {
+    if (!id) return { ok: false, status: 400, data: null, error: 'A valid checklist ID is required' };
+    return this._request(`${this.baseUrl}/${encodeURIComponent(String(id).trim())}`, { method: 'GET' });
+  },
+
+  async create(checklist) {
+    if (!checklist || typeof checklist !== 'object') {
+      return { ok: false, status: 400, data: null, error: 'Checklist object is required' };
+    }
+    return this._request(this.baseUrl, {
+      method: 'POST',
+      body: JSON.stringify(checklist)
+    });
+  },
+
+  async update(id, updates) {
+    if (!id) return { ok: false, status: 400, data: null, error: 'A valid checklist ID is required' };
+    if (!updates || typeof updates !== 'object') {
+      return { ok: false, status: 400, data: null, error: 'Updates object is required' };
+    }
+    return this._request(`${this.baseUrl}/${encodeURIComponent(String(id).trim())}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates)
+    });
+  },
+
+  async delete(id) {
+    if (!id) return { ok: false, status: 400, data: null, error: 'A valid checklist ID is required' };
+    return this._request(`${this.baseUrl}/${encodeURIComponent(String(id).trim())}`, {
+      method: 'DELETE'
+    });
+  }
+};
+
+// ============================================================================
+// Centralized Checklists Write-Through Persistence Engine (DAT-001)
+// ============================================================================
+export const ChecklistsPersistence = {
+  persistedChecklistIds: new Set(),
+  inFlightSync: new Map(),
+  pendingSync: new Map(),
+  lastSyncError: null,
+
+  markPersisted(idOrIds) {
+    if (!idOrIds) return;
+    if (Array.isArray(idOrIds)) {
+      idOrIds.forEach(id => {
+        if (id) this.persistedChecklistIds.add(String(id));
+      });
+    } else {
+      this.persistedChecklistIds.add(String(idOrIds));
+    }
+  },
+
+  unmarkPersisted(id) {
+    if (id) {
+      this.persistedChecklistIds.delete(String(id));
+    }
+  },
+
+  isPersisted(id) {
+    return Boolean(id && this.persistedChecklistIds.has(String(id)));
+  },
+
+  async flushAll() {
+    while (this.inFlightSync.size > 0 || this.pendingSync.size > 0) {
+      const active = Array.from(this.inFlightSync.values());
+      if (active.length === 0) break;
+      await Promise.allSettled(active);
+    }
+  },
+
+  async syncChecklist(checklist, options = {}) {
+    if (!checklist || !checklist.id || typeof checklist !== 'object') {
+      return { ok: false, error: 'Invalid checklist record for sync' };
+    }
+
+    if (typeof authController !== 'undefined' && !authController.isAuthenticated()) {
+      return { ok: false, status: 401, error: 'Authentication required for server synchronization' };
+    }
+
+    const checklistId = String(checklist.id).trim();
+    const payload = JSON.parse(JSON.stringify(checklist));
+
+    // Prevent duplicate network calls while maintaining latest snapshot
+    if (this.inFlightSync.has(checklistId)) {
+      const existingPending = this.pendingSync.get(checklistId);
+      if (existingPending) {
+        existingPending.checklist = payload;
+        existingPending.options = {
+          ...existingPending.options,
+          ...options,
+          isNew: Boolean(existingPending.options.isNew && options.isNew)
+        };
+        return existingPending.promise;
+      }
+      let resolvePending;
+      const deferredPromise = new Promise(resolve => {
+        resolvePending = resolve;
+      });
+      this.pendingSync.set(checklistId, {
+        checklist: payload,
+        options: { ...options },
+        promise: deferredPromise,
+        resolve: resolvePending
+      });
+      return deferredPromise;
+    }
+
+    const syncPromise = (async () => {
+      try {
+        const isKnownOnServer = this.isPersisted(checklistId) && !options.isNew;
+        let result;
+
+        if (isKnownOnServer) {
+          result = await ChecklistAPI.update(checklistId, payload);
+          if (!result.ok && result.status === 404) {
+            console.info(`Qavora: Checklist "${checklistId}" not found on MongoDB (404). Falling back to POST.`);
+            result = await ChecklistAPI.create(payload);
+          }
+        } else {
+          result = await ChecklistAPI.create(payload);
+          if (!result.ok && (result.status === 409 || (result.error && result.error.includes('already exists')))) {
+            console.info(`Qavora: Checklist "${checklistId}" already exists on MongoDB (409). Falling back to PATCH.`);
+            result = await ChecklistAPI.update(checklistId, payload);
+          }
+        }
+
+        if (result && result.ok) {
+          this.markPersisted(checklistId);
+          this.lastSyncError = null;
+        } else {
+          const errMsg = (result && (result.error || result.message)) || 'Failed to synchronize checklist with MongoDB.';
+          this.lastSyncError = errMsg;
+          console.warn(`Qavora: MongoDB sync for checklist "${checklistId}" returned:`, result ? result.status : 'no-result', errMsg);
+        }
+        return result;
+      } catch (syncErr) {
+        this.lastSyncError = syncErr?.message || 'Sync network error';
+        console.error(`Qavora: Exception syncing checklist "${checklistId}"`, syncErr);
+        return { ok: false, error: this.lastSyncError };
+      } finally {
+        this.inFlightSync.delete(checklistId);
+        if (this.pendingSync.has(checklistId)) {
+          const nextPending = this.pendingSync.get(checklistId);
+          this.pendingSync.delete(checklistId);
+          this.syncChecklist(nextPending.checklist, nextPending.options).then(nextPending.resolve);
+        }
+      }
+    })();
+
+    this.inFlightSync.set(checklistId, syncPromise);
+    return syncPromise;
+  },
+
+  async deleteChecklist(id) {
+    if (!id) return { ok: false, error: 'A valid checklist ID is required' };
+    const checklistId = String(id).trim();
+    this.unmarkPersisted(checklistId);
+
+    if (typeof authController !== 'undefined' && !authController.isAuthenticated()) {
+      return { ok: true };
+    }
+
+    try {
+      const res = await ChecklistAPI.delete(checklistId);
+      if (!res.ok && res.status !== 404) {
+        console.warn(`Qavora: Error deleting checklist ${checklistId} on server:`, res.error);
+      }
+      return res;
+    } catch (err) {
+      console.warn(`Qavora: Network exception deleting checklist ${checklistId}`, err);
+      return { ok: false, error: err?.message };
+    }
+  },
+
+  onChecklistsSaved(nextList, previousList = []) {
+    if (typeof authController !== 'undefined' && !authController.isAuthenticated()) {
+      return;
+    }
+    const nextArray = Array.isArray(nextList) ? nextList : [];
+    const prevArray = Array.isArray(previousList) ? previousList : [];
+    const nextIds = new Set(nextArray.map(c => c && c.id).filter(Boolean));
+    const prevMap = new Map(prevArray.map(c => [c && c.id, c]));
+
+    // Detect deleted checklists
+    for (const prev of prevArray) {
+      if (prev && prev.id && !nextIds.has(prev.id)) {
+        this.deleteChecklist(prev.id);
+      }
+    }
+
+    // Sync created or updated checklists
+    for (const next of nextArray) {
+      if (!next || !next.id) continue;
+      const prev = prevMap.get(next.id);
+      const isNew = !prev && !this.isPersisted(next.id);
+      this.syncChecklist(next, { isNew });
+    }
+  },
+
+  async hydrateFromBackend() {
+    if (typeof authController !== 'undefined' && !authController.isAuthenticated()) {
+      return { ok: false, error: 'Unauthenticated' };
+    }
+
+    try {
+      // 1. Sync any unpersisted local checklists to MongoDB first
+      const { checklists: localList } = loadAllChecklists();
+      if (Array.isArray(localList) && localList.length > 0) {
+        for (const localChk of localList) {
+          if (localChk && localChk.id && !this.isPersisted(localChk.id)) {
+            await this.syncChecklist(localChk, { isNew: true });
+          }
+        }
+        await this.flushAll();
+      }
+
+      // 2. Fetch authenticated user's checklists from MongoDB Atlas
+      const res = await ChecklistAPI.list();
+      if (res && res.ok && Array.isArray(res.data)) {
+        const remoteChecklists = res.data;
+        this.persistedChecklistIds.clear();
+        remoteChecklists.forEach(c => {
+          if (c && c.id) this.markPersisted(c.id);
+        });
+
+        // Populate in-memory cache directly from server records
+        saveAllChecklists(remoteChecklists, { skipBackendSync: true });
+        return { ok: true, checklists: remoteChecklists };
+      }
+      return res;
+    } catch (err) {
+      console.warn('Qavora: Failed to hydrate checklists from backend', err);
+      return { ok: false, error: err?.message };
+    }
+  },
+
+  clearCache() {
+    this.persistedChecklistIds.clear();
+    this.inFlightSync.clear();
+    this.pendingSync.clear();
+    this.lastSyncError = null;
+    clearMemoryDataStore();
+  }
+};
+
+export const hydrateFromBackend = () => ChecklistsPersistence.hydrateFromBackend();
+export const clearUserChecklists = () => ChecklistsPersistence.clearCache();
+
+export function saveAllChecklists(checklistsArray, meta = {}) {
   try {
+    const previous = loadAllChecklists();
+    const previousList = (previous && Array.isArray(previous.checklists)) ? previous.checklists : [];
+
     const normalized = Array.isArray(checklistsArray)
       ? checklistsArray.map(normalizeChecklistRecord).filter(Boolean)
       : [];
@@ -702,7 +1007,13 @@ export function saveAllChecklists(checklistsArray) {
       checklists: normalized
     });
 
-    return safeStorageWrite(CHECKLISTS_STORAGE_KEY, payload, 'saving QA checklists');
+    const writeRes = safeStorageWrite(CHECKLISTS_STORAGE_KEY, payload, 'saving QA checklists');
+
+    if (writeRes && writeRes.ok && !meta.skipBackendSync && typeof ChecklistsPersistence !== 'undefined') {
+      ChecklistsPersistence.onChecklistsSaved(normalized, previousList);
+    }
+
+    return writeRes;
   } catch (err) {
     const isQuota = isQuotaExceededError(err);
     const isSecurity = isSecurityError(err);
