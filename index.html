@@ -1167,6 +1167,22 @@
             <div class="panel-body dash-analytics-body">
               <div class="dash-analytics-stats">
                 <div class="dash-stat-chip">
+                  <span class="dash-stat-label">Active Projects</span>
+                  <span class="dash-stat-val text-blue" id="dash-stat-active-projects">0</span>
+                </div>
+                <div class="dash-stat-chip">
+                  <span class="dash-stat-label">Total Test Plans</span>
+                  <span class="dash-stat-val" id="dash-stat-plans">0</span>
+                </div>
+                <div class="dash-stat-chip">
+                  <span class="dash-stat-label">Testing Phases</span>
+                  <span class="dash-stat-val" id="dash-stat-phases">0</span>
+                </div>
+                <div class="dash-stat-chip">
+                  <span class="dash-stat-label">Test Suites</span>
+                  <span class="dash-stat-val" id="dash-stat-suites">0</span>
+                </div>
+                <div class="dash-stat-chip">
                   <span class="dash-stat-label">Total Executions</span>
                   <span class="dash-stat-val" id="dash-stat-execs">0</span>
                 </div>
@@ -1390,8 +1406,33 @@
             <span id="detail-breadcrumb-title" class="breadcrumb-current">Project Details</span>
           </div>
 
-          <!-- Details Hero / Header -->
-          <div class="detail-header-card">
+          <!-- Loading View -->
+          <div id="detail-loading-view" class="empty-state" style="display: none; padding: 60px 20px;">
+            <div class="auth-loading-spinner" style="margin-bottom: 14px;" aria-label="Loading project details"></div>
+            <h3 class="empty-state-title">Loading Project Details...</h3>
+            <p class="empty-state-desc">Fetching project specifications and test suites from database...</p>
+          </div>
+
+          <!-- Not Found Fallback View -->
+          <div id="detail-not-found-view" class="empty-state" style="display: none; padding: 60px 20px;">
+            <div class="empty-state-icon" style="color: var(--color-red, #ef4444); border-color: rgba(239, 68, 68, 0.4);">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+              </svg>
+            </div>
+            <h3 class="empty-state-title">Project Not Found</h3>
+            <p class="empty-state-desc">The requested QA project could not be found or may have been deleted.</p>
+            <button type="button" class="btn btn-primary btn-sm" id="detail-not-found-back-btn" style="margin-top: 10px;">
+              <span>Back to My Projects</span>
+            </button>
+          </div>
+
+          <!-- Project Details Main Content Container -->
+          <div id="detail-content-wrap">
+            <!-- Details Hero / Header -->
+            <div class="detail-header-card">
             <div class="detail-header-main">
               <div class="detail-title-row">
                 <h2 id="detail-name" class="detail-title">Project Name</h2>
@@ -1574,7 +1615,8 @@
               <!-- Populated dynamically via script.js -->
             </div>
           </div>
-        </section>
+        </div>
+      </section>
 
         <!-- 3. TEST PLANS WORKSPACE VIEW (Prompt 3 Full Dynamic Architecture) -->
         <section id="view-plans" class="view-section">

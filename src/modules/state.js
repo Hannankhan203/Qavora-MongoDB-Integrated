@@ -43,3 +43,13 @@ export function getActiveProject() {
     null
   );
 }
+
+export function getPendingDelete() {
+  return _appState.pendingDelete;
+}
+
+export function setPendingDelete(val) {
+  _appState.pendingDelete = val;
+}
+
+

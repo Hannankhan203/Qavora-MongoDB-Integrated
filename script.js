@@ -38,7 +38,16 @@ import {
   saveTestPlan,
   saveTestSuite,
   saveTestCase,
-  duplicateTestCase
+  duplicateTestCase,
+  addPhase,
+  updatePhase,
+  deletePhase,
+  deleteTestSuite,
+  deleteTestCase,
+  populateProjectsDropdown,
+  renderTestPlanWorkspace,
+  openSuiteExplorer,
+  closeSuiteExplorer
 } from './src/modules/testPlanManager.js';
 import { saveExecutionResult } from './src/modules/executionManager.js';
 import { saveDefect, updateDefectQuickStatus } from './src/modules/defectManager.js';
@@ -66,6 +75,10 @@ async function init() {
       await loadProjectsFromBackend();
       updateSidebarProjectCounters();
       renderProjectsGrid();
+      populateProjectsDropdown();
+      if (getAppState().currentRoute === '/plans') {
+        renderTestPlanWorkspace();
+      }
       if (typeof initChecklistGenerator === 'function') {
         initChecklistGenerator();
       }
@@ -79,6 +92,11 @@ async function init() {
     onUnauthenticated: () => {
       setProjects([]);
       updateSidebarProjectCounters();
+      renderProjectsGrid();
+      populateProjectsDropdown();
+      if (getAppState().currentRoute === '/plans') {
+        renderTestPlanWorkspace();
+      }
     }
   });
 }
@@ -107,6 +125,15 @@ if (typeof window !== 'undefined') {
     saveTestSuite,
     saveTestCase,
     duplicateTestCase,
+    addPhase,
+    updatePhase,
+    deletePhase,
+    deleteTestSuite,
+    deleteTestCase,
+    populateProjectsDropdown,
+    renderTestPlanWorkspace,
+    openSuiteExplorer,
+    closeSuiteExplorer,
     saveExecutionResult,
     saveDefect,
     updateDefectQuickStatus,
