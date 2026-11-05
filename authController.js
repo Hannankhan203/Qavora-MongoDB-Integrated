@@ -203,14 +203,12 @@ export const authController = {
         };
       } catch (networkErr) {
         console.warn('Qavora: Could not reach /api/auth/me during initialization', networkErr.message);
-        // Do not prematurely wipe valid stored token if server or network is temporarily offline
         _state = 'unauthenticated';
         _notifyListeners();
         return {
           ok: false,
           state: _state,
           user: null,
-          token: _token,
           isOffline: true
         };
       } finally {
@@ -286,7 +284,6 @@ export const authController = {
         error: (data && data.error) ? data.error : 'Invalid email or password.'
       };
     } catch (networkErr) {
-      _token = null;
       _user = null;
       _state = 'unauthenticated';
       _notifyListeners();
@@ -388,7 +385,6 @@ export const authController = {
         error: (data && data.error) ? data.error : 'Registration failed.'
       };
     } catch (networkErr) {
-      _token = null;
       _user = null;
       _state = 'unauthenticated';
       _notifyListeners();

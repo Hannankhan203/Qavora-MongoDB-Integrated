@@ -246,188 +246,9 @@ app.use('/api', (req: Request, res: Response, next: NextFunction) => {
 });
 
 // ============================================================================
-// 3. MongoDB Connection Handling & In-Memory Mock Fallback
+// 3. MongoDB Connection Handling
 // ============================================================================
-function matchesFilter(doc: any, filter: any = {}): boolean {
-  if (!filter || typeof filter !== 'object') return true;
-  for (const [key, val] of Object.entries(filter)) {
-    if (key === '$or' && Array.isArray(val)) {
-      if (!val.some((sub) => matchesFilter(doc, sub))) return false;
-      continue;
-    }
-    const docVal = doc[key];
-    if (val instanceof ObjectId || docVal instanceof ObjectId) {
-      if (String(docVal) !== String(val)) return false;
-    } else if (docVal !== val) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function createInMemoryDb() {
-  const collections = new Map<string, any[]>();
-  const getCol = (name: string) => {
-    if (!collections.has(name)) {
-      collections.set(name, []);
-    }
-    return collections.get(name)!;
-  };
-
-  return {
-    __isMock: true,
-    collection(name: string) {
-      const store = getCol(name);
-      return {
-        async createIndex() {
-          return 'ok';
-        },
-        find(filter: any = {}) {
-          let sortField: string | null = null;
-          let sortDir = 1;
-          let limitCount: number | null = null;
-          return {
-            sort(spec?: any) {
-              if (spec && typeof spec === 'object') {
-                const entries = Object.entries(spec);
-                if (entries.length > 0) {
-                  sortField = entries[0][0];
-                  sortDir = entries[0][1] === -1 ? -1 : 1;
-                }
-              }
-              return this;
-            },
-            limit(n: number) {
-              limitCount = n;
-              return this;
-            },
-            skip() { return this; },
-            async toArray() {
-              let res = store.filter((doc) => matchesFilter(doc, filter)).map((d) => ({ ...d }));
-              if (sortField) {
-                res.sort((a, b) => {
-                  const valA = a[sortField!];
-                  const valB = b[sortField!];
-                  if (valA < valB) return -1 * sortDir;
-                  if (valA > valB) return 1 * sortDir;
-                  return 0;
-                });
-              }
-              if (typeof limitCount === 'number' && limitCount > 0) {
-                res = res.slice(0, limitCount);
-              }
-              return res;
-            }
-          };
-        },
-        async findOne(filter: any = {}) {
-          const found = store.find((doc) => matchesFilter(doc, filter));
-          return found ? { ...found } : null;
-        },
-        async countDocuments(filter: any = {}) {
-          return store.filter((doc) => matchesFilter(doc, filter)).length;
-        },
-        async insertOne(doc: any) {
-          const insertedId = doc._id || new ObjectId();
-          const record = { ...doc, _id: insertedId };
-          store.push(record);
-          return { insertedId, acknowledged: true };
-        },
-        async insertMany(docs: any[]) {
-          const insertedIds: Record<number, any> = {};
-          docs.forEach((doc, idx) => {
-            const insertedId = doc._id || new ObjectId();
-            const record = { ...doc, _id: insertedId };
-            store.push(record);
-            insertedIds[idx] = insertedId;
-          });
-          return { insertedIds, insertedCount: docs.length, acknowledged: true };
-        },
-        async updateOne(filter: any, update: any, options: any = {}) {
-          const idx = store.findIndex((doc) => matchesFilter(doc, filter));
-          if (idx === -1) {
-            if (options?.upsert) {
-              const base = update?.$setOnInsert ? { ...update.$setOnInsert } : {};
-              const setFields = update?.$set ? { ...update.$set } : {};
-              const insertedId = base._id || new ObjectId();
-              store.push({ ...base, ...setFields, _id: insertedId });
-              return { matchedCount: 0, modifiedCount: 0, upsertedCount: 1, upsertedId: insertedId };
-            }
-            return { matchedCount: 0, modifiedCount: 0, upsertedCount: 0 };
-          }
-          if (update?.$set) {
-            store[idx] = { ...store[idx], ...update.$set };
-          }
-          return { matchedCount: 1, modifiedCount: 1, upsertedCount: 0 };
-        },
-        async updateMany(filter: any, update: any) {
-          let count = 0;
-          for (let i = 0; i < store.length; i++) {
-            if (matchesFilter(store[i], filter)) {
-              if (update?.$set) {
-                store[i] = { ...store[i], ...update.$set };
-              }
-              count++;
-            }
-          }
-          return { matchedCount: count, modifiedCount: count, acknowledged: true };
-        },
-        async findOneAndUpdate(filter: any, update: any, options: any = {}) {
-          const idx = store.findIndex((doc) => matchesFilter(doc, filter));
-          if (idx === -1) return null;
-          const before = { ...store[idx] };
-          if (update?.$set) {
-            store[idx] = { ...store[idx], ...update.$set };
-          }
-          return options?.returnDocument === 'before' ? before : { ...store[idx] };
-        },
-        async deleteOne(filter: any) {
-          const idx = store.findIndex((doc) => matchesFilter(doc, filter));
-          if (idx === -1) return { deletedCount: 0 };
-          store.splice(idx, 1);
-          return { deletedCount: 1 };
-        },
-        async deleteMany(filter: any = {}) {
-          let count = 0;
-          for (let i = store.length - 1; i >= 0; i--) {
-            if (matchesFilter(store[i], filter)) {
-              store.splice(i, 1);
-              count++;
-            }
-          }
-          return { deletedCount: count, acknowledged: true };
-        },
-        async bulkWrite(operations: any[]) {
-          let upsertedCount = 0;
-          let matchedCount = 0;
-          for (const op of operations) {
-            if (op?.updateOne) {
-              const { filter, update, upsert } = op.updateOne;
-              const idx = store.findIndex((doc) => matchesFilter(doc, filter));
-              if (idx === -1) {
-                if (upsert) {
-                  const base = update?.$setOnInsert ? { ...update.$setOnInsert } : {};
-                  const setFields = update?.$set ? { ...update.$set } : {};
-                  store.push({ ...base, ...setFields, _id: base._id || new ObjectId() });
-                  upsertedCount++;
-                }
-              } else {
-                matchedCount++;
-                if (update?.$set) {
-                  store[idx] = { ...store[idx], ...update.$set };
-                }
-              }
-            }
-          }
-          return { upsertedCount, matchedCount };
-        }
-      };
-    }
-  };
-}
-
-const mockDb = createInMemoryDb();
-let db: any = (isProduction || isVercel) ? null : mockDb;
+let db: any = null;
 let mongoClientInstance: MongoClient | null = null;
 let connectionPromise: Promise<any> | null = null;
 
@@ -775,6 +596,62 @@ async function runMongoNetworkDiagnostics(connectionUri: string): Promise<void> 
   }
 }
 
+// ============================================================================
+// Multi-Tenant Unique Index Migration & Safety Helper (M-01)
+// ============================================================================
+async function ensureMultiTenantUniqueIndex(col: any, collectionName: string): Promise<boolean> {
+  try {
+    const existingIndexes = await col.indexes().catch(() => []);
+
+    // 1. Drop legacy global unique index on { id: 1 } if present
+    for (const idx of existingIndexes) {
+      if (idx.name !== '_id_' && idx.unique && Object.keys(idx.key).length === 1 && idx.key.id === 1) {
+        try {
+          console.log(`[Qavora Server] Dropping legacy global unique index '${idx.name}' on ${collectionName}...`);
+          await col.dropIndex(idx.name);
+          console.log(`[Qavora Server] Successfully dropped legacy global unique index '${idx.name}' on ${collectionName}.`);
+        } catch (dropErr: any) {
+          console.warn(`[Qavora Server] Warning dropping legacy index '${idx.name}' on ${collectionName}: ${sanitizeDiagnosticText(dropErr?.message)}`);
+        }
+      }
+
+      // If a non-unique compound index on { userId: 1, id: 1 } exists, drop it so it can be re-created with unique: true
+      if (idx.name !== '_id_' && !idx.unique && Object.keys(idx.key).length === 2 && idx.key.userId === 1 && idx.key.id === 1) {
+        try {
+          console.log(`[Qavora Server] Dropping legacy non-unique compound index '${idx.name}' on ${collectionName}...`);
+          await col.dropIndex(idx.name);
+          console.log(`[Qavora Server] Successfully dropped legacy non-unique index '${idx.name}' on ${collectionName}.`);
+        } catch (dropErr: any) {
+          console.warn(`[Qavora Server] Warning dropping non-unique index '${idx.name}' on ${collectionName}: ${sanitizeDiagnosticText(dropErr?.message)}`);
+        }
+      }
+    }
+
+    // 2. Safely scan for duplicate records for the same user before index creation
+    const duplicates = await col.aggregate([
+      { $group: { _id: { userId: "$userId", id: "$id" }, count: { $sum: 1 } } },
+      { $match: { count: { $gt: 1 }, "_id.userId": { $ne: null }, "_id.id": { $ne: null } } }
+    ]).toArray().catch(() => []);
+
+    if (duplicates && duplicates.length > 0) {
+      console.error(
+        `[Qavora Server ERROR] Cannot create compound unique index on ${collectionName} ({ userId: 1, id: 1 }). ` +
+        `Existing duplicate records found for the same user: ${JSON.stringify(duplicates)}. ` +
+        `Index creation stopped safely without altering or deleting existing user data.`
+      );
+      return false;
+    }
+
+    // 3. Create the compound unique index { userId: 1, id: 1 }
+    await col.createIndex({ userId: 1, id: 1 }, { unique: true });
+    console.log(`[Qavora Server] Ensured multi-tenant compound unique index on ${collectionName} ({ userId: 1, id: 1 }).`);
+    return true;
+  } catch (err: any) {
+    console.warn(`[Qavora Server] Warning configuring multi-tenant compound unique index on ${collectionName}: ${sanitizeDiagnosticText(err?.message)}`);
+    return false;
+  }
+}
+
 async function connectToDatabase(): Promise<any> {
   const currentUri = process.env.MONGODB_URI?.trim();
   const currentDbName = process.env.MONGODB_DB || 'qavora';
@@ -782,13 +659,8 @@ async function connectToDatabase(): Promise<any> {
   const currentIsVercel = Boolean(process.env.VERCEL || process.env.NOW_REGION);
 
   // If already connected to real MongoDB, return immediately (warm invocation reuse)
-  if (db && !db.__isMock) {
+  if (db) {
     return db;
-  }
-
-  // Never allow mockDb to remain active in production or Vercel
-  if (db?.__isMock && (currentIsProd || currentIsVercel)) {
-    db = null;
   }
 
   // If a connection attempt is already in flight, await the existing promise
@@ -801,17 +673,12 @@ async function connectToDatabase(): Promise<any> {
     try {
       if (!currentUri) {
         if (currentIsProd && !currentIsVercel) {
-          console.error('[Qavora Server FATAL] Production startup failed: MONGODB_URI environment variable is missing. In-memory fallback is strictly disabled in production.');
+          console.error('[Qavora Server FATAL] Production startup failed: MONGODB_URI environment variable is missing.');
           process.exit(1);
         }
-        if (currentIsProd || currentIsVercel) {
-          db = null;
-          console.warn('[Qavora Server] MONGODB_URI is missing in serverless/production environment; database remains offline (HTTP 503).');
-          return null;
-        }
-        console.log('[Qavora Server] MongoDB credentials not provided in environment; using in-memory mock responses.');
-        db = mockDb;
-        return db;
+        db = null;
+        console.warn('[Qavora Server] MONGODB_URI is missing in environment; database remains offline (HTTP 503).');
+        return null;
       }
 
       await runMongoNetworkDiagnostics(currentUri);
@@ -828,25 +695,22 @@ async function connectToDatabase(): Promise<any> {
       db = client.db(currentDbName);
       console.log(`[Qavora Server] Successfully connected to MongoDB Atlas (database: ${currentDbName}).`);
 
-      // Ensure indexes safely with non-fatal logging
+      // Ensure multi-tenant compound unique index on projects collection ({ userId: 1, id: 1 })
+      await ensureMultiTenantUniqueIndex(db.collection("projects"), "projects");
       try {
-        await db.collection("projects").createIndex({ id: 1 }, { unique: true });
-      } catch (idxErr: any) {
-        console.warn(`[Qavora Server] Warning creating unique index on projects.id: ${sanitizeDiagnosticText(idxErr?.message)}`);
-      }
-      try {
-        await db.collection("projects").createIndex({ userId: 1, id: 1 });
         await db.collection("projects").createIndex({ userId: 1, status: 1 });
         await db.collection("projects").createIndex({ userId: 1 });
-        console.log(`[Qavora Server] Ensured tenant-isolation indexes on projects collection (userId, id, status).`);
+        console.log(`[Qavora Server] Ensured tenant-isolation auxiliary indexes on projects collection (userId, status).`);
       } catch (idxErr: any) {
-        console.warn(`[Qavora Server] Warning creating tenant isolation indexes on projects: ${sanitizeDiagnosticText(idxErr?.message)}`);
+        console.warn(`[Qavora Server] Warning creating auxiliary indexes on projects: ${sanitizeDiagnosticText(idxErr?.message)}`);
       }
+
       try {
         await db.collection("tests").createIndex({ userId: 1 });
       } catch (idxErr: any) {
         console.warn(`[Qavora Server] Warning creating index on tests: ${sanitizeDiagnosticText(idxErr?.message)}`);
       }
+
       try {
         await db.collection("users").createIndex({ email: 1 }, { unique: true });
         await db.collection("users").createIndex({ userId: 1 }, { unique: true });
@@ -854,18 +718,16 @@ async function connectToDatabase(): Promise<any> {
       } catch (idxErr: any) {
         console.warn(`[Qavora Server] Warning creating unique index on users: ${sanitizeDiagnosticText(idxErr?.message)}`);
       }
+
+      // Ensure multi-tenant compound unique index on checklists collection ({ userId: 1, id: 1 })
+      await ensureMultiTenantUniqueIndex(db.collection("checklists"), "checklists");
       try {
-        await db.collection("checklists").createIndex({ id: 1 }, { unique: true });
-      } catch (idxErr: any) {
-        console.warn(`[Qavora Server] Warning creating unique index on checklists.id: ${sanitizeDiagnosticText(idxErr?.message)}`);
-      }
-      try {
-        await db.collection("checklists").createIndex({ userId: 1, id: 1 });
         await db.collection("checklists").createIndex({ userId: 1 });
-        console.log(`[Qavora Server] Ensured tenant-isolation indexes on checklists collection (userId, id).`);
+        console.log(`[Qavora Server] Ensured tenant-isolation auxiliary index on checklists collection (userId).`);
       } catch (idxErr: any) {
-        console.warn(`[Qavora Server] Warning creating tenant isolation indexes on checklists: ${sanitizeDiagnosticText(idxErr?.message)}`);
+        console.warn(`[Qavora Server] Warning creating auxiliary index on checklists: ${sanitizeDiagnosticText(idxErr?.message)}`);
       }
+
       try {
         await db.collection("recovery_snapshots").createIndex({ userId: 1, createdAt: -1 });
         await db.collection("recovery_snapshots").createIndex({ userId: 1, snapshotId: 1 });
@@ -877,31 +739,22 @@ async function connectToDatabase(): Promise<any> {
       return db;
     } catch (error: any) {
       const safeErrorMessage = sanitizeDiagnosticText(error?.message || "Unknown error");
+      const diagnostics = buildMongoConnectionDiagnostics(error, attemptedClient);
 
       if (currentIsProd && !currentIsVercel) {
         db = null;
-        const diagnostics = buildMongoConnectionDiagnostics(error, attemptedClient);
         console.error(
-          `[Qavora Server FATAL] Production startup failed: Unable to connect to MongoDB Atlas (${safeErrorMessage}). In-memory fallback is strictly disabled in production.`,
+          `[Qavora Server FATAL] Production startup failed: Unable to connect to MongoDB Atlas (${safeErrorMessage}).`,
           JSON.stringify(diagnostics)
         );
         process.exit(1);
-      } else if (currentIsProd || currentIsVercel) {
-        db = null;
-        const diagnostics = buildMongoConnectionDiagnostics(error, attemptedClient);
-        console.error(
-          `[Qavora Server] MongoDB connection failure diagnostics (serverless/production): ${JSON.stringify(diagnostics)}`
-        );
-        console.warn(`[Qavora Server] MongoDB connection offline in serverless/production: ${safeErrorMessage}.`);
-        return null;
       } else {
-        db = mockDb;
-        console.warn(`[Qavora Server] MongoDB connection offline (${safeErrorMessage}) — falling back to in-memory mock responses.`);
-        return db;
+        db = null;
+        console.warn(`[Qavora Server] MongoDB connection offline (${safeErrorMessage}).`, JSON.stringify(diagnostics));
+        return null;
       }
-      return null;
     } finally {
-      if (!db || db.__isMock) {
+      if (!db) {
         connectionPromise = null;
       }
     }
@@ -930,14 +783,8 @@ app.use(async (req: Request, res: Response, next: NextFunction) => {
     return next();
   }
 
-  const currentIsProd = process.env.NODE_ENV === 'production';
-  const currentIsVercel = Boolean(process.env.VERCEL || process.env.NOW_REGION);
-  if (db?.__isMock && (currentIsProd || currentIsVercel)) {
-    db = null;
-  }
-
   const activeUri = process.env.MONGODB_URI?.trim();
-  if ((!db || db.__isMock) && activeUri) {
+  if (!db && activeUri) {
     try {
       await connectToDatabase();
     } catch (err: any) {
@@ -948,28 +795,9 @@ app.use(async (req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-// Default mock tests for QA verification
-const mockTests = [
-  { _id: "qav-test-001", name: "User Registration & Form Validation", status: "Passed" },
-  { _id: "qav-test-002", name: "Authentication Session Expiry Check", status: "Active" },
-  { _id: "qav-test-003", name: "Manual Test Suite Export & Import", status: "Passed" },
-  { _id: "qav-test-004", name: "Cross-Device Checklist Synchronization", status: "Active" },
-  { _id: "qav-test-005", name: "Defect Logging & Severity Assignment", status: "Passed" }
-];
-
-// In-memory fallback projects store when MongoDB is offline
-const inMemoryProjects: any[] = [];
-
 // Health check endpoint
 app.get("/api/health", async (req: Request, res: Response) => {
-  const currentIsProd = process.env.NODE_ENV === 'production';
-  const currentIsVercel = Boolean(process.env.VERCEL || process.env.NOW_REGION);
-
-  if (db?.__isMock && (currentIsProd || currentIsVercel)) {
-    db = null;
-  }
-
-  if (!db || (db.__isMock && Boolean(process.env.MONGODB_URI?.trim()))) {
+  if (!db && Boolean(process.env.MONGODB_URI?.trim())) {
     try {
       await connectToDatabase();
     } catch (err: any) {
@@ -979,9 +807,7 @@ app.get("/api/health", async (req: Request, res: Response) => {
     }
   }
 
-  const databaseStatus = db && !db.__isMock
-    ? "connected"
-    : (currentIsProd || currentIsVercel ? "disconnected" : "mock-active");
+  const databaseStatus = db ? "connected" : "disconnected";
 
   return res.json({
     success: true,
@@ -2994,13 +2820,10 @@ app.delete("/api/checklists/:id", requireAuth, async (req: Request, res: Respons
   }
 });
 
-// Route-level fallback for database errors
+// Route-level error handler for database connection failures
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {
   if (err?.name === 'MongooseError' || err?.name === 'MongoNetworkError' || (err?.message && err.message.includes('buffering timed out'))) {
-    console.warn('[AI Studio] Database offline — returning mock empty response');
-    if (req.method === 'GET') {
-      return res.json(req.path.endsWith('s') || req.path.endsWith('s/') ? [] : {});
-    }
+    console.warn('[Qavora Server] Database offline — returning 503 response');
     return res.status(503).json({ error: 'Service temporarily unavailable (database offline)' });
   }
   next(err);
@@ -3136,9 +2959,9 @@ async function closeDatabase(): Promise<void> {
     await mongoClientInstance.close();
     mongoClientInstance = null;
   }
-  db = (isProduction || isVercel) ? null : mockDb;
+  db = null;
   connectionPromise = null;
 }
 
-export { connectToDatabase, closeDatabase, loginRateLimiter, registerRateLimiter };
+export { connectToDatabase, closeDatabase, loginRateLimiter, registerRateLimiter, ensureMultiTenantUniqueIndex };
 export default app;
