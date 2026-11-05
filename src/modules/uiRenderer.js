@@ -7,7 +7,7 @@
 
 import authController from '../../authController.js';
 import { getAppState } from './state.js';
-import { createProject, updateSidebarProjectCounters } from './projectManager.js';
+import { createProject, updateSidebarProjectCounters, renderProjectsGrid } from './projectManager.js';
 
 let _listenersBound = false;
 
@@ -30,29 +30,30 @@ export function showToast(message, type = 'info') {
 
 export function navigateTo(route, pushState = true) {
   const appState = getAppState();
-  appState.currentRoute = route || '/projects';
+  const cleanRoute = route && route !== '/' ? route : '/projects';
+  appState.currentRoute = cleanRoute;
 
-  if (typeof window !== 'undefined' && pushState && window.location.pathname !== appState.currentRoute) {
+  if (typeof window !== 'undefined' && pushState && window.location.pathname !== cleanRoute) {
     try {
-      window.history.pushState({ route: appState.currentRoute }, '', appState.currentRoute);
+      window.history.pushState({ route: cleanRoute }, '', cleanRoute);
     } catch {
       // Ignore history pushState errors
     }
   }
 
   if (typeof document !== 'undefined') {
-    const navLinks = document.querySelectorAll('[data-route]');
-    navLinks.forEach((el) => {
-      const target = el.getAttribute('data-route');
-      el.classList.toggle('active', target === appState.currentRoute);
+    const viewSlug = cleanRoute.replace(/^\//, '').split('/')[0] || 'projects';
+
+    const navItems = document.querySelectorAll('.nav-item[data-view]');
+    navItems.forEach((el) => {
+      const targetView = el.getAttribute('data-view');
+      el.classList.toggle('active', targetView === viewSlug);
     });
 
-    const routeSlug = appState.currentRoute.replace(/^\//, '').split('/')[0] || 'projects';
-    const views = document.querySelectorAll('[data-view], .view-section');
+    const views = document.querySelectorAll('.view-section');
     views.forEach((view) => {
-      const viewName = view.getAttribute('data-view') || view.id.replace(/^view-/, '');
-      const isMatch = viewName === routeSlug || (routeSlug === 'projects' && viewName === 'my-projects');
-      view.style.display = isMatch ? '' : 'none';
+      const isMatch = view.id === `view-${viewSlug}`;
+      view.style.display = isMatch ? 'block' : 'none';
       view.classList.toggle('active', isMatch);
     });
   }
@@ -98,18 +99,24 @@ export function initUIEventListeners() {
   sidebarCloseBtn?.addEventListener('click', closeSidebar);
   sidebarOverlay?.addEventListener('click', closeSidebar);
 
-  // 3. Sidebar navigation links
+  // 3. Sidebar navigation links (.nav-item[data-view]) & browser popstate
   document.addEventListener('click', (e) => {
-    const target = e.target instanceof Element ? e.target.closest('[data-route]') : null;
+    const target = e.target instanceof Element ? e.target.closest('.nav-item[data-view]') : null;
     if (target) {
       e.preventDefault();
-      const route = target.getAttribute('data-route');
-      if (route) {
-        navigateTo(route, true);
+      const viewName = target.getAttribute('data-view');
+      if (viewName) {
+        navigateTo(`/${viewName}`, true);
         closeSidebar();
       }
     }
   });
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('popstate', () => {
+      navigateTo(resolveInitialRoute(), false);
+    });
+  }
 
   // 4. Notifications panel toggle
   const notifBtn = document.getElementById('notification-btn');
@@ -159,37 +166,57 @@ export function initUIEventListeners() {
   });
 
   // 6. New Project modal & buttons
-  const projectModal = document.getElementById('project-modal');
-  const openProjectModalBtns = document.querySelectorAll(
-    '#panel-new-project-btn, .plans-create-project-btn, [data-action="new-project"]'
-  );
-  openProjectModalBtns.forEach((btn) => {
-    btn.addEventListener('click', () => {
-      if (projectModal) {
-        projectModal.style.display = 'flex';
-        projectModal.classList.add('open');
-      }
-    });
+  const projectForm = document.getElementById('create-project-form');
+  const projectModalOverlay = projectForm?.closest('.modal-overlay') || document.getElementById('modal-project-overlay');
+  const modalCloseBtn = document.getElementById('modal-close-btn');
+  const modalCancelBtn = document.getElementById('modal-cancel-btn');
+
+  const openProjectModal = () => {
+    if (projectModalOverlay) {
+      projectModalOverlay.style.display = 'flex';
+      projectModalOverlay.classList.add('active');
+    }
+  };
+
+  const closeProjectModal = () => {
+    if (projectModalOverlay) {
+      projectModalOverlay.style.display = 'none';
+      projectModalOverlay.classList.remove('active');
+    }
+  };
+
+  document.addEventListener('click', (e) => {
+    const btn = e.target instanceof Element
+      ? e.target.closest('#projects-create-btn, #panel-new-project-btn, .plans-create-project-btn, #empty-projects-create-btn, [data-action="new-project"]')
+      : null;
+    if (btn) {
+      e.preventDefault();
+      openProjectModal();
+    }
   });
 
-  const projectForm = document.getElementById('project-form');
+  modalCloseBtn?.addEventListener('click', closeProjectModal);
+  modalCancelBtn?.addEventListener('click', closeProjectModal);
+
   projectForm?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const nameInput = document.getElementById('project-name-input');
     const typeInput = document.getElementById('project-type-input');
     const name = nameInput?.value?.trim();
-    if (!name) return;
+    if (!name) {
+      const errAlert = document.getElementById('modal-error-alert');
+      if (errAlert) errAlert.style.display = 'flex';
+      return;
+    }
     const res = await createProject({
       name,
       type: typeInput?.value?.trim() || 'Web App'
     });
     if (res.ok) {
       updateSidebarProjectCounters();
+      renderProjectsGrid();
       showToast('Project created successfully.', 'success');
-      if (projectModal) {
-        projectModal.style.display = 'none';
-        projectModal.classList.remove('open');
-      }
+      closeProjectModal();
       projectForm.reset();
     } else {
       showToast(res.error || 'Failed to create project.', 'error');

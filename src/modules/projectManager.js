@@ -88,3 +88,31 @@ export function updateSidebarProjectCounters() {
     countEl.textContent = String(projects.length);
   }
 }
+
+export function renderProjectsGrid() {
+  if (typeof document === 'undefined') return;
+  const projects = getProjects();
+  const totalEl = document.getElementById('my-stat-total');
+  if (totalEl) totalEl.textContent = String(projects.length);
+
+  const grid = document.getElementById('projects-grid');
+  if (!grid) return;
+
+  if (projects.length === 0) {
+    grid.innerHTML = '';
+    return;
+  }
+
+  grid.innerHTML = projects
+    .map(
+      (p) => `
+      <div class="project-card" data-project-id="${String(p.id || '')}">
+        <div class="project-card-header">
+          <h3 class="project-card-title">${String(p.name || 'Untitled Project')}</h3>
+          <span class="status-badge">${String(p.status || 'Active')}</span>
+        </div>
+        <p class="project-card-meta">${String(p.type || 'Web App')} · v${String(p.version || '1.0.0')}</p>
+      </div>`
+    )
+    .join('');
+}

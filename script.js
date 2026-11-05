@@ -31,7 +31,8 @@ import {
   updateProjectMetadata,
   saveProjectData,
   deleteProjectById,
-  updateSidebarProjectCounters
+  updateSidebarProjectCounters,
+  renderProjectsGrid
 } from './src/modules/projectManager.js';
 import {
   saveTestPlan,
@@ -64,6 +65,7 @@ async function init() {
     onAuthenticated: async () => {
       await loadProjectsFromBackend();
       updateSidebarProjectCounters();
+      renderProjectsGrid();
       if (typeof initChecklistGenerator === 'function') {
         initChecklistGenerator();
       }
