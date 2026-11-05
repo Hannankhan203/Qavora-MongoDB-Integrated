@@ -28,16 +28,6 @@ function getCsrfTokenFromCookie() {
   return null;
 }
 
-function clearLegacyStoredToken() {
-  try {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.removeItem('qavora_auth_token_v1');
-    }
-  } catch (err) {
-    // Ignore storage access errors
-  }
-}
-
 // ============================================================================
 // Auth Controller State
 // ============================================================================
@@ -176,7 +166,6 @@ export const authController = {
       return _initPromise;
     }
 
-    clearLegacyStoredToken();
     _state = 'loading';
     _notifyListeners();
 
@@ -416,7 +405,6 @@ export const authController = {
    * Log out the current user: clears in-memory state and persistent token
    */
   async logout() {
-    clearLegacyStoredToken();
     try {
       const csrf = getCsrfTokenFromCookie();
       await fetch('/api/auth/logout', {
@@ -442,7 +430,6 @@ export const authController = {
    */
   handleUnauthorized() {
     const wasActive = Boolean(_user || _state !== 'unauthenticated');
-    clearLegacyStoredToken();
     _user = null;
     _state = 'unauthenticated';
 

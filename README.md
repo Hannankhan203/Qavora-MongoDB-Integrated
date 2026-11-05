@@ -125,7 +125,7 @@
 
 ## Data Management & Persistence
 
-Qavora is an **offline-first, browser-local application**. All user projects, checklists, execution logs, and defect records are stored locally in the user's browser using the Web Storage API (`localStorage`).
+Qavora uses **MongoDB exclusively for persistent data storage**. All user accounts, projects, test plans, test suites, execution logs, defect records, and QA checklists are stored securely in MongoDB with strict per-user tenant isolation.
 
 ### Persistence Features
 - **Deterministic Storage Keys**: Checklists and projects are stored under isolated, versioned keys.
@@ -158,19 +158,7 @@ Qavora includes a proprietary, zero-cloud transfer engine (`qaChecklistTransfer.
 
 ## Storage Architecture
 
-Qavora uses the following versioned keys in browser `localStorage`:
-
-| Key | Scope & Purpose |
-|---|---|
-| `qavora_qa_checklists_v1` | Array of saved manual QA checklists, phases, categories, tests, and completion statuses |
-| `qavora_qa_active_runner_v1` | Metadata and ID of the active checklist loaded in the QA Test Runner |
-| `qavora_projects_v1` | Registered projects, test plans, test suites, test cases, and defects |
-| `qavora_activities_v1` | Activity audit log tracking user actions and timestamped testing events |
-| `qavora_theme_preference` | User interface color theme preference (`dark` or `light`) |
-| `qavora_rollback_v1` | Pre-import recovery snapshot for disaster recovery rollback |
-
-### Backward Compatibility & Legacy Migration
-The storage store automatically detects and safely migrates legacy keys (`testpilot_qa_checklists_v1`, `testpilot_projects_v1`, `testpilot_activities_v1`, `testpilot_theme_preference`, `testpilot_rollback_v1`) to their corresponding `qavora_*` locations upon initial load, preserving all historical test records without user intervention.
+Qavora persists all application data in MongoDB collections (`users`, `projects`, `project_artifacts`, `checklists`) scoped by authenticated `userId`.
 
 ---
 
@@ -258,7 +246,7 @@ Test-Pilot/
 | **Logic** | Vanilla JavaScript (ES6+ Modules) | Modular client-side application logic and state controllers |
 | **Tooling & Bundling** | Vite 8 | Fast local development server and optimized production packaging |
 | **Static Typing Check** | TypeScript | Type validation across JavaScript and configuration files |
-| **Persistence** | Browser localStorage | Offline-first, browser-local client-side persistence |
+| **Persistence** | MongoDB | Server-side, tenant-isolated database persistence |
 | **Compression** | `CompressionStream` API | Raw deflate compression for compact transfer strings |
 | **Integrity** | Web Crypto API (`crypto.subtle`) | Cryptographic SHA-256 checksums for imported transfer files |
 | **Deployment** | GitHub Pages & GitHub Actions | Automated static hosting from the repository's `main` branch |
@@ -426,7 +414,7 @@ node test-issue-transfer-import.js
 ## Known Limitations
 
 - **Manual QA Tool**: Qavora is designed specifically for organizing and tracking manual testing; it does not execute automated browser tests (e.g., Selenium, Playwright, Cypress).
-- **Browser-Local Storage**: Data persistence depends on the browser's localStorage. Clearing browser website data will remove local records unless exported via JSON backup or TPX1 transfer code.
+- **Database Connectivity**: Data persistence requires an active MongoDB connection.
 - **No Real-Time Cloud Sync**: Checklists do not automatically synchronize in real time across devices; moving data between machines requires the user to generate and import a portable transfer code or backup file.
 - **No External Issue Tracker Sync**: Defect logging is maintained locally within the Qavora workspace and does not automatically synchronize with Jira, GitHub Issues, or Linear.
 
@@ -463,7 +451,7 @@ node test-issue-transfer-import.js
 ## Browser Compatibility
 
 Qavora is engineered for modern desktop and mobile browsers supporting standard web APIs:
-- `localStorage` Web Storage API
+- Fetch API with HttpOnly Cookies
 - `CompressionStream` & `DecompressionStream` APIs (with uncompressed JSON fallback)
 - Web Crypto API (`crypto.subtle.digest`)
 - ES6 JavaScript Modules (`import` / `export`)

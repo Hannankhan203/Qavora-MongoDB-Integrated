@@ -5,9 +5,6 @@
  * Qavora — Centralized Application State Module (CQ-003)
  */
 
-export const PROJECTS_STORAGE_KEY = 'qavora_projects_v1';
-export const ACTIVE_PROJECT_STORAGE_KEY = 'qavora_active_project_v1';
-export const THEME_STORAGE_KEY = 'qavora_theme_v1';
 
 const _appState = {
   projects: [],
@@ -36,17 +33,6 @@ export function getActiveProjectId() {
 
 export function setActiveProjectId(projectId) {
   _appState.activeProjectId = projectId || null;
-  try {
-    if (typeof localStorage !== 'undefined') {
-      if (projectId) {
-        localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, projectId);
-      } else {
-        localStorage.removeItem(ACTIVE_PROJECT_STORAGE_KEY);
-      }
-    }
-  } catch {
-    // Ignore storage errors
-  }
 }
 
 export function getActiveProject() {

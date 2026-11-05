@@ -2033,69 +2033,6 @@ app.delete("/api/projects/:id", requireAuth, async (req: Request, res: Response)
   }
 });
 
-// 7. POST /api/projects/sync-local - Local storage migration sync using $setOnInsert
-app.post("/api/projects/sync-local", requireAuth, async (req: Request, res: Response) => {
-  try {
-    const authReq = req as AuthenticatedRequest;
-    const userId = authReq.user!.userId;
-
-    const rawList = Array.isArray(req.body) ? req.body : req.body?.projects;
-    if (!Array.isArray(rawList)) {
-      return res.status(400).json({ error: "Payload must be an array of projects or an object with a 'projects' array." });
-    }
-
-    if (rawList.length === 0) {
-      return res.json({ success: true, count: 0, insertedCount: 0, matchedCount: 0 });
-    }
-
-    if (!db) {
-      return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
-    }
-
-    const operations = [];
-    for (const item of rawList) {
-      if (!item || typeof item !== 'object') continue;
-      const projId = (typeof item.id === 'string' && item.id.trim())
-        ? item.id.trim()
-        : (item.name ? `proj_${Date.now()}_${Math.random().toString(36).substring(2, 7)}` : null);
-
-      if (!projId) continue;
-
-      // Clone document and stamp authenticated userId, never trusting incoming userId
-      const docToInsert = { ...item, id: projId, userId };
-      delete docToInsert._id;
-
-      operations.push({
-        updateOne: {
-          filter: { id: projId, userId },
-          update: { $setOnInsert: docToInsert },
-          upsert: true
-        }
-      });
-    }
-
-    if (operations.length === 0) {
-      return res.json({ success: true, count: 0, insertedCount: 0, matchedCount: 0 });
-    }
-
-    const bulkResult = await db.collection("projects").bulkWrite(operations);
-
-    return res.json({
-      success: true,
-      count: operations.length,
-      insertedCount: bulkResult.upsertedCount,
-      matchedCount: bulkResult.matchedCount
-    });
-  } catch (error: any) {
-    const safeError = (error?.message || "Internal server error").replace(
-      /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
-      "mongodb+srv://[credentials-hidden]@"
-    );
-    console.error(`Error syncing local projects: ${safeError}`);
-    return res.status(500).json({ error: "Failed to sync local projects." });
-  }
-});
-
 // ============================================================================
 // Standalone QA Checklists MongoDB API Endpoints (DAT-001)
 // ============================================================================

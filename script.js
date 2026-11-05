@@ -23,7 +23,6 @@ import {
 } from './src/modules/state.js';
 import {
   initAuthAndSession,
-  syncLocalProjectsToBackend,
   updateUserProfileUI
 } from './src/modules/authSession.js';
 import {
@@ -93,7 +92,6 @@ if (typeof window !== 'undefined') {
     getActiveProjectId,
     setActiveProjectId,
     getActiveProject,
-    syncLocalProjectsToBackend,
     updateUserProfileUI,
     loadProjectsFromBackend,
     createProject,

@@ -7,28 +7,6 @@
 
 import authController from '../../authController.js';
 import { initAuthUI } from '../../authUI.js';
-import { apiJson } from './apiClient.js';
-import { PROJECTS_STORAGE_KEY } from './state.js';
-
-export async function syncLocalProjectsToBackend() {
-  try {
-    if (typeof localStorage === 'undefined') return;
-    const raw = localStorage.getItem(PROJECTS_STORAGE_KEY);
-    if (!raw) return;
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) return;
-
-    const res = await apiJson('/api/projects/sync-local', {
-      method: 'POST',
-      body: JSON.stringify({ projects: parsed })
-    });
-    if (res.ok) {
-      localStorage.removeItem(PROJECTS_STORAGE_KEY);
-    }
-  } catch {
-    // Non-fatal: keep local projects if sync fails
-  }
-}
 
 export function updateUserProfileUI(user) {
   if (typeof document === 'undefined') return;
@@ -59,7 +37,6 @@ export async function initAuthAndSession({ onAuthenticated, onUnauthenticated })
   authController.onAuthStateChanged(async (snapshot) => {
     updateUserProfileUI(snapshot.user);
     if (snapshot.isAuthenticated && snapshot.user) {
-      await syncLocalProjectsToBackend();
       if (typeof onAuthenticated === 'function') {
         await onAuthenticated(snapshot.user);
       }
