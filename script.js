@@ -44,7 +44,8 @@ import { saveDefect, updateDefectQuickStatus } from './src/modules/defectManager
 import {
   showToast,
   navigateTo,
-  resolveInitialRoute
+  resolveInitialRoute,
+  initUIEventListeners
 } from './src/modules/uiRenderer.js';
 
 let _initialized = false;
@@ -53,6 +54,7 @@ async function init() {
   if (_initialized) return;
   _initialized = true;
 
+  initUIEventListeners();
   const initialRoute = resolveInitialRoute();
   navigateTo(initialRoute, false);
 
