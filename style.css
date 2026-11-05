@@ -10480,3 +10480,1128 @@ body.mobile-nav-open {
     min-height: 38px !important;
   }
 }
+
+/* ==========================================================================
+   Phase 2: Complete Tablet UI/UX Refinement (600px - 1023px & Tablet Landscape)
+   ========================================================================== */
+
+/* 1. Global Tablet Foundation (600px to 1023px) */
+@media (min-width: 600px) and (max-width: 1023px) {
+  /* Container, Viewport & Wrapper */
+  .main-wrapper {
+    margin-left: 0 !important;
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .content-viewport {
+    padding: 20px 24px !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+  }
+
+  /* Tablet Drawer Sidebar */
+  .sidebar {
+    position: fixed !important;
+    top: 0 !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    width: 290px !important;
+    max-width: 80vw !important;
+    transform: translateX(-100%) !important;
+    z-index: 999 !important;
+    box-shadow: 6px 0 28px rgba(0, 0, 0, 0.45) !important;
+    transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1) !important;
+  }
+
+  .sidebar.open {
+    transform: translateX(0) !important;
+  }
+
+  .sidebar-overlay {
+    display: none;
+    position: fixed !important;
+    inset: 0 !important;
+    background-color: var(--bg-backdrop) !important;
+    backdrop-filter: blur(4px) !important;
+    z-index: 998 !important;
+  }
+
+  .sidebar-overlay.active {
+    display: block !important;
+  }
+
+  .sidebar-close-btn {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 42px !important;
+    height: 42px !important;
+    min-width: 42px !important;
+    min-height: 42px !important;
+  }
+
+  /* 2. Top Navigation Bar on Tablet */
+  .top-nav {
+    height: 60px !important;
+    padding: 0 20px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 12px !important;
+  }
+
+  .top-nav-left {
+    display: flex !important;
+    align-items: center !important;
+    gap: 12px !important;
+    flex: 0 1 auto !important;
+    min-width: 0 !important;
+  }
+
+  .icon-btn.sidebar-toggle-btn,
+  .sidebar-toggle-btn {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 42px !important;
+    height: 42px !important;
+    min-width: 42px !important;
+    min-height: 42px !important;
+  }
+
+  .page-title {
+    font-size: 1.15rem !important;
+    font-weight: 700 !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    max-width: 320px !important;
+    line-height: 1.25 !important;
+  }
+
+  .page-subtitle {
+    display: block !important;
+    font-size: 0.74rem !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    max-width: 320px !important;
+  }
+
+  .top-nav-right {
+    display: flex !important;
+    align-items: center !important;
+    gap: 10px !important;
+    flex-shrink: 0 !important;
+  }
+
+  .top-nav-right #header-create-btn {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    min-height: 40px !important;
+    padding: 8px 14px !important;
+    font-size: 0.82rem !important;
+    border-radius: var(--radius-sm) !important;
+  }
+
+  .top-nav-right #header-create-btn span {
+    display: inline !important;
+  }
+
+  .header-logout-btn {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    min-height: 40px !important;
+    padding: 7px 12px !important;
+    font-size: 0.8rem !important;
+    border-radius: var(--radius-sm) !important;
+  }
+
+  .header-logout-btn span {
+    display: inline !important;
+  }
+
+  .header-logout-btn svg.logout-icon {
+    width: 15px !important;
+    height: 15px !important;
+  }
+
+  .user-profile {
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    padding: 4px 8px !important;
+    border-radius: var(--radius-sm) !important;
+  }
+
+  .user-profile .user-meta {
+    display: flex !important;
+    flex-direction: column !important;
+  }
+
+  .user-profile .user-name {
+    font-size: 0.82rem !important;
+    font-weight: 600 !important;
+  }
+
+  .user-profile .user-role {
+    font-size: 0.7rem !important;
+  }
+
+  .notification-panel {
+    position: absolute !important;
+    right: 0 !important;
+    top: calc(100% + 8px) !important;
+    width: 360px !important;
+    max-width: 90vw !important;
+    z-index: 1000 !important;
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4) !important;
+  }
+
+  /* 3. Screen 1: Dashboard (#view-dashboard) */
+  .welcome-banner {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    padding: 20px 24px !important;
+    gap: 16px !important;
+    margin-bottom: 20px !important;
+  }
+
+  .welcome-heading {
+    font-size: 1.35rem !important;
+  }
+
+  .welcome-actions {
+    width: auto !important;
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 10px !important;
+    flex-shrink: 0 !important;
+  }
+
+  .welcome-actions .btn {
+    width: auto !important;
+    min-height: 42px !important;
+    padding: 8px 16px !important;
+  }
+
+  .stats-grid {
+    gap: 14px !important;
+  }
+
+  .charts-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 16px !important;
+    margin-bottom: 20px !important;
+  }
+
+  .chart-card canvas {
+    max-width: 100% !important;
+    height: 240px !important;
+    max-height: 260px !important;
+  }
+
+  .dashboard-sections-grid {
+    display: grid !important;
+    grid-template-columns: 1.15fr 0.85fr !important;
+    gap: 18px !important;
+    align-items: start !important;
+  }
+
+  .quick-actions-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+  }
+
+  .quick-action-card {
+    min-height: 52px !important;
+    padding: 12px 14px !important;
+  }
+
+  .activity-item {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 12px !important;
+    padding: 10px 12px !important;
+  }
+
+  /* 4. Screen 2: Projects (#view-projects) */
+  .section-hero {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    padding: 20px 24px !important;
+    gap: 16px !important;
+  }
+
+  .section-hero-actions {
+    width: auto !important;
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 10px !important;
+    flex-shrink: 0 !important;
+  }
+
+  .section-hero-actions .btn {
+    width: auto !important;
+    min-height: 42px !important;
+    padding: 8px 16px !important;
+  }
+
+  .filter-toolbar {
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: wrap !important;
+    align-items: center !important;
+    gap: 12px !important;
+    padding: 12px 16px !important;
+  }
+
+  .filter-search-group {
+    flex: 1 1 240px !important;
+    min-width: 200px !important;
+    width: auto !important;
+  }
+
+  .filter-dropdowns {
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: wrap !important;
+    align-items: center !important;
+    gap: 10px !important;
+    width: auto !important;
+    flex: 2 1 auto !important;
+  }
+
+  .filter-select-wrapper {
+    width: auto !important;
+    min-width: 140px !important;
+    flex: 1 1 auto !important;
+  }
+
+  .project-card-footer {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 10px !important;
+  }
+
+  .project-card-footer .card-action-group {
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 6px !important;
+    width: auto !important;
+  }
+
+  .project-card-footer .btn {
+    width: auto !important;
+    min-height: 40px !important;
+  }
+
+  /* 5. Screen 3: Project Details (#view-project-details) */
+  .detail-header-card {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    padding: 20px 24px !important;
+    gap: 16px !important;
+  }
+
+  .detail-header-actions {
+    width: auto !important;
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: wrap !important;
+    align-items: center !important;
+    gap: 10px !important;
+    flex-shrink: 0 !important;
+  }
+
+  .detail-header-actions .btn {
+    width: auto !important;
+    min-height: 40px !important;
+    padding: 8px 14px !important;
+  }
+
+  .detail-meta-grid {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 12px !important;
+  }
+
+  .detail-qa-stats-grid {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 12px !important;
+  }
+
+  .detail-suites-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 14px !important;
+  }
+
+  /* 6. Screen 4: Test Plans (#view-plans) */
+  .plans-top-bar {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    flex-wrap: wrap !important;
+    gap: 14px !important;
+    padding: 14px 18px !important;
+  }
+
+  .plans-project-picker-group,
+  .project-selector-group {
+    width: auto !important;
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 10px !important;
+    min-width: 0 !important;
+  }
+
+  .project-selector-group .select-wrapper,
+  .picker-select-wrapper {
+    width: auto !important;
+    min-width: 220px !important;
+    max-width: 320px !important;
+  }
+
+  .plans-top-actions {
+    width: auto !important;
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: wrap !important;
+    align-items: center !important;
+    gap: 10px !important;
+  }
+
+  .plans-top-actions .btn {
+    width: auto !important;
+    min-height: 40px !important;
+    padding: 8px 14px !important;
+  }
+
+  .phase-tabs {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    gap: 8px !important;
+    padding-bottom: 2px !important;
+  }
+
+  .phase-tab {
+    flex-shrink: 0 !important;
+    min-height: 42px !important;
+    padding: 8px 16px !important;
+  }
+
+  .suites-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 14px !important;
+  }
+
+  .cases-table-wrapper {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    border-radius: var(--radius-md) !important;
+  }
+
+  .cases-table {
+    min-width: 620px !important;
+    font-size: 0.84rem !important;
+  }
+
+  .cases-table th,
+  .cases-table td {
+    padding: 12px 14px !important;
+  }
+
+  /* 7. Screen 5: Test Execution (#view-execution) */
+  .exec-top-bar {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    flex-wrap: wrap !important;
+    gap: 14px !important;
+    padding: 14px 18px !important;
+  }
+
+  .exec-run-banner {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    padding: 18px 22px !important;
+    gap: 16px !important;
+  }
+
+  .exec-run-info {
+    flex: 1 !important;
+    min-width: 0 !important;
+  }
+
+  .exec-run-actions {
+    width: auto !important;
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 10px !important;
+    flex-shrink: 0 !important;
+  }
+
+  .exec-run-actions .btn {
+    width: auto !important;
+    min-height: 40px !important;
+    padding: 8px 14px !important;
+  }
+
+  .exec-metrics-bar {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 12px !important;
+    padding: 14px 18px !important;
+  }
+
+  .exec-filters-bar {
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: wrap !important;
+    align-items: center !important;
+    gap: 8px !important;
+  }
+
+  .exec-filter-btn {
+    min-height: 38px !important;
+    padding: 6px 14px !important;
+    font-size: 0.82rem !important;
+  }
+
+  /* 8. Screen 6: Defects (#view-defects) */
+  .defects-top-bar {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 14px !important;
+    padding: 14px 18px !important;
+  }
+
+  .defect-summary-pills {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 12px !important;
+  }
+
+  .defects-actions {
+    width: auto !important;
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 10px !important;
+    flex-shrink: 0 !important;
+  }
+
+  .defects-actions .btn {
+    width: auto !important;
+    min-height: 40px !important;
+    padding: 8px 14px !important;
+  }
+
+  /* 9. Screen 7: Reports (#view-reports) */
+  .reports-top-bar {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    flex-wrap: wrap !important;
+    gap: 14px !important;
+    padding: 14px 18px !important;
+  }
+
+  .reports-scope-selector {
+    width: auto !important;
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 10px !important;
+    min-width: 0 !important;
+  }
+
+  .reports-scope-selector .select-wrapper {
+    width: auto !important;
+    min-width: 220px !important;
+    max-width: 320px !important;
+  }
+
+  .reports-actions {
+    width: auto !important;
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 10px !important;
+    flex-shrink: 0 !important;
+  }
+
+  .reports-actions .btn {
+    width: auto !important;
+    min-height: 40px !important;
+    padding: 8px 14px !important;
+  }
+
+  .reports-kpi-grid {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 14px !important;
+  }
+
+  /* 10. Screen 8: Settings (#view-settings) */
+  .settings-container {
+    max-width: 820px !important;
+    margin: 0 auto !important;
+    padding: 24px !important;
+  }
+
+  .settings-field-group {
+    display: grid !important;
+    grid-template-columns: 200px 1fr !important;
+    align-items: center !important;
+    gap: 16px !important;
+  }
+
+  .settings-field-control {
+    width: 100% !important;
+    max-width: 440px !important;
+  }
+
+  .settings-btn-row {
+    display: flex !important;
+    flex-direction: row !important;
+    justify-content: flex-end !important;
+    align-items: center !important;
+    gap: 10px !important;
+  }
+
+  .settings-btn-row .btn {
+    width: auto !important;
+    min-height: 42px !important;
+    min-width: 130px !important;
+  }
+
+  .settings-storage-stats-row {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 12px !important;
+  }
+
+  /* 11. Screen 9: Data Management (#view-data) */
+  .data-mgmt-header {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 14px !important;
+    padding: 14px 18px !important;
+  }
+
+  .data-mgmt-actions {
+    width: auto !important;
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 10px !important;
+    flex-shrink: 0 !important;
+  }
+
+  .data-mgmt-actions .btn {
+    width: auto !important;
+    min-height: 40px !important;
+    padding: 8px 14px !important;
+  }
+
+  .storage-metrics-grid,
+  .mongo-storage-metrics-grid {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 14px !important;
+  }
+
+  .data-cards-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 16px !important;
+  }
+
+  .data-card {
+    padding: 20px !important;
+  }
+
+  .data-card .btn {
+    width: auto !important;
+    min-height: 40px !important;
+  }
+
+  .transfer-devices-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 14px !important;
+  }
+
+  /* 12. Screen 10: Checklist Generator (#view-checklist-generator) */
+  .qa-gen-hero {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    padding: 20px 24px !important;
+    gap: 16px !important;
+  }
+
+  .qa-gen-hero-actions {
+    width: auto !important;
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 10px !important;
+    flex-shrink: 0 !important;
+  }
+
+  .qa-gen-hero-actions .btn {
+    width: auto !important;
+    min-height: 40px !important;
+    padding: 8px 14px !important;
+  }
+
+  .qa-gen-input-card {
+    padding: 20px 24px !important;
+  }
+
+  .qa-gen-textarea {
+    min-height: 200px !important;
+    font-size: 0.92rem !important;
+  }
+
+  .qa-gen-submit-btn {
+    width: auto !important;
+    min-width: 220px !important;
+    min-height: 46px !important;
+    margin: 0 auto !important;
+  }
+
+  .qa-gen-preview-toolbar {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 12px !important;
+    padding: 12px 18px !important;
+  }
+
+  .qa-gen-preview-toolbar .btn {
+    width: auto !important;
+    min-height: 40px !important;
+  }
+
+  /* 13. Screen 11: My Checklists (#view-my-checklists) */
+  .qa-mychk-hero {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    padding: 20px 24px !important;
+    gap: 16px !important;
+  }
+
+  .qa-mychk-hero-actions {
+    width: auto !important;
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 10px !important;
+    flex-shrink: 0 !important;
+  }
+
+  .qa-mychk-hero-actions .btn {
+    width: auto !important;
+    min-height: 40px !important;
+    padding: 8px 14px !important;
+  }
+
+  .qa-mychk-stats-grid {
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    gap: 14px !important;
+  }
+
+  .qa-mychk-card {
+    padding: 18px !important;
+  }
+
+  .qa-mychk-card-footer {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 10px !important;
+  }
+
+  .qa-mychk-card-footer .btn {
+    width: auto !important;
+    min-height: 38px !important;
+  }
+
+  /* 14. Screen 12: QA Test Runner (#view-qa-runner) */
+  .qa-runner-top-bar {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 14px !important;
+    padding: 14px 18px !important;
+  }
+
+  .qa-runner-actions {
+    width: auto !important;
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 10px !important;
+    flex-shrink: 0 !important;
+  }
+
+  .qa-runner-actions .btn {
+    width: auto !important;
+    min-height: 40px !important;
+    padding: 8px 14px !important;
+  }
+
+  .qa-runner-metrics-grid {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 12px !important;
+  }
+
+  .qa-runner-test-row {
+    padding: 12px 16px !important;
+    min-height: 52px !important;
+  }
+
+  /* 15. Screen 13: Login & Register (#auth-container) */
+  .auth-container {
+    padding: 40px 24px !important;
+    min-height: 100vh !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+
+  .auth-card-wrapper {
+    max-width: 480px !important;
+    width: 100% !important;
+    margin: 0 auto !important;
+  }
+
+  .auth-card {
+    padding: 36px 32px !important;
+    border-radius: var(--radius-lg) !important;
+  }
+
+  .auth-tabs {
+    margin-bottom: 24px !important;
+  }
+
+  .auth-tab-btn {
+    min-height: 42px !important;
+  }
+
+  .auth-input-wrapper input {
+    height: 46px !important;
+  }
+
+  .auth-submit-btn {
+    min-height: 46px !important;
+    height: 46px !important;
+    font-size: 0.95rem !important;
+  }
+
+  /* 16. All 17 Modals & Dialogs on Tablets */
+  .modal-backdrop {
+    padding: 24px !important;
+    display: none;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+
+  .modal-backdrop.open {
+    display: flex !important;
+  }
+
+  .modal-dialog {
+    width: 100% !important;
+    max-width: min(580px, calc(100vw - 48px)) !important;
+    max-height: calc(100dvh - 48px) !important;
+    margin: auto !important;
+    border-radius: var(--radius-lg) !important;
+    display: flex !important;
+    flex-direction: column !important;
+    overflow: hidden !important;
+  }
+
+  .modal-dialog.modal-dialog-lg {
+    max-width: min(760px, calc(100vw - 48px)) !important;
+  }
+
+  .modal-dialog.modal-dialog-md {
+    max-width: min(640px, calc(100vw - 48px)) !important;
+  }
+
+  .modal-dialog.modal-dialog-sm {
+    max-width: min(460px, calc(100vw - 48px)) !important;
+  }
+
+  .modal-header {
+    padding: 16px 20px !important;
+    flex-shrink: 0 !important;
+  }
+
+  .modal-close-btn {
+    width: 40px !important;
+    height: 40px !important;
+    min-width: 40px !important;
+    min-height: 40px !important;
+  }
+
+  .modal-form,
+  .view-case-body,
+  .modal-body {
+    padding: 18px 20px !important;
+    gap: 14px !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    flex: 1 1 auto !important;
+  }
+
+  /* Multi-column form fields in tablet modals */
+  .form-row,
+  .form-row-2 {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 14px !important;
+  }
+
+  .modal-footer {
+    padding: 14px 20px !important;
+    display: flex !important;
+    flex-direction: row !important;
+    justify-content: flex-end !important;
+    align-items: center !important;
+    gap: 10px !important;
+    flex-shrink: 0 !important;
+  }
+
+  .modal-footer .btn {
+    width: auto !important;
+    min-width: 110px !important;
+    min-height: 42px !important;
+    justify-content: center !important;
+  }
+
+  /* Step Builder in Test Case Modal (#testcase-modal) */
+  .step-row {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: flex-start !important;
+    gap: 10px !important;
+    padding: 10px 12px !important;
+  }
+
+  .step-inputs-group {
+    flex: 1 !important;
+    min-width: 0 !important;
+  }
+
+  .step-actions-group {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 4px !important;
+    margin-top: 4px !important;
+  }
+
+  .step-tool-btn {
+    min-width: 36px !important;
+    min-height: 36px !important;
+    padding: 6px !important;
+  }
+
+  /* Step Execution in Execution Modal (#execution-modal) */
+  .exec-step-main {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 12px !important;
+  }
+
+  .exec-step-actions {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 8px !important;
+  }
+
+  .step-status-btn {
+    min-height: 38px !important;
+    padding: 6px 12px !important;
+  }
+
+  /* Promote Checklist Modal (#qa-checklist-promote-modal) */
+  .qa-promote-preview-box {
+    max-height: 220px !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+  }
+}
+
+/* 2. Small Tablets (600px to 767px) Specific Sizing */
+@media (min-width: 600px) and (max-width: 767px) {
+  .top-nav-center {
+    display: none !important;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  .projects-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 14px !important;
+  }
+
+  .qa-mychk-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 14px !important;
+  }
+
+  .form-row-3 {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 12px !important;
+  }
+
+  .dashboard-sections-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+}
+
+/* 3. Standard Tablets (768px to 899px) Specific Sizing */
+@media (min-width: 768px) and (max-width: 899px) {
+  .top-nav-center {
+    display: flex !important;
+    max-width: 240px !important;
+    margin: 0 10px !important;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  }
+
+  .projects-grid {
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)) !important;
+  }
+
+  .qa-mychk-grid {
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)) !important;
+  }
+
+  .form-row-3 {
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    gap: 14px !important;
+  }
+}
+
+/* 4. Large Tablets (900px to 1023px) Specific Sizing */
+@media (min-width: 900px) and (max-width: 1023px) {
+  .top-nav-center {
+    display: flex !important;
+    max-width: 300px !important;
+    margin: 0 16px !important;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  }
+
+  .projects-grid {
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)) !important;
+  }
+
+  .qa-mychk-grid {
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)) !important;
+  }
+
+  .dashboard-sections-grid {
+    grid-template-columns: 1.25fr 0.75fr !important;
+  }
+
+  .form-row-3 {
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    gap: 14px !important;
+  }
+}
+
+/* 5. Tablet Landscape Orientation (600px to 1023px & landscape) */
+@media (min-width: 600px) and (max-width: 1023px) and (orientation: landscape) {
+  .content-viewport {
+    padding: 16px 20px !important;
+  }
+
+  .welcome-banner {
+    padding: 16px 20px !important;
+    margin-bottom: 16px !important;
+  }
+
+  .charts-grid {
+    margin-bottom: 16px !important;
+  }
+
+  .chart-card canvas {
+    height: 220px !important;
+    max-height: 230px !important;
+  }
+
+  .modal-dialog,
+  .modal-dialog.modal-dialog-lg,
+  .modal-dialog.modal-dialog-md,
+  .modal-dialog.modal-dialog-sm {
+    max-height: calc(100dvh - 36px) !important;
+  }
+
+  .modal-header {
+    padding: 12px 18px !important;
+  }
+
+  .modal-form,
+  .view-case-body,
+  .modal-body {
+    padding: 14px 18px !important;
+    gap: 12px !important;
+  }
+
+  .modal-footer {
+    padding: 10px 18px !important;
+  }
+}
