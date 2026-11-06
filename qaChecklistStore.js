@@ -16,6 +16,7 @@ import {
   processChecklistSyncQueue,
   clearAllOfflineData,
   dequeueOperation,
+  openOfflineDatabase,
   getStorageStatus
 } from './qaChecklistSyncQueue.js';
 
@@ -27,6 +28,7 @@ export {
   getCachedChecklistsForUser,
   processChecklistSyncQueue,
   clearAllOfflineData,
+  openOfflineDatabase,
   getStorageStatus
 };
 
@@ -748,6 +750,7 @@ export const ChecklistsPersistence = {
   pendingSync: new Map(),
   lastSyncError: null,
   lastOfflineStorageError: null,
+  isBackendConnected: null,
   persistenceListeners: new Set(),
 
   onPersistenceFailure(callback) {
@@ -871,6 +874,7 @@ export const ChecklistsPersistence = {
         if (result && result.ok) {
           this.markPersisted(checklistId);
           this.lastSyncError = null;
+          this.isBackendConnected = true;
 
           // Dequeue from durable IndexedDB queue on verified server success
           if (userId && !queueError) {
@@ -885,6 +889,7 @@ export const ChecklistsPersistence = {
             }
           }
         } else {
+          this.isBackendConnected = false;
           const errMsg = queueError
             ? `Durable persistence failed: Server unreachable (${result?.error || 'offline'}) and offline storage unavailable (${queueError.message}).`
             : ((result && (result.error || result.message)) || 'Failed to synchronize checklist with MongoDB.');
@@ -893,9 +898,11 @@ export const ChecklistsPersistence = {
           if (queueError) {
             this.notifyPersistenceFailure(checklistId, options.isNew ? 'create' : 'update', queueError);
           }
+          return { ok: false, error: errMsg, queueError };
         }
         return result;
       } catch (syncErr) {
+        this.isBackendConnected = false;
         this.lastSyncError = syncErr?.message || 'Sync network error';
         console.error(`Qavora: Exception syncing checklist "${checklistId}"`, syncErr);
         return { ok: false, error: this.lastSyncError };
@@ -942,6 +949,7 @@ export const ChecklistsPersistence = {
 
         const res = await ChecklistAPI.delete(checklistId);
         if (res && (res.ok || res.status === 404)) {
+          this.isBackendConnected = true;
           if (userId && !queueError) {
             try {
               const pendingOps = await getPendingOperations(userId);
@@ -953,14 +961,20 @@ export const ChecklistsPersistence = {
               console.warn('Qavora: Error dequeuing delete operation', dqErr);
             }
           }
+          return res;
         } else {
+          this.isBackendConnected = false;
           console.warn(`Qavora: Error deleting checklist ${checklistId} on server:`, res?.error);
           if (queueError) {
             this.notifyPersistenceFailure(checklistId, 'delete', queueError);
           }
+          const errMsg = queueError
+            ? `Durable persistence failed: Server unreachable (${res?.error || 'offline'}) and offline storage unavailable (${queueError.message}).`
+            : ((res && (res.error || res.message)) || 'Failed to delete checklist from MongoDB.');
+          return { ok: false, error: errMsg, queueError };
         }
-        return res;
       } catch (err) {
+        this.isBackendConnected = false;
         console.warn(`Qavora: Network exception deleting checklist ${checklistId}`, err);
         return { ok: false, error: err?.message };
       } finally {
@@ -1087,6 +1101,26 @@ export const clearUserChecklists = () => ChecklistsPersistence.clearCache();
 
 export function saveAllChecklists(checklistsArray, meta = {}) {
   try {
+    const isBrowser = typeof window !== 'undefined' && typeof window.document !== 'undefined';
+    const storageStatus = getStorageStatus();
+
+    // If running in browser and durable IndexedDB storage is unavailable, verify whether persistence can be achieved:
+    if (isBrowser && !storageStatus.isDurable && !meta.skipPersistenceCheck) {
+      const isOnline = typeof navigator !== 'undefined' ? navigator.onLine !== false : true;
+      const isAuthed = typeof authController !== 'undefined' && authController.isAuthenticated();
+      // If user is offline or unauthenticated or backend is disconnected, durable persistence is impossible
+      if (!isOnline || !isAuthed || ChecklistsPersistence.isBackendConnected === false) {
+        const errorMsg = `Durable storage unavailable: Cannot save offline changes (${storageStatus.error || 'IndexedDB unavailable'}). Please restore storage access and retry.`;
+        return {
+          ok: false,
+          isFallback: false,
+          error: errorMsg,
+          storageStatus,
+          valueOf() { return false; }
+        };
+      }
+    }
+
     const previous = loadAllChecklists();
     const previousList = (previous && Array.isArray(previous.checklists)) ? previous.checklists : [];
 

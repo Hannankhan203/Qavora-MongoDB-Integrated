@@ -9,6 +9,11 @@
 import { initChecklistGenerator } from './checklistGeneratorUI.js';
 import { initQARunnerAndChecklists } from './qaRunnerUI.js';
 import authController from './authController.js';
+import {
+  openOfflineDatabase,
+  getStorageStatus,
+  ChecklistsPersistence
+} from './qaChecklistStore.js';
 
 import { apiFetch, apiJson, checkBackendHealth } from './src/modules/apiClient.js';
 import * as utils from './src/modules/utils.js';
@@ -239,8 +244,15 @@ if (typeof window !== 'undefined') {
     refreshStorageUsage,
     showToast,
     navigateTo,
-    resolveInitialRoute
+    resolveInitialRoute,
+    openOfflineDatabase,
+    getStorageStatus,
+    ChecklistsPersistence
   };
+
+  ChecklistsPersistence.onPersistenceFailure(({ action, error }) => {
+    showToast(`Storage failure during ${action}: ${error}`, 'error');
+  });
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);

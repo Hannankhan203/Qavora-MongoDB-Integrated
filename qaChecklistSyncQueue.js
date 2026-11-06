@@ -53,6 +53,10 @@ const memoryOperations = new Map();
 const memoryChecklistsCache = new Map();
 const memorySyncLocks = new Map();
 
+export function isBrowserEnvironment() {
+  return typeof window !== 'undefined' && typeof window.document !== 'undefined';
+}
+
 export function hasNativeIndexedDB() {
   return typeof globalThis !== 'undefined' &&
     typeof globalThis.indexedDB !== 'undefined' &&
@@ -63,14 +67,32 @@ export function hasNativeIndexedDB() {
  * Expose storage status to browser callers
  */
 export function getStorageStatus() {
-  const isBrowser = hasNativeIndexedDB();
-  if (!isBrowser) {
+  if (!isBrowserEnvironment()) {
     return {
       status: 'memory_fallback',
       driver: 'memory',
       isDurable: false,
       isDegraded: false,
       error: null
+    };
+  }
+
+  if (!hasNativeIndexedDB()) {
+    if (storageDegradedMode) {
+      return {
+        status: 'degraded',
+        driver: 'memory',
+        isDurable: false,
+        isDegraded: true,
+        error: lastStorageError ? (lastStorageError.message || String(lastStorageError)) : 'Operating in degraded in-memory mode'
+      };
+    }
+    return {
+      status: 'unavailable',
+      driver: 'none',
+      isDurable: false,
+      isDegraded: true,
+      error: lastStorageError ? (lastStorageError.message || String(lastStorageError)) : 'IndexedDB is not supported or unavailable in this browser environment'
     };
   }
 
@@ -157,7 +179,7 @@ export async function openOfflineDatabase() {
     return dbOpenPromise;
   }
 
-  if (!hasNativeIndexedDB()) {
+  if (!isBrowserEnvironment()) {
     // Headless / memory fallback driver for Node test runs
     dbInstance = {
       __isMemoryFallback: true,
@@ -166,6 +188,21 @@ export async function openOfflineDatabase() {
       }
     };
     return dbInstance;
+  }
+
+  if (!hasNativeIndexedDB()) {
+    if (storageDegradedMode) {
+      dbInstance = {
+        __isMemoryFallback: true,
+        close() {
+          dbInstance = null;
+        }
+      };
+      return dbInstance;
+    }
+    const err = new Error('IndexedDB is not supported or unavailable in this browser environment');
+    lastStorageError = err;
+    throw err;
   }
 
   dbOpenPromise = new Promise((resolve, reject) => {
@@ -223,6 +260,14 @@ export async function openOfflineDatabase() {
           dbInstance = null;
         };
 
+        dbInstance.onclose = () => {
+          dbInstance = null;
+        };
+
+        dbInstance.onerror = (e) => {
+          console.warn('Qavora Offline DB database error:', e?.target?.error);
+        };
+
         safeResolve(dbInstance);
       };
 
@@ -266,7 +311,7 @@ export async function openOfflineDatabase() {
 async function idbGet(storeName, key) {
   const db = await openOfflineDatabase();
   if (db.__isMemoryFallback) {
-    if (hasNativeIndexedDB() && !storageDegradedMode) {
+    if (isBrowserEnvironment() && !storageDegradedMode) {
       throw new Error('Durable offline storage unavailable: operating in browser without persistent IndexedDB');
     }
     const store = storeName === STORE_OPERATIONS ? memoryOperations : memoryChecklistsCache;
@@ -298,7 +343,7 @@ async function idbGet(storeName, key) {
 async function idbPut(storeName, value) {
   const db = await openOfflineDatabase();
   if (db.__isMemoryFallback) {
-    if (hasNativeIndexedDB() && !storageDegradedMode) {
+    if (isBrowserEnvironment() && !storageDegradedMode) {
       throw new Error('Durable offline storage unavailable: operating in browser without persistent IndexedDB');
     }
     const store = storeName === STORE_OPERATIONS ? memoryOperations : memoryChecklistsCache;
@@ -330,7 +375,7 @@ async function idbPut(storeName, value) {
 async function idbDelete(storeName, key) {
   const db = await openOfflineDatabase();
   if (db.__isMemoryFallback) {
-    if (hasNativeIndexedDB() && !storageDegradedMode) {
+    if (isBrowserEnvironment() && !storageDegradedMode) {
       throw new Error('Durable offline storage unavailable: operating in browser without persistent IndexedDB');
     }
     const store = storeName === STORE_OPERATIONS ? memoryOperations : memoryChecklistsCache;
@@ -360,7 +405,7 @@ async function idbDelete(storeName, key) {
 async function idbGetAll(storeName) {
   const db = await openOfflineDatabase();
   if (db.__isMemoryFallback) {
-    if (hasNativeIndexedDB() && !storageDegradedMode) {
+    if (isBrowserEnvironment() && !storageDegradedMode) {
       throw new Error('Durable offline storage unavailable: operating in browser without persistent IndexedDB');
     }
     const store = storeName === STORE_OPERATIONS ? memoryOperations : memoryChecklistsCache;
@@ -391,7 +436,7 @@ async function idbGetAll(storeName) {
 async function idbClear(storeName) {
   const db = await openOfflineDatabase();
   if (db.__isMemoryFallback) {
-    if (hasNativeIndexedDB() && !storageDegradedMode) {
+    if (isBrowserEnvironment() && !storageDegradedMode) {
       throw new Error('Durable offline storage unavailable: operating in browser without persistent IndexedDB');
     }
     const store = storeName === STORE_OPERATIONS ? memoryOperations : memoryChecklistsCache;
@@ -702,28 +747,37 @@ export async function acquireIndexedDbSyncLock(
   }
 
   return new Promise((resolve) => {
-    const tx = db.transaction([STORE_SYNC_LOCKS], 'readwrite');
-    const store = tx.objectStore(STORE_SYNC_LOCKS);
-    const getReq = store.get(lockKey);
+    let settled = false;
+    const safeResolve = (val) => { if (!settled) { settled = true; resolve(val); } };
 
-    getReq.onsuccess = () => {
-      const existing = getReq.result;
-      if (!existing || existing.expiresAt <= now || existing.ownerId === ownerId) {
-        const nextGen = (existing?.generation || 0) + 1;
-        const putReq = store.put({
-          lockKey,
-          ownerId,
-          generation: nextGen,
-          acquiredAt: now,
-          expiresAt: now + ttlMs
-        });
-        putReq.onsuccess = () => resolve({ acquired: true, generation: nextGen });
-        putReq.onerror = () => resolve({ acquired: false, generation: 0 });
-      } else {
-        resolve({ acquired: false, generation: 0 });
-      }
-    };
-    getReq.onerror = () => resolve({ acquired: false, generation: 0 });
+    try {
+      const tx = db.transaction([STORE_SYNC_LOCKS], 'readwrite');
+      const store = tx.objectStore(STORE_SYNC_LOCKS);
+      const getReq = store.get(lockKey);
+
+      getReq.onsuccess = () => {
+        const existing = getReq.result;
+        if (!existing || existing.expiresAt <= now || existing.ownerId === ownerId) {
+          const nextGen = (existing?.generation || 0) + 1;
+          const putReq = store.put({
+            lockKey,
+            ownerId,
+            generation: nextGen,
+            acquiredAt: now,
+            expiresAt: now + ttlMs
+          });
+          putReq.onsuccess = () => safeResolve({ acquired: true, generation: nextGen });
+          putReq.onerror = () => safeResolve({ acquired: false, generation: 0 });
+        } else {
+          safeResolve({ acquired: false, generation: 0 });
+        }
+      };
+      getReq.onerror = () => safeResolve({ acquired: false, generation: 0 });
+      tx.onerror = () => safeResolve({ acquired: false, generation: 0 });
+      tx.onabort = () => safeResolve({ acquired: false, generation: 0 });
+    } catch (_err) {
+      safeResolve({ acquired: false, generation: 0 });
+    }
   });
 }
 
@@ -751,28 +805,37 @@ export async function renewIndexedDbSyncLock(
   }
 
   return new Promise((resolve) => {
-    const tx = db.transaction([STORE_SYNC_LOCKS], 'readwrite');
-    const store = tx.objectStore(STORE_SYNC_LOCKS);
-    const getReq = store.get(lockKey);
-    getReq.onsuccess = () => {
-      const existing = getReq.result;
-      if (
-        existing &&
-        existing.ownerId === ownerId &&
-        existing.generation === generation &&
-        existing.expiresAt > now
-      ) {
-        const putReq = store.put({
-          ...existing,
-          expiresAt: now + ttlMs
-        });
-        putReq.onsuccess = () => resolve(true);
-        putReq.onerror = () => resolve(false);
-      } else {
-        resolve(false);
-      }
-    };
-    getReq.onerror = () => resolve(false);
+    let settled = false;
+    const safeResolve = (val) => { if (!settled) { settled = true; resolve(val); } };
+
+    try {
+      const tx = db.transaction([STORE_SYNC_LOCKS], 'readwrite');
+      const store = tx.objectStore(STORE_SYNC_LOCKS);
+      const getReq = store.get(lockKey);
+      getReq.onsuccess = () => {
+        const existing = getReq.result;
+        if (
+          existing &&
+          existing.ownerId === ownerId &&
+          existing.generation === generation &&
+          existing.expiresAt > now
+        ) {
+          const putReq = store.put({
+            ...existing,
+            expiresAt: now + ttlMs
+          });
+          putReq.onsuccess = () => safeResolve(true);
+          putReq.onerror = () => safeResolve(false);
+        } else {
+          safeResolve(false);
+        }
+      };
+      getReq.onerror = () => safeResolve(false);
+      tx.onerror = () => safeResolve(false);
+      tx.onabort = () => safeResolve(false);
+    } catch (_err) {
+      safeResolve(false);
+    }
   });
 }
 
@@ -795,21 +858,30 @@ export async function verifyIndexedDbSyncLock(
   }
 
   return new Promise((resolve) => {
-    const tx = db.transaction([STORE_SYNC_LOCKS], 'readonly');
-    const store = tx.objectStore(STORE_SYNC_LOCKS);
-    const getReq = store.get(lockKey);
-    getReq.onsuccess = () => {
-      const existing = getReq.result;
-      resolve(
-        Boolean(
-          existing &&
-          existing.ownerId === ownerId &&
-          existing.generation === generation &&
-          existing.expiresAt > now
-        )
-      );
-    };
-    getReq.onerror = () => resolve(false);
+    let settled = false;
+    const safeResolve = (val) => { if (!settled) { settled = true; resolve(val); } };
+
+    try {
+      const tx = db.transaction([STORE_SYNC_LOCKS], 'readonly');
+      const store = tx.objectStore(STORE_SYNC_LOCKS);
+      const getReq = store.get(lockKey);
+      getReq.onsuccess = () => {
+        const existing = getReq.result;
+        safeResolve(
+          Boolean(
+            existing &&
+            existing.ownerId === ownerId &&
+            existing.generation === generation &&
+            existing.expiresAt > now
+          )
+        );
+      };
+      getReq.onerror = () => safeResolve(false);
+      tx.onerror = () => safeResolve(false);
+      tx.onabort = () => safeResolve(false);
+    } catch (_err) {
+      safeResolve(false);
+    }
   });
 }
 
@@ -838,29 +910,38 @@ export async function releaseIndexedDbSyncLock(
   }
 
   return new Promise((resolve) => {
-    const tx = db.transaction([STORE_SYNC_LOCKS], 'readwrite');
-    const store = tx.objectStore(STORE_SYNC_LOCKS);
-    const getReq = store.get(lockKey);
-    getReq.onsuccess = () => {
-      const existing = getReq.result;
-      if (
-        existing &&
-        existing.ownerId === ownerId &&
-        (generation === undefined || existing.generation === generation)
-      ) {
-        const putReq = store.put({
-          lockKey,
-          ownerId: null,
-          generation: existing.generation,
-          expiresAt: 0
-        });
-        putReq.onsuccess = () => resolve();
-        putReq.onerror = () => resolve();
-      } else {
-        resolve();
-      }
-    };
-    getReq.onerror = () => resolve();
+    let settled = false;
+    const safeResolve = () => { if (!settled) { settled = true; resolve(); } };
+
+    try {
+      const tx = db.transaction([STORE_SYNC_LOCKS], 'readwrite');
+      const store = tx.objectStore(STORE_SYNC_LOCKS);
+      const getReq = store.get(lockKey);
+      getReq.onsuccess = () => {
+        const existing = getReq.result;
+        if (
+          existing &&
+          existing.ownerId === ownerId &&
+          (generation === undefined || existing.generation === generation)
+        ) {
+          const putReq = store.put({
+            lockKey,
+            ownerId: null,
+            generation: existing.generation,
+            expiresAt: 0
+          });
+          putReq.onsuccess = () => safeResolve();
+          putReq.onerror = () => safeResolve();
+        } else {
+          safeResolve();
+        }
+      };
+      getReq.onerror = () => safeResolve();
+      tx.onerror = () => safeResolve();
+      tx.onabort = () => safeResolve();
+    } catch (_err) {
+      safeResolve();
+    }
   });
 }
 
@@ -892,30 +973,34 @@ export async function dequeueOperationIfLockValid(
     const safeResolve = (val) => { if (!settled) { settled = true; resolve(val); } };
     const safeReject = (err) => { if (!settled) { settled = true; reject(err); } };
 
-    const tx = db.transaction([STORE_SYNC_LOCKS, STORE_OPERATIONS], 'readwrite');
-    const lockStore = tx.objectStore(STORE_SYNC_LOCKS);
-    const opStore = tx.objectStore(STORE_OPERATIONS);
-    let deleted = false;
+    try {
+      const tx = db.transaction([STORE_SYNC_LOCKS, STORE_OPERATIONS], 'readwrite');
+      const lockStore = tx.objectStore(STORE_SYNC_LOCKS);
+      const opStore = tx.objectStore(STORE_OPERATIONS);
+      let deleted = false;
 
-    const getReq = lockStore.get(lockKey);
-    getReq.onsuccess = () => {
-      const lock = getReq.result;
-      if (
-        !lock ||
-        lock.ownerId !== ownerId ||
-        lock.expiresAt <= now ||
-        (generation !== undefined && lock.generation !== generation)
-      ) {
-        deleted = false;
-        return;
-      }
-      opStore.delete(opId);
-      deleted = true;
-    };
-    getReq.onerror = () => safeReject(getReq.error);
-    tx.oncomplete = () => safeResolve(deleted);
-    tx.onerror = () => safeReject(tx.error);
-    tx.onabort = () => safeResolve(false);
+      const getReq = lockStore.get(lockKey);
+      getReq.onsuccess = () => {
+        const lock = getReq.result;
+        if (
+          !lock ||
+          lock.ownerId !== ownerId ||
+          lock.expiresAt <= now ||
+          (generation !== undefined && lock.generation !== generation)
+        ) {
+          deleted = false;
+          return;
+        }
+        opStore.delete(opId);
+        deleted = true;
+      };
+      getReq.onerror = () => safeReject(getReq.error);
+      tx.oncomplete = () => safeResolve(deleted);
+      tx.onerror = () => safeReject(tx.error);
+      tx.onabort = () => safeResolve(false);
+    } catch (err) {
+      safeReject(err);
+    }
   });
 }
 
@@ -1049,7 +1134,8 @@ export function reconcileChecklistUpdate(clientPayload, serverChecklist) {
 async function runSyncPass(activeUserId, verifyLock = null, lockContext = null) {
   let syncedCount = 0;
 
-  const pendingOps = await getPendingOperations(activeUserId);
+  try {
+    const pendingOps = await getPendingOperations(activeUserId);
     if (pendingOps.length === 0) {
       return { ok: true, syncedCount: 0 };
     }
@@ -1228,7 +1314,11 @@ async function runSyncPass(activeUserId, verifyLock = null, lockContext = null) 
       }
     }
 
-  return { ok: true, syncedCount };
+    return { ok: true, syncedCount };
+  } catch (syncPassErr) {
+    console.warn('Qavora SyncQueue: sync pass encountered error:', syncPassErr);
+    return { ok: false, syncedCount, error: syncPassErr?.message || String(syncPassErr) };
+  }
 }
 
 // ============================================================================

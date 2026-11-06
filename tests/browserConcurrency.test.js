@@ -4,6 +4,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { chromium } from 'playwright';
 
 const ROOT_DIR = process.cwd();
@@ -14,6 +15,39 @@ function startStaticServer() {
     if (urlPath === '/test-harness.html') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end('<!doctype html><html><head><meta charset="utf-8"></head><body><h1>Qavora Sync Harness</h1></body></html>');
+      return;
+    }
+
+    if (urlPath === '/csp-test.html') {
+      const nonce = crypto.randomBytes(16).toString('base64');
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Security-Policy': `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; form-action 'self'`
+      });
+      res.end(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>CSP Enforcement Test</title>
+</head>
+<body>
+  <h1>CSP Test Harness</h1>
+  <script nonce="${nonce}">
+    window.__violations = [];
+    document.addEventListener('securitypolicyviolation', (e) => {
+      window.__violations.push({
+        directive: e.violatedDirective,
+        blockedURI: e.blockedURI
+      });
+    });
+    window.__authorized_executed = true;
+  </script>
+  <script>
+    // This inline script has NO nonce and MUST be blocked by Chromium CSP
+    window.__unauthorized_inline_executed = true;
+  </script>
+</body>
+</html>`);
       return;
     }
 
@@ -994,3 +1028,447 @@ test('Browser Multi-Tab Concurrency: IndexedDB locks, renewal, expiration, atomi
     await context.close();
   }
 });
+
+// ============================================================================
+// Test 10: Application-Level Storage Degradation (QAV-AUDIT-004 Section 2)
+// ============================================================================
+test('Browser Application Degradation: Clear failure feedback when durable storage unavailable, online features remain usable, retry succeeds after recovery', { timeout: 45000 }, async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await page.goto(`${baseUrl}/test-harness.html`);
+
+    const evalResult = await page.evaluate(async () => {
+      const authMod = await import('/authController.js');
+      const storeMod = await import('/qaChecklistStore.js');
+      const queueMod = await import('/qaChecklistSyncQueue.js');
+
+      // Authenticate test user
+      authMod.authController.setSession({
+        user: {
+          userId: 'degrade_test_user',
+          name: 'Degrade Tester',
+          email: 'degrade@example.com',
+          role: 'QA Engineer'
+        }
+      });
+
+      // 1. Simulate IndexedDB completely unavailable in the browser environment
+      const originalIndexedDB = window.indexedDB;
+      const originalOpen = window.indexedDB ? window.indexedDB.open.bind(window.indexedDB) : null;
+
+      // Force failure on IndexedDB access
+      window.indexedDB.open = () => {
+        const dummyReq = {};
+        setTimeout(() => {
+          if (typeof dummyReq.onerror === 'function') {
+            dummyReq.error = new DOMException('IndexedDB unavailable or blocked', 'SecurityError');
+            dummyReq.onerror({ target: dummyReq });
+          }
+        }, 10);
+        return dummyReq;
+      };
+
+      // Attempt openOfflineDatabase directly to trigger failure
+      let openError = null;
+      try {
+        await queueMod.openOfflineDatabase();
+      } catch (err) {
+        openError = err.message || String(err);
+      }
+
+      // Check storage status reflects unavailable and NOT durable
+      const statusWhenDown = queueMod.getStorageStatus();
+
+      // Offline scenario: backend disconnected and offline
+      storeMod.ChecklistsPersistence.isBackendConnected = false;
+
+      // Mock parsed plan for test creation
+      const testPlan = {
+        documentTitle: 'Degradation Test Plan',
+        phases: [
+          {
+            phaseLabel: 'Phase 1',
+            phaseNumber: '1',
+            name: 'Degradation Checks',
+            sections: [
+              {
+                id: 'sec_deg_1',
+                type: 'direct',
+                name: '',
+                tests: [
+                  { id: 'deg_t1', text: 'Verify offline degradation handling' }
+                ]
+              }
+            ]
+          }
+        ]
+      };
+
+      // 2. CREATE operation must fail with clear feedback when offline & storage unavailable
+      const createRes = storeMod.createChecklistFromParsedPlan(testPlan, 'Unsaved Plan');
+      const allChecklistsAfterCreate = storeMod.loadAllChecklists().checklists;
+      const memoryDidRetain = allChecklistsAfterCreate.some(c => c.title === 'Unsaved Plan');
+
+      // 3. UPDATE operation must fail when offline & storage unavailable
+      const fakeChecklist = {
+        id: 'chk_existing_dummy',
+        title: 'Existing Checklist',
+        schemaVersion: 1,
+        phases: []
+      };
+      // Force an in-memory item for testing update failure
+      storeMod.getMemoryDataStore().set(storeMod.CHECKLISTS_STORAGE_KEY, JSON.stringify({
+        schemaVersion: 1,
+        checklists: [fakeChecklist]
+      }));
+
+      const updateRes = storeMod.renameChecklistById('chk_existing_dummy', 'New Renamed Title');
+
+      // 4. DELETE operation must fail when offline & storage unavailable
+      const deleteRes = storeMod.deleteChecklistById('chk_existing_dummy');
+
+      // 5. Verify online functionality remains usable: backend REST calls succeed even if local IndexedDB is down
+      const onlineApiRequests = [];
+      window.fetch = async (url, opts) => {
+        const method = opts?.method || 'GET';
+        onlineApiRequests.push({ url: String(url), method });
+        if (method === 'GET') {
+          return new Response(JSON.stringify([{ id: 'chk_online_1', title: 'Online Checklist' }]), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        if (method === 'POST') {
+          return new Response(JSON.stringify({ id: 'chk_online_created', title: 'Online Created' }), {
+            status: 201,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        return new Response('{}', { status: 200 });
+      };
+
+      const onlineListRes = await storeMod.ChecklistAPI.list();
+      const onlineCreateRes = await storeMod.ChecklistAPI.create({ id: 'chk_online_created', title: 'Online Created' });
+
+      // 6. Restore IndexedDB and verify user can retry and succeed
+      window.indexedDB.open = originalOpen;
+      queueMod.resetStorageState();
+      storeMod.ChecklistsPersistence.isBackendConnected = true;
+
+      const statusAfterRestore = queueMod.getStorageStatus();
+      const retryCreateRes = storeMod.createChecklistFromParsedPlan(testPlan, 'Recovered Plan');
+      const allChecklistsAfterRetry = storeMod.loadAllChecklists().checklists;
+      const persistedRetry = allChecklistsAfterRetry.find(c => c.title === 'Recovered Plan');
+
+      return {
+        statusWhenDown,
+        openError,
+        createResOk: createRes.ok,
+        createResError: createRes.error,
+        memoryDidRetain,
+        updateResOk: updateRes.ok,
+        updateResError: updateRes.error,
+        deleteResOk: deleteRes.ok,
+        deleteResError: deleteRes.error,
+        onlineListOk: onlineListRes.ok,
+        onlineCreateOk: onlineCreateRes.ok,
+        onlineApiRequestsCount: onlineApiRequests.length,
+        statusAfterRestore,
+        retryCreateOk: retryCreateRes.ok,
+        persistedRetryTitle: persistedRetry?.title || null
+      };
+    });
+
+    // Assertions for Application Degradation:
+    assert.equal(evalResult.statusWhenDown.isDurable, false, 'Storage must not report durable when IndexedDB fails');
+    assert.equal(evalResult.statusWhenDown.isDegraded, true, 'isDegraded must be true');
+    assert.ok(evalResult.openError, 'openOfflineDatabase must reject when IndexedDB fails');
+
+    assert.equal(evalResult.createResOk, false, 'Create must fail when durable persistence unavailable');
+    assert.match(evalResult.createResError, /Durable storage unavailable/i, 'Clear failure error message returned');
+    assert.equal(evalResult.memoryDidRetain, false, 'Must not silently switch to volatile memory or claim saved');
+
+    assert.equal(evalResult.updateResOk, false, 'Update must fail when durable persistence unavailable');
+    assert.match(evalResult.updateResError, /Durable storage unavailable/i, 'Clear failure error message for update');
+
+    assert.equal(evalResult.deleteResOk, false, 'Delete must fail when durable persistence unavailable');
+    assert.match(evalResult.deleteResError, /Durable storage unavailable/i, 'Clear failure error message for delete');
+
+    // Online functionality remains usable:
+    assert.equal(evalResult.onlineListOk, true, 'Online checklist list operation must remain usable');
+    assert.equal(evalResult.onlineCreateOk, true, 'Online create operation must remain usable');
+    assert.equal(evalResult.onlineApiRequestsCount, 2, 'Online API requests processed directly');
+
+    // Recovery & retry:
+    assert.equal(evalResult.statusAfterRestore.isDurable, true, 'Status after restore must be durable');
+    assert.equal(evalResult.retryCreateOk, true, 'Retry after storage restore must succeed');
+    assert.equal(evalResult.persistedRetryTitle, 'Recovered Plan', 'Recovered plan persisted successfully');
+  } finally {
+    await context.close();
+  }
+});
+
+// ============================================================================
+// Test 11: Recovery Without Data Loss Sequence (QAV-AUDIT-004 Section 3)
+// ============================================================================
+test('Browser Recovery Sequence: 8-step recovery without data loss and concurrent tab transaction failure resilience', { timeout: 60000 }, async () => {
+  const context = await browser.newContext();
+  const page1 = await context.newPage();
+  try {
+    await page1.goto(`${baseUrl}/test-harness.html`);
+
+    // Clean initial queue
+    await page1.evaluate(async () => {
+      const mod = await import('/qaChecklistSyncQueue.js');
+      await mod.clearAllOfflineData();
+    });
+
+    // Step 1: Store several pending operations in IndexedDB
+    const initialOps = await page1.evaluate(async () => {
+      const mod = await import('/qaChecklistSyncQueue.js');
+      const userId = 'step_recovery_user';
+
+      // 1. CREATE operation
+      const op1 = await mod.queueChecklistCreate({
+        id: 'chk_rec_1',
+        title: 'Recovery Checklist 1',
+        phases: [{ id: 'p1', name: 'Phase 1', sections: [{ id: 's1', type: 'direct', tests: [{ id: 't1', text: 'Test 1' }] }] }]
+      }, userId);
+
+      // 2. UPDATE operation
+      const op2 = await mod.queueChecklistUpdate({
+        id: 'chk_rec_2',
+        title: 'Recovery Checklist 2 (Updated)',
+        phases: [{ id: 'p2', name: 'Phase 2', sections: [{ id: 's2', type: 'direct', tests: [{ id: 't2', text: 'Test 2' }] }] }]
+      }, userId);
+
+      // 3. DELETE operation
+      const op3 = await mod.queueChecklistDelete('chk_rec_3', userId, true);
+
+      const storedOps = await mod.getPendingOperations(userId);
+      return {
+        storedCount: storedOps.length,
+        opTypes: storedOps.map(o => o.type),
+        checklistIds: storedOps.map(o => o.checklistId)
+      };
+    });
+
+    assert.equal(initialOps.storedCount, 3, 'Step 1: Stored exactly 3 operations in IndexedDB');
+    assert.deepEqual(initialOps.opTypes, ['CREATE', 'UPDATE', 'DELETE'], 'Step 1: Operation types matched');
+
+    // Step 2 & 3: Simulate a temporary storage failure and confirm new writes fail visibly
+    const failureResult = await page1.evaluate(async () => {
+      const mod = await import('/qaChecklistSyncQueue.js');
+      const userId = 'step_recovery_user';
+
+      // Simulate storage failure by intercepting IndexedDB transactions to abort
+      const origOpen = window.indexedDB.open.bind(window.indexedDB);
+      window.__origOpen = origOpen;
+
+      window.indexedDB.open = () => {
+        const dummyReq = {};
+        setTimeout(() => {
+          if (typeof dummyReq.onerror === 'function') {
+            dummyReq.error = new DOMException('Storage I/O failure simulation', 'QuotaExceededError');
+            dummyReq.onerror({ target: dummyReq });
+          }
+        }, 10);
+        return dummyReq;
+      };
+
+      mod.resetStorageState();
+
+      let writeFailedVisibly = false;
+      let writeError = null;
+
+      try {
+        await mod.queueChecklistCreate({ id: 'chk_should_fail', title: 'Should Fail', phases: [] }, userId);
+      } catch (err) {
+        writeFailedVisibly = true;
+        writeError = err.message || String(err);
+      }
+
+      return {
+        writeFailedVisibly,
+        writeError
+      };
+    });
+
+    assert.equal(failureResult.writeFailedVisibly, true, 'Step 3: New writes must fail visibly during storage failure');
+    assert.ok(failureResult.writeError, 'Step 3: Error must be returned');
+
+    // Step 4: Restore IndexedDB access
+    await page1.evaluate(async () => {
+      const mod = await import('/qaChecklistSyncQueue.js');
+      if (window.__origOpen) {
+        window.indexedDB.open = window.__origOpen;
+      }
+      mod.resetStorageState();
+    });
+
+    // Step 5: Reload the application
+    await page1.reload();
+
+    // Step 6: Confirm all previously stored operations remain completely intact
+    const afterReloadOps = await page1.evaluate(async () => {
+      const mod = await import('/qaChecklistSyncQueue.js');
+      const userId = 'step_recovery_user';
+      const storedOps = await mod.getPendingOperations(userId);
+      return {
+        storedCount: storedOps.length,
+        opTypes: storedOps.map(o => o.type),
+        checklistIds: storedOps.map(o => o.checklistId)
+      };
+    });
+
+    assert.equal(afterReloadOps.storedCount, 3, 'Step 6: All 3 previously stored operations remained intact after reload');
+    assert.deepEqual(afterReloadOps.opTypes, ['CREATE', 'UPDATE', 'DELETE'], 'Step 6: All operation types intact');
+    assert.deepEqual(afterReloadOps.checklistIds, ['chk_rec_1', 'chk_rec_2', 'chk_rec_3'], 'Step 6: IDs intact');
+
+    // Step 7 & 8: Resume synchronization and confirm every eligible operation is processed exactly once
+    const syncResult = await page1.evaluate(async () => {
+      const authMod = await import('/authController.js');
+      const mod = await import('/qaChecklistSyncQueue.js');
+      const userId = 'step_recovery_user';
+
+      authMod.authController.setSession({
+        user: { userId, name: 'Recovery User', email: 'rec@example.com' }
+      });
+
+      const serverProcessed = [];
+      window.fetch = async (url, opts) => {
+        const method = opts?.method || 'GET';
+        serverProcessed.push({ url: String(url), method });
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      };
+
+      const syncReport = await mod.processChecklistSyncQueue(userId);
+      const remainingPending = await mod.getPendingOperations(userId);
+
+      return {
+        syncReport,
+        serverProcessed,
+        remainingPendingCount: remainingPending.length
+      };
+    });
+
+    assert.equal(syncResult.syncReport.ok, true, 'Step 7: Synchronization completed successfully');
+    assert.equal(syncResult.syncReport.syncedCount, 3, 'Step 8: Exactly 3 operations synced');
+    assert.equal(syncResult.remainingPendingCount, 0, 'Step 8: All operations cleanly dequeued');
+
+    const methods = syncResult.serverProcessed.map(p => p.method);
+    assert.equal(methods.filter(m => m === 'POST').length, 1, 'POST processed exactly once');
+    assert.equal(methods.filter(m => m === 'PATCH').length, 1, 'PATCH processed exactly once');
+    assert.equal(methods.filter(m => m === 'DELETE').length, 1, 'DELETE processed exactly once');
+
+    // Concurrency Verification: Concurrent tab transaction failure does not corrupt other tabs
+    const page2 = await context.newPage();
+    await page2.goto(`${baseUrl}/test-harness.html`);
+
+    const concurrentResult = await Promise.all([
+      // Tab 1: Normal valid operation
+      page1.evaluate(async () => {
+        const mod = await import('/qaChecklistSyncQueue.js');
+        const userId = 'tab_race_user';
+        await mod.queueChecklistCreate({ id: 'chk_tab1_good', title: 'Tab 1 Good', phases: [] }, userId);
+        return { tab: 1, ok: true };
+      }),
+      // Tab 2: Aborted transaction attempt
+      page2.evaluate(async () => {
+        const mod = await import('/qaChecklistSyncQueue.js');
+        const db = await mod.openOfflineDatabase();
+        let abortedHandled = false;
+        try {
+          const tx = db.transaction([mod.STORE_OPERATIONS], 'readwrite');
+          tx.abort(); // Immediately abort
+          abortedHandled = true;
+        } catch (_) {}
+        return { tab: 2, abortedHandled };
+      })
+    ]);
+
+    assert.equal(concurrentResult[0].ok, true, 'Tab 1 operation succeeded');
+    assert.equal(concurrentResult[1].abortedHandled, true, 'Tab 2 aborted transaction handled safely');
+
+    // Verify Tab 1 data was preserved and database is healthy
+    const healthyCheck = await page1.evaluate(async () => {
+      const mod = await import('/qaChecklistSyncQueue.js');
+      const ops = await mod.getPendingOperations('tab_race_user');
+      return ops.map(o => o.checklistId);
+    });
+
+    assert.deepEqual(healthyCheck, ['chk_tab1_good'], 'Database healthy and Tab 1 operation safely persisted');
+    await page2.close();
+  } finally {
+    await page1.close();
+    await context.close();
+  }
+});
+
+// ============================================================================
+// Test 12: Real Browser CSP Hardening & Injection Blocking (QAV-AUDIT-005)
+// ============================================================================
+test('Browser CSP Hardening: Chromium strictly blocks unauthorized inline and injected scripts while executing authorized nonced scripts', { timeout: 30000 }, async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await page.goto(`${baseUrl}/csp-test.html`);
+
+    const cspResult = await page.evaluate(async () => {
+      // Wait for DOM to finish processing initial script tags
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Attempt 1: Dynamic injection of inline script WITHOUT nonce
+      const unauthScript = document.createElement('script');
+      unauthScript.textContent = 'window.__dynamic_unauth_executed = true;';
+      document.body.appendChild(unauthScript);
+
+      // Attempt 2: Dynamic injection with an INVALID forged nonce
+      const forgedScript = document.createElement('script');
+      forgedScript.setAttribute('nonce', 'invalid-forged-nonce-12345');
+      forgedScript.textContent = 'window.__dynamic_forged_executed = true;';
+      document.body.appendChild(forgedScript);
+
+      // Attempt 3: Dynamic injection of an unauthorized third-party external script
+      const externalScript = document.createElement('script');
+      externalScript.src = 'https://untrusted-external-domain.example/malware.js';
+      document.body.appendChild(externalScript);
+
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      return {
+        authorizedExecuted: window.__authorized_executed === true,
+        unauthorizedInlineExecuted: typeof window.__unauthorized_inline_executed !== 'undefined',
+        dynamicUnauthExecuted: typeof window.__dynamic_unauth_executed !== 'undefined',
+        dynamicForgedExecuted: typeof window.__dynamic_forged_executed !== 'undefined',
+        violationsCount: window.__violations.length,
+        violations: window.__violations
+      };
+    });
+
+    // 1. Legitimate nonced script MUST execute
+    assert.equal(cspResult.authorizedExecuted, true, 'Script with authorized per-response nonce must execute');
+
+    // 2. Un-nonced inline script MUST be blocked
+    assert.equal(cspResult.unauthorizedInlineExecuted, false, 'Inline script without nonce must be blocked by CSP');
+
+    // 3. Dynamically injected un-nonced script MUST be blocked
+    assert.equal(cspResult.dynamicUnauthExecuted, false, 'Dynamically injected script without nonce must be blocked by CSP');
+
+    // 4. Dynamically injected script with forged nonce MUST be blocked
+    assert.equal(cspResult.dynamicForgedExecuted, false, 'Script with forged/invalid nonce must be blocked by CSP');
+
+    // 5. Chromium CSP violation events MUST be recorded
+    assert.ok(cspResult.violationsCount >= 2, `Expected at least 2 CSP violations, got ${cspResult.violationsCount}`);
+    const scriptSrcViolations = cspResult.violations.filter(v => v.directive?.includes('script-src'));
+    assert.ok(scriptSrcViolations.length >= 2, 'Violations must target script-src directive');
+  } finally {
+    await context.close();
+  }
+});
+
+

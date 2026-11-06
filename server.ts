@@ -84,7 +84,16 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
   }
 
-  // Content-Security-Policy tailored specifically for Qavora
+  // Generate a cryptographically random, unpredictable 128-bit (16-byte) per-response nonce
+  const nonce = crypto.randomBytes(16).toString('base64');
+  res.locals.nonce = nonce;
+
+  // Content-Security-Policy tailored specifically for Qavora (QAV-AUDIT-005):
+  // Production strictly enforces nonce-based execution with zero 'unsafe-inline' or 'wasm-unsafe-eval'
+  const scriptSrc = isProdOrVercel
+    ? `'self' 'nonce-${nonce}'`
+    : `'self' 'unsafe-inline' 'nonce-${nonce}'`;
+
   const connectSrc = isProdOrVercel
     ? "'self'"
     : "'self' ws: wss: http: https:";
@@ -94,9 +103,9 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     'Content-Security-Policy',
     [
       "default-src 'self'",
-      "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
-      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-      "font-src 'self' data: https://fonts.gstatic.com",
+      `script-src ${scriptSrc}`,
+      "style-src 'self' 'unsafe-inline'",
+      "font-src 'self' data:",
       "img-src 'self' data: blob:",
       `connect-src ${connectSrc}`,
       "manifest-src 'self'",
@@ -3612,9 +3621,24 @@ async function setupServer() {
     }
     app.use(express.static(distPath, { maxAge: '1h', index: false }));
 
+    // Pre-read index.html template for dynamic per-response CSP nonce injection
+    let indexHtmlTemplate = '';
+    try {
+      indexHtmlTemplate = fs.readFileSync(indexPath, 'utf-8');
+    } catch (_) {}
+
     // SPA fallback route for all non-API GET requests
     app.use((req: Request, res: Response, next: NextFunction) => {
       if (req.method === 'GET' && !req.path.startsWith('/api')) {
+        const nonce = res.locals.nonce;
+        if (nonce && indexHtmlTemplate) {
+          const htmlWithNonce = indexHtmlTemplate.replace(
+            /<script\b(?![^>]*\bnonce=)/gi,
+            `<script nonce="${nonce}"`
+          );
+          res.setHeader('Content-Type', 'text/html; charset=utf-8');
+          return res.send(htmlWithNonce);
+        }
         return res.sendFile(indexPath);
       }
       next();

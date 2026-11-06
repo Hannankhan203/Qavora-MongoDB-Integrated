@@ -589,14 +589,14 @@ function generatePrintableReport() {
           `).join('')}
         </tbody>
       </table>
-
-      <script>
-        window.onload = function() { window.print(); };
-      </script>
     </body>
     </html>
   `);
   printWindow.document.close();
+  try {
+    printWindow.focus();
+    printWindow.print();
+  } catch (_) {}
 }
 
 // ----------------------------------------------------------------------------
