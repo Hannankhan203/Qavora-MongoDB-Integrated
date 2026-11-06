@@ -68,7 +68,20 @@ export function renderSettingsWorkspace() {
   computeStorageHealth();
 }
 
-async function computeStorageHealth() {
+export async function computeStorageHealth() {
+  const usedEl = document.getElementById('settings-storage-used');
+  const pctEl = document.getElementById('settings-storage-percent');
+  const availableEl = document.getElementById('settings-storage-available');
+  const countProjEl = document.getElementById('settings-count-projects');
+  const countChkEl = document.getElementById('settings-count-checklists');
+  const countCasesEl = document.getElementById('settings-count-cases');
+
+  // Display initial loading state for cloud storage metrics
+  if (usedEl) usedEl.textContent = 'Loading...';
+  if (pctEl) pctEl.textContent = 'Retrieving MongoDB storage metrics...';
+  if (availableEl) availableEl.textContent = 'Calculating...';
+
+  // 1. Calculate project and test case counts from active workspace
   const projects = getProjects() || [];
   let totalCases = 0;
   for (const p of projects) {
@@ -79,6 +92,10 @@ async function computeStorageHealth() {
     }
   }
 
+  if (countProjEl) countProjEl.textContent = String(projects.length);
+  if (countCasesEl) countCasesEl.textContent = String(totalCases);
+
+  // 2. Retrieve checklist count
   let checklistsCount = 0;
   try {
     const res = await apiFetch('/api/checklists');
@@ -89,22 +106,51 @@ async function computeStorageHealth() {
   } catch {
     // Non-fatal if offline
   }
-
-  const serializedProjects = JSON.stringify(projects);
-  const bytesUsed = new Blob([serializedProjects]).size;
-  const kbUsed = (bytesUsed / 1024).toFixed(1);
-
-  const usedEl = document.getElementById('settings-storage-used');
-  const pctEl = document.getElementById('settings-storage-percent');
-  const countProjEl = document.getElementById('settings-count-projects');
-  const countChkEl = document.getElementById('settings-count-checklists');
-  const countCasesEl = document.getElementById('settings-count-cases');
-
-  if (usedEl) usedEl.textContent = `${kbUsed} KB`;
-  if (pctEl) pctEl.textContent = `Serialized JSON payload`;
-  if (countProjEl) countProjEl.textContent = String(projects.length);
   if (countChkEl) countChkEl.textContent = String(checklistsCount);
-  if (countCasesEl) countCasesEl.textContent = String(totalCases);
+
+  // 3. Fetch actual MongoDB Atlas database storage metrics from backend
+  try {
+    const res = await apiFetch('/api/data/storage-usage');
+    if (res.ok) {
+      const data = await res.json();
+      const storage = data.storage || {};
+
+      const usedMb = typeof storage.usedMb === 'number' ? storage.usedMb : 0;
+      const usedBytes = typeof storage.usedBytes === 'number' ? storage.usedBytes : 0;
+      const capacityMb = typeof storage.capacityMb === 'number' ? storage.capacityMb : 512;
+      const availableMb = typeof storage.availableMb === 'number' ? storage.availableMb : capacityMb;
+      const usagePercentage = typeof storage.usagePercentage === 'number' ? storage.usagePercentage : 0;
+
+      let usedText = `${usedMb} MB`;
+      if (usedMb < 0.01 && usedBytes > 0) {
+        usedText = `${(usedBytes / 1024).toFixed(1)} KB (<0.01 MB)`;
+      } else if (usedMb === 0 && usedBytes === 0) {
+        usedText = `0 MB`;
+      }
+
+      if (usedEl) usedEl.textContent = usedText;
+      if (pctEl) {
+        pctEl.textContent = `${usagePercentage}% of ${capacityMb} MB (${availableMb} MB available)`;
+      }
+      if (availableEl) {
+        availableEl.textContent = `${availableMb} MB available`;
+      }
+    } else {
+      const errData = await res.json().catch(() => ({}));
+      const isOffline = res.status === 503 || errData.status === 'offline';
+      if (usedEl) usedEl.textContent = isOffline ? 'Database Offline' : 'Unavailable';
+      if (pctEl) {
+        pctEl.textContent = isOffline
+          ? 'MongoDB offline — storage metrics unavailable'
+          : (errData.error || 'Storage service unavailable');
+      }
+      if (availableEl) availableEl.textContent = 'Unavailable';
+    }
+  } catch (err) {
+    if (usedEl) usedEl.textContent = 'Unavailable';
+    if (pctEl) pctEl.textContent = 'Connection error retrieving storage stats';
+    if (availableEl) availableEl.textContent = 'Unavailable';
+  }
 }
 
 // Save preferences to backend
