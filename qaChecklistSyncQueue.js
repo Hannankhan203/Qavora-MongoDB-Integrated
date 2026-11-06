@@ -20,13 +20,13 @@ import { ChecklistAPI } from './qaChecklistStore.js';
 import { authController } from './authController.js';
 
 export const DB_NAME = 'qavora_offline_db';
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
 export const STORE_OPERATIONS = 'pending_checklist_operations';
 export const STORE_CACHE = 'offline_checklists_cache';
+export const STORE_SYNC_LOCKS = 'sync_locks';
 
 let dbInstance = null;
 let dbOpenPromise = null;
-let isSyncing = false;
 let globalSeqCounter = Date.now();
 
 function getNextSeq() {
@@ -41,11 +41,15 @@ function generateOpId(prefix = 'op') {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 }
 
+const TAB_LOCK_OWNER_ID = generateOpId('tab');
+const SYNC_LOCK_TTL_MS = 30000;
+
 // ============================================================================
 // In-Memory Storage Fallback (for Headless Node.js Test Environments)
 // ============================================================================
 const memoryOperations = new Map();
 const memoryChecklistsCache = new Map();
+const memorySyncLocks = new Map();
 
 function hasNativeIndexedDB() {
   return typeof globalThis !== 'undefined' &&
@@ -96,6 +100,11 @@ export async function openOfflineDatabase() {
           const cacheStore = db.createObjectStore(STORE_CACHE, { keyPath: 'id' });
           cacheStore.createIndex('userId', 'userId', { unique: false });
           cacheStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+        }
+
+        // 3. Cross-tab synchronization lease/lock store
+        if (!db.objectStoreNames.contains(STORE_SYNC_LOCKS)) {
+          db.createObjectStore(STORE_SYNC_LOCKS, { keyPath: 'lockKey' });
         }
       };
 
@@ -447,21 +456,302 @@ export async function processChecklistSyncQueue(targetUserId = null) {
     return { ok: false, syncedCount: 0, reason: 'Cross-account sync prevented' };
   }
 
-  // Mutex lock to prevent duplicate overlapping sync passes
-  if (isSyncing) {
+  const lockKey = `qavora_sync_${activeUserId}`;
+
+  if (
+    typeof navigator !== 'undefined' &&
+    navigator.locks &&
+    typeof navigator.locks.request === 'function'
+  ) {
+    return navigator.locks.request(
+      lockKey,
+      { ifAvailable: true },
+      async (lock) => {
+        if (!lock) {
+          return { ok: false, syncedCount: 0, reason: 'Sync in progress' };
+        }
+        return runSyncPass(activeUserId);
+      }
+    );
+  }
+
+  const lockResult = await acquireIndexedDbSyncLock(lockKey, TAB_LOCK_OWNER_ID, SYNC_LOCK_TTL_MS);
+  if (!lockResult.acquired) {
     return { ok: false, syncedCount: 0, reason: 'Sync in progress' };
   }
 
-  isSyncing = true;
-  let syncedCount = 0;
+  const { generation } = lockResult;
+  const renewIntervalMs = Math.max(1000, Math.floor(SYNC_LOCK_TTL_MS / 3));
+  const renewTimer = setInterval(() => {
+    renewIndexedDbSyncLock(lockKey, TAB_LOCK_OWNER_ID, generation, SYNC_LOCK_TTL_MS).catch(() => {});
+  }, renewIntervalMs);
+  if (typeof renewTimer.unref === 'function') {
+    renewTimer.unref();
+  }
 
   try {
-    const pendingOps = await getPendingOperations(activeUserId);
+    return await runSyncPass(
+      activeUserId,
+      () => verifyIndexedDbSyncLock(lockKey, TAB_LOCK_OWNER_ID, generation),
+      { lockKey, ownerId: TAB_LOCK_OWNER_ID, generation }
+    );
+  } finally {
+    clearInterval(renewTimer);
+    await releaseIndexedDbSyncLock(lockKey, TAB_LOCK_OWNER_ID, generation);
+  }
+}
+
+export async function acquireIndexedDbSyncLock(
+  lockKey,
+  ownerId = TAB_LOCK_OWNER_ID,
+  ttlMs = SYNC_LOCK_TTL_MS
+) {
+  const db = await openOfflineDatabase();
+  const now = Date.now();
+
+  if (db.__isMemoryFallback) {
+    const existing = memorySyncLocks.get(lockKey);
+    if (!existing || existing.expiresAt <= now || existing.ownerId === ownerId) {
+      const nextGen = (existing?.generation || 0) + 1;
+      memorySyncLocks.set(lockKey, {
+        lockKey,
+        ownerId,
+        generation: nextGen,
+        acquiredAt: now,
+        expiresAt: now + ttlMs
+      });
+      return { acquired: true, generation: nextGen };
+    }
+    return { acquired: false, generation: 0 };
+  }
+
+  return new Promise((resolve) => {
+    const tx = db.transaction([STORE_SYNC_LOCKS], 'readwrite');
+    const store = tx.objectStore(STORE_SYNC_LOCKS);
+    const getReq = store.get(lockKey);
+
+    getReq.onsuccess = () => {
+      const existing = getReq.result;
+      if (!existing || existing.expiresAt <= now || existing.ownerId === ownerId) {
+        const nextGen = (existing?.generation || 0) + 1;
+        const putReq = store.put({
+          lockKey,
+          ownerId,
+          generation: nextGen,
+          acquiredAt: now,
+          expiresAt: now + ttlMs
+        });
+        putReq.onsuccess = () => resolve({ acquired: true, generation: nextGen });
+        putReq.onerror = () => resolve({ acquired: false, generation: 0 });
+      } else {
+        resolve({ acquired: false, generation: 0 });
+      }
+    };
+    getReq.onerror = () => resolve({ acquired: false, generation: 0 });
+  });
+}
+
+export async function renewIndexedDbSyncLock(
+  lockKey,
+  ownerId = TAB_LOCK_OWNER_ID,
+  generation,
+  ttlMs = SYNC_LOCK_TTL_MS
+) {
+  const db = await openOfflineDatabase();
+  const now = Date.now();
+
+  if (db.__isMemoryFallback) {
+    const existing = memorySyncLocks.get(lockKey);
+    if (
+      existing &&
+      existing.ownerId === ownerId &&
+      existing.generation === generation &&
+      existing.expiresAt > now
+    ) {
+      existing.expiresAt = now + ttlMs;
+      return true;
+    }
+    return false;
+  }
+
+  return new Promise((resolve) => {
+    const tx = db.transaction([STORE_SYNC_LOCKS], 'readwrite');
+    const store = tx.objectStore(STORE_SYNC_LOCKS);
+    const getReq = store.get(lockKey);
+    getReq.onsuccess = () => {
+      const existing = getReq.result;
+      if (
+        existing &&
+        existing.ownerId === ownerId &&
+        existing.generation === generation &&
+        existing.expiresAt > now
+      ) {
+        const putReq = store.put({
+          ...existing,
+          expiresAt: now + ttlMs
+        });
+        putReq.onsuccess = () => resolve(true);
+        putReq.onerror = () => resolve(false);
+      } else {
+        resolve(false);
+      }
+    };
+    getReq.onerror = () => resolve(false);
+  });
+}
+
+export async function verifyIndexedDbSyncLock(
+  lockKey,
+  ownerId = TAB_LOCK_OWNER_ID,
+  generation
+) {
+  const db = await openOfflineDatabase();
+  const now = Date.now();
+
+  if (db.__isMemoryFallback) {
+    const existing = memorySyncLocks.get(lockKey);
+    return Boolean(
+      existing &&
+      existing.ownerId === ownerId &&
+      existing.generation === generation &&
+      existing.expiresAt > now
+    );
+  }
+
+  return new Promise((resolve) => {
+    const tx = db.transaction([STORE_SYNC_LOCKS], 'readonly');
+    const store = tx.objectStore(STORE_SYNC_LOCKS);
+    const getReq = store.get(lockKey);
+    getReq.onsuccess = () => {
+      const existing = getReq.result;
+      resolve(
+        Boolean(
+          existing &&
+          existing.ownerId === ownerId &&
+          existing.generation === generation &&
+          existing.expiresAt > now
+        )
+      );
+    };
+    getReq.onerror = () => resolve(false);
+  });
+}
+
+export async function releaseIndexedDbSyncLock(
+  lockKey,
+  ownerId = TAB_LOCK_OWNER_ID,
+  generation
+) {
+  const db = await openOfflineDatabase();
+
+  if (db.__isMemoryFallback) {
+    const existing = memorySyncLocks.get(lockKey);
+    if (
+      existing &&
+      existing.ownerId === ownerId &&
+      (generation === undefined || existing.generation === generation)
+    ) {
+      memorySyncLocks.set(lockKey, {
+        lockKey,
+        ownerId: null,
+        generation: existing.generation,
+        expiresAt: 0
+      });
+    }
+    return;
+  }
+
+  return new Promise((resolve) => {
+    const tx = db.transaction([STORE_SYNC_LOCKS], 'readwrite');
+    const store = tx.objectStore(STORE_SYNC_LOCKS);
+    const getReq = store.get(lockKey);
+    getReq.onsuccess = () => {
+      const existing = getReq.result;
+      if (
+        existing &&
+        existing.ownerId === ownerId &&
+        (generation === undefined || existing.generation === generation)
+      ) {
+        const putReq = store.put({
+          lockKey,
+          ownerId: null,
+          generation: existing.generation,
+          expiresAt: 0
+        });
+        putReq.onsuccess = () => resolve();
+        putReq.onerror = () => resolve();
+      } else {
+        resolve();
+      }
+    };
+    getReq.onerror = () => resolve();
+  });
+}
+
+export async function dequeueOperationIfLockValid(
+  opId,
+  lockKey,
+  ownerId = TAB_LOCK_OWNER_ID,
+  generation
+) {
+  const db = await openOfflineDatabase();
+  const now = Date.now();
+
+  if (db.__isMemoryFallback) {
+    const lock = memorySyncLocks.get(lockKey);
+    if (
+      !lock ||
+      lock.ownerId !== ownerId ||
+      lock.expiresAt <= now ||
+      (generation !== undefined && lock.generation !== generation)
+    ) {
+      return false;
+    }
+    memoryOperations.delete(String(opId));
+    return true;
+  }
+
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([STORE_SYNC_LOCKS, STORE_OPERATIONS], 'readwrite');
+    const lockStore = tx.objectStore(STORE_SYNC_LOCKS);
+    const opStore = tx.objectStore(STORE_OPERATIONS);
+    let deleted = false;
+
+    const getReq = lockStore.get(lockKey);
+    getReq.onsuccess = () => {
+      const lock = getReq.result;
+      if (
+        !lock ||
+        lock.ownerId !== ownerId ||
+        lock.expiresAt <= now ||
+        (generation !== undefined && lock.generation !== generation)
+      ) {
+        deleted = false;
+        return;
+      }
+      opStore.delete(opId);
+      deleted = true;
+    };
+    getReq.onerror = () => reject(getReq.error);
+    tx.oncomplete = () => resolve(deleted);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => resolve(false);
+  });
+}
+
+async function runSyncPass(activeUserId, verifyLock = null, lockContext = null) {
+  let syncedCount = 0;
+
+  const pendingOps = await getPendingOperations(activeUserId);
     if (pendingOps.length === 0) {
       return { ok: true, syncedCount: 0 };
     }
 
     for (const op of pendingOps) {
+      if (verifyLock && !(await verifyLock())) {
+        console.warn('Qavora SyncQueue: Lost sync lock ownership; halting queue.');
+        break;
+      }
       // Re-verify user authentication before processing each op
       const freshUser = typeof authController !== 'undefined' ? authController.getUser() : null;
       if (!freshUser || String(freshUser.userId).trim() !== activeUserId) {
@@ -529,7 +819,20 @@ export async function processChecklistSyncQueue(targetUserId = null) {
       }
 
       if (success) {
-        await dequeueOperation(op.id);
+        if (lockContext) {
+          const dequeued = await dequeueOperationIfLockValid(
+            op.id,
+            lockContext.lockKey,
+            lockContext.ownerId,
+            lockContext.generation
+          );
+          if (!dequeued) {
+            console.warn('Qavora SyncQueue: Lost sync lock ownership before queue deletion; halting queue.');
+            break;
+          }
+        } else {
+          await dequeueOperation(op.id);
+        }
         syncedCount += 1;
       } else {
         // NEVER discard pending operations because of network errors or server downtime
@@ -545,10 +848,7 @@ export async function processChecklistSyncQueue(targetUserId = null) {
       }
     }
 
-    return { ok: true, syncedCount };
-  } finally {
-    isSyncing = false;
-  }
+  return { ok: true, syncedCount };
 }
 
 // ============================================================================

@@ -22,6 +22,13 @@ jobs:
   verify:
     name: Build & Test Verification
     runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+    env:
+      MONGODB_TEST_URI: mongodb://127.0.0.1:27017/qavora_ci_test
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -40,8 +47,14 @@ jobs:
             npm install --legacy-peer-deps
           fi
 
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
       - name: TypeScript Lint & Typecheck
         run: npm run lint
+
+      - name: Run automated tests
+        run: npm test
 
       - name: Build production bundle
         run: npm run build

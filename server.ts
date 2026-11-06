@@ -19,8 +19,20 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
-// Enable reverse proxy trust (1 hop) for accurate client IP identification on Cloud Run, Vercel, and Render
-app.set('trust proxy', 1);
+// Enable reverse proxy trust (default 1 hop) for accurate client IP identification on Cloud Run, Vercel, and Render
+function resolveTrustProxy(): number | boolean | string {
+  const raw = process.env.TRUST_PROXY?.trim();
+  if (!raw) return 1;
+  if (raw.toLowerCase() === 'false' || raw === '0') return false;
+  if (raw.toLowerCase() === 'true') {
+    console.warn('[Qavora Server] TRUST_PROXY=true is insecure; falling back to 1 hop.');
+    return 1;
+  }
+  const num = Number(raw);
+  if (Number.isInteger(num) && num > 0) return num;
+  return raw;
+}
+app.set('trust proxy', resolveTrustProxy());
 
 // ============================================================================
 // 1. Dynamic Port Configuration & Validation
@@ -66,8 +78,9 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   }
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
 
-  // Strict-Transport-Security in production environments (or when forwarded over HTTPS)
-  if (isProdOrVercel || req.secure || req.headers['x-forwarded-proto'] === 'https') {
+  // Strict-Transport-Security only in production over HTTPS (respecting TRUST_PROXY via req.secure) and never on localhost
+  const isLocalhost = req.hostname === 'localhost' || req.hostname === '127.0.0.1' || req.hostname === '::1';
+  if (isProdOrVercel && req.secure && !isLocalhost) {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
   }
 
@@ -97,23 +110,35 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-app.use(express.json({ limit: '20mb' }));
+// Scoped 20 MB JSON body limit for large payload routes (data import, checklists, project data)
+const largeJsonParser = express.json({ limit: '20mb' });
+app.use('/api/data/import', largeJsonParser);
+app.use('/api/checklists', largeJsonParser);
+app.use('/api/projects', largeJsonParser);
+
+// Default 1 MB JSON body limit for authentication and standard API routes
+app.use(express.json({ limit: '1mb' }));
 
 // ============================================================================
 // 2b. HttpOnly Cookie, CORS & CSRF Protection (SEC-002)
 // ============================================================================
-const AUTH_COOKIE_NAME = 'qavora_auth_token';
-const CSRF_COOKIE_NAME = 'qavora_csrf_token';
+const IS_PROD_ENV = process.env.NODE_ENV === 'production';
+const AUTH_COOKIE_NAME = IS_PROD_ENV ? '__Host-qavora_auth_token' : 'qavora_auth_token';
+const CSRF_COOKIE_NAME = IS_PROD_ENV ? '__Host-qavora_csrf_token' : 'qavora_csrf_token';
 
-function parseCookies(cookieHeader?: string): Record<string, string> {
+function parseCookies(cookieHeader?: string): { cookies: Record<string, string>; duplicates: Set<string> } {
   const cookies: Record<string, string> = {};
-  if (!cookieHeader || typeof cookieHeader !== 'string') return cookies;
+  const duplicates = new Set<string>();
+  if (!cookieHeader || typeof cookieHeader !== 'string') return { cookies, duplicates };
   const pairs = cookieHeader.split(';');
   for (const pair of pairs) {
     const idx = pair.indexOf('=');
     if (idx > 0) {
       const key = pair.slice(0, idx).trim();
       const val = pair.slice(idx + 1).trim();
+      if (Object.prototype.hasOwnProperty.call(cookies, key)) {
+        duplicates.add(key);
+      }
       try {
         cookies[key] = decodeURIComponent(val);
       } catch {
@@ -121,7 +146,7 @@ function parseCookies(cookieHeader?: string): Record<string, string> {
       }
     }
   }
-  return cookies;
+  return { cookies, duplicates };
 }
 
 function parseJwtExpiryToMs(expiresIn: string | number): number {
@@ -165,9 +190,21 @@ function clearAuthCookie(res: Response) {
   res.clearCookie(AUTH_COOKIE_NAME, getAuthCookieOptions());
 }
 
-function setCsrfCookie(res: Response): string {
+function computeCsrfSignature(nonce: string, authToken?: string): string {
+  const sessionKey = authToken
+    ? crypto.createHash('sha256').update(authToken).digest('hex')
+    : 'anonymous';
+  return crypto
+    .createHmac('sha256', getJwtSecret())
+    .update(`${sessionKey}.${nonce}`)
+    .digest('hex');
+}
+
+function setCsrfCookie(res: Response, authToken?: string): string {
   const isProd = process.env.NODE_ENV === 'production';
-  const csrfToken = crypto.randomBytes(32).toString('hex');
+  const nonce = crypto.randomBytes(24).toString('hex');
+  const sig = computeCsrfSignature(nonce, authToken);
+  const csrfToken = `${nonce}.${sig}`;
   res.cookie(CSRF_COOKIE_NAME, csrfToken, {
     httpOnly: false,
     secure: isProd,
@@ -177,22 +214,72 @@ function setCsrfCookie(res: Response): string {
   return csrfToken;
 }
 
-// CORS with credentials for /api
-app.use('/api', (req: Request, res: Response, next: NextFunction) => {
-  const origin = req.headers.origin;
-  const allowedOrigins = (process.env.CORS_ORIGIN || '')
+function getTrustedOrigins(): Set<string> {
+  const trusted = new Set<string>();
+  const rawCors = (process.env.CORS_ORIGIN || '')
     .split(',')
     .map((o) => o.trim())
     .filter(Boolean);
 
-  if (origin) {
-    const host = req.headers.host;
-    const isSameHost = host && (origin === `http://${host}` || origin === `https://${host}`);
-    if (isSameHost || allowedOrigins.includes(origin)) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-      res.setHeader('Vary', 'Origin');
+  for (const entry of rawCors) {
+    try {
+      const parsed = new URL(entry);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        trusted.add(parsed.origin);
+      }
+    } catch {
+      // Ignore malformed CORS_ORIGIN entries
     }
+  }
+
+  const canonicalCandidates = [
+    process.env.APP_ORIGIN,
+    process.env.PUBLIC_URL,
+    process.env.RENDER_EXTERNAL_URL,
+    process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined
+  ].filter((v): v is string => Boolean(v && v.trim()));
+
+  for (const candidate of canonicalCandidates) {
+    try {
+      const parsed = new URL(candidate.trim());
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        trusted.add(parsed.origin);
+      }
+    } catch {
+      // Ignore malformed canonical URL
+    }
+  }
+
+  if (process.env.NODE_ENV !== 'production') {
+    trusted.add(`http://localhost:${PORT}`);
+    trusted.add(`http://127.0.0.1:${PORT}`);
+    trusted.add('http://localhost:3000');
+    trusted.add('http://127.0.0.1:3000');
+  }
+
+  return trusted;
+}
+
+function isOriginTrusted(originHeader: string | undefined): boolean {
+  if (!originHeader || typeof originHeader !== 'string') return false;
+  const trimmed = originHeader.trim();
+  if (!trimmed || trimmed === 'null') return false;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    return getTrustedOrigins().has(parsed.origin);
+  } catch {
+    return false;
+  }
+}
+
+// CORS with credentials for /api
+app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+  const origin = req.headers.origin;
+  if (origin && isOriginTrusted(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', new URL(origin).origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Vary', 'Origin');
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-CSRF-Token, X-Requested-With');
@@ -210,18 +297,13 @@ app.use('/api', (req: Request, res: Response, next: NextFunction) => {
     return next();
   }
 
-  // Verify Origin/Referer if present
   const origin = req.headers.origin;
-  const host = req.headers.host;
-  if (origin && host) {
-    const allowedOrigins = (process.env.CORS_ORIGIN || '')
-      .split(',')
-      .map((o) => o.trim())
-      .filter(Boolean);
-    const isSameHost = origin === `http://${host}` || origin === `https://${host}`;
-    if (!isSameHost && !allowedOrigins.includes(origin)) {
+  if (origin !== undefined) {
+    if (!isOriginTrusted(origin)) {
       return res.status(403).json({ error: 'Forbidden: Cross-origin request rejected.' });
     }
+  } else if (req.path === '/auth/login' || req.path === '/auth/register') {
+    return res.status(403).json({ error: 'Forbidden: Origin header required.' });
   }
 
   // Login and register establish a new session
@@ -229,7 +311,16 @@ app.use('/api', (req: Request, res: Response, next: NextFunction) => {
     return next();
   }
 
-  const cookies = parseCookies(req.headers.cookie);
+  const { cookies, duplicates } = parseCookies(req.headers.cookie);
+  if (duplicates.has(CSRF_COOKIE_NAME) || duplicates.has(AUTH_COOKIE_NAME)) {
+    return res.status(403).json({ error: 'Invalid or duplicate security cookies.' });
+  }
+
+  const authToken = cookies[AUTH_COOKIE_NAME];
+  if (!authToken) {
+    return res.status(403).json({ error: 'Invalid or missing CSRF token.' });
+  }
+
   const cookieCsrf = cookies[CSRF_COOKIE_NAME];
   const headerCsrf = req.headers['x-csrf-token'];
 
@@ -240,6 +331,23 @@ app.use('/api', (req: Request, res: Response, next: NextFunction) => {
     !crypto.timingSafeEqual(Buffer.from(cookieCsrf), Buffer.from(headerCsrf))
   ) {
     return res.status(403).json({ error: 'Invalid or missing CSRF token.' });
+  }
+
+  const parts = cookieCsrf.split('.');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    return res.status(403).json({ error: 'Invalid or missing CSRF token.' });
+  }
+
+  try {
+    const expectedSig = computeCsrfSignature(parts[0], authToken);
+    if (
+      parts[1].length !== expectedSig.length ||
+      !crypto.timingSafeEqual(Buffer.from(parts[1]), Buffer.from(expectedSig))
+    ) {
+      return res.status(403).json({ error: 'Invalid or missing CSRF token.' });
+    }
+  } catch {
+    return res.status(500).json({ error: 'Authentication service misconfigured: JWT_SECRET is missing.' });
   }
 
   next();
@@ -893,7 +1001,7 @@ async function requireAuth(req: Request, res: Response, next: NextFunction) {
       });
     }
 
-    const cookies = parseCookies(req.headers.cookie);
+    const { cookies } = parseCookies(req.headers.cookie);
     let token = cookies[AUTH_COOKIE_NAME];
     if (!token) {
       const authHeader = req.headers.authorization;
@@ -954,12 +1062,94 @@ async function requireAuth(req: Request, res: Response, next: NextFunction) {
 }
 
 // ============================================================================
-// Authentication Rate Limiters (SEC-001)
+// Authentication Rate Limiters (SEC-001 / QAV-SEC-002)
 // ============================================================================
+class MongoRateLimitStore {
+  private windowMs: number;
+  prefix: string;
+  private ttlIndexEnsured = false;
+
+  constructor(windowMs: number, prefix: string) {
+    this.windowMs = windowMs;
+    this.prefix = prefix;
+  }
+
+  private ensureTtlIndex(col: any): void {
+    if (this.ttlIndexEnsured) return;
+    this.ttlIndexEnsured = true;
+    col.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }).catch((err: any) => {
+      this.ttlIndexEnsured = false;
+      console.warn(`[Qavora Server] Failed to ensure rate_limits TTL index: ${sanitizeDiagnosticText(err?.message || err)}`);
+    });
+  }
+
+  async increment(key: string): Promise<{ totalHits: number; resetTime: Date }> {
+    if (!db) {
+      const err: any = new Error('Service temporarily unavailable (database offline).');
+      err.name = 'MongoNetworkError';
+      err.status = 503;
+      throw err;
+    }
+
+    const now = new Date();
+    const docId = `${this.prefix}:${key}`;
+    const resetTime = new Date(now.getTime() + this.windowMs);
+    const col = db.collection('rate_limits');
+    this.ensureTtlIndex(col);
+
+    const updated = await col.findOneAndUpdate(
+      { _id: docId },
+      [
+        {
+          $set: {
+            totalHits: {
+              $cond: [
+                { $gt: ['$expiresAt', now] },
+                { $add: ['$totalHits', 1] },
+                1
+              ]
+            },
+            expiresAt: {
+              $cond: [
+                { $gt: ['$expiresAt', now] },
+                '$expiresAt',
+                resetTime
+              ]
+            }
+          }
+        }
+      ],
+      { upsert: true, returnDocument: 'after' }
+    );
+
+    return {
+      totalHits: Number(updated?.totalHits || 1),
+      resetTime: updated?.expiresAt ? new Date(updated.expiresAt) : resetTime
+    };
+  }
+
+  async decrement(key: string): Promise<void> {
+    if (!db) return;
+    const docId = `${this.prefix}:${key}`;
+    await db.collection('rate_limits').updateOne(
+      { _id: docId, totalHits: { $gt: 0 } },
+      { $inc: { totalHits: -1 } }
+    );
+  }
+
+  async resetKey(key: string): Promise<void> {
+    if (!db) return;
+    const docId = `${this.prefix}:${key}`;
+    await db.collection('rate_limits').deleteOne({ _id: docId });
+  }
+}
+
 // 1. Login rate limiter: Maximum 5 attempts per 15 minutes per IP
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const loginRateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: LOGIN_WINDOW_MS,
   limit: 5, // 5 attempts per window per IP
+  store: new MongoRateLimitStore(LOGIN_WINDOW_MS, 'rl_login'),
   standardHeaders: true, // draft-6/draft-7 RateLimit-* headers
   legacyHeaders: false, // Disable X-RateLimit-* headers
   statusCode: 429,
@@ -971,9 +1161,11 @@ const loginRateLimiter = rateLimit({
 });
 
 // 2. Registration rate limiter: Maximum 3 registration attempts per hour per IP
+const REGISTER_WINDOW_MS = 60 * 60 * 1000;
 const registerRateLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
+  windowMs: REGISTER_WINDOW_MS,
   limit: 3, // 3 registration attempts per hour per IP
+  store: new MongoRateLimitStore(REGISTER_WINDOW_MS, 'rl_register'),
   standardHeaders: true, // draft-6/draft-7 RateLimit-* headers
   legacyHeaders: false, // Disable X-RateLimit-* headers
   statusCode: 429,
@@ -1080,7 +1272,7 @@ app.post("/api/auth/register", registerRateLimiter, async (req: Request, res: Re
     );
 
     setAuthCookie(res, token, tokenExpiry);
-    setCsrfCookie(res);
+    setCsrfCookie(res, token);
 
     return res.status(201).json({
       success: true,
@@ -1164,7 +1356,7 @@ app.post("/api/auth/login", loginRateLimiter, async (req: Request, res: Response
     );
 
     setAuthCookie(res, token, tokenExpiry);
-    setCsrfCookie(res);
+    setCsrfCookie(res, token);
 
     return res.json({
       success: true,
@@ -1197,7 +1389,8 @@ app.post("/api/auth/logout", (req: Request, res: Response) => {
 
 // 2c. GET /api/auth/csrf - Issue CSRF token cookie
 app.get("/api/auth/csrf", (req: Request, res: Response) => {
-  setCsrfCookie(res);
+  const { cookies } = parseCookies(req.headers.cookie);
+  setCsrfCookie(res, cookies[AUTH_COOKIE_NAME]);
   return res.json({ success: true });
 });
 

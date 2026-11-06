@@ -13,7 +13,8 @@
     "prestart": "npm run build",
     "start": "node dist/server.mjs",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx --test tests/**/*.test.js"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
@@ -33,6 +34,7 @@
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.28.2",
     "mongodb-memory-server": "^11.3.0",
+    "playwright": "^1.65.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2"

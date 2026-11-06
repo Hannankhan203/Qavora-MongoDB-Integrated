@@ -292,6 +292,20 @@ cd Test-Pilot
 npm install
 ```
 
+### Environment Configuration
+Copy `.env.example` to `.env` and configure the required variables:
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `MONGODB_URI` | Yes | — | MongoDB connection string for persistent storage. |
+| `MONGODB_DB` | No | `qavora` | Target MongoDB database name. |
+| `MONGODB_STORAGE_LIMIT_MB` | No | `512` | Positive number (in MB) used as the reference storage capacity limit for `/api/data/storage-usage`. |
+| `JWT_SECRET` | Yes | — | Secret key for signing JWTs (minimum 16 characters). |
+| `JWT_EXPIRES_IN` | No | `7d` | JWT expiration duration (e.g., `7d`, `24h`). |
+| `CORS_ORIGIN` | No | — | Comma-separated list of allowed cross-origin origins (e.g., `https://app.example.com,https://admin.example.com`). Same-host requests are always allowed. |
+| `TRUST_PROXY` | No | `1` | Reverse-proxy hop count for `req.ip` and rate limiting (`0` or `false` for direct connections). |
+| `VITE_BASE_PATH` | No | `/` | Base public path for Vite assets. |
+
 ---
 
 ## Development

@@ -32,12 +32,24 @@ export async function apiFetch(url, options = {}) {
     headers['Content-Type'] = 'application/json';
   }
 
-  const response = await fetch(url, {
-    cache: 'no-store',
-    credentials: 'include',
-    ...options,
-    headers
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      cache: 'no-store',
+      credentials: 'include',
+      ...options,
+      headers
+    });
+  } catch (err) {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('qavora:db-status-change', { detail: { database: 'disconnected' } }));
+    }
+    const networkError = new Error(err?.message || 'Network request failed (offline or server unreachable).');
+    networkError.name = 'NetworkError';
+    networkError.isNetworkError = true;
+    networkError.cause = err;
+    throw networkError;
+  }
 
   if (response.status === 401 && typeof authController !== 'undefined' && typeof authController.handleUnauthorized === 'function') {
     authController.handleUnauthorized();
@@ -51,9 +63,19 @@ export async function apiFetch(url, options = {}) {
 }
 
 export async function apiJson(url, options = {}) {
-  const response = await apiFetch(url, options);
-  const data = await response.json().catch(() => null);
-  return { ok: response.ok, status: response.status, data, response };
+  try {
+    const response = await apiFetch(url, options);
+    const data = await response.json().catch(() => null);
+    return { ok: response.ok, status: response.status, data, response };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      data: { error: err?.message || 'Network request failed (offline or server unreachable).' },
+      response: null,
+      isNetworkError: Boolean(err?.isNetworkError)
+    };
+  }
 }
 
 export async function checkBackendHealth() {

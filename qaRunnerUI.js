@@ -1073,23 +1073,13 @@ export function initQARunnerAndChecklists({
   // ==========================================================================
   // Test Completion Report Viewer & Exporter (Prompt 5)
   // ==========================================================================
-  function openCompletionReportModal(checklistId) {
-    const checklist = getChecklistById(checklistId);
-    if (!checklist) {
-      showMsg('Checklist not found.', 'error');
-      return;
-    }
-
-    const reportData = getChecklistReportData(checklist);
-    if (!reportData) {
-      showMsg('Could not assemble test report data.', 'error');
-      return;
-    }
-
+  function populateCompletionReportModal(reportData, preserveTab = false) {
     UIState.activeReportData = reportData;
     UIState.activeReportMd = generateMarkdownReport(reportData);
     UIState.activeReportTxt = generatePlainTextReport(reportData);
-    UIState.activeReportTab = 'overview';
+    if (!preserveTab) {
+      UIState.activeReportTab = 'overview';
+    }
 
     if (els.reportModalChecklistTitle) {
       els.reportModalChecklistTitle.textContent = reportData.title;
@@ -1111,8 +1101,52 @@ export function initQARunnerAndChecklists({
     // Populate Visual Overview
     renderCompletionReportVisual(reportData);
 
-    // Switch to Overview tab
-    switchReportTab('overview');
+    // Switch to Overview tab (or preserve current tab on background refresh)
+    switchReportTab(UIState.activeReportTab || 'overview');
+  }
+
+  function refreshCompletionReportModalIfOpen() {
+    if (
+      !els.reportModal ||
+      !els.reportModal.classList.contains('open') ||
+      !UIState.activeReportData ||
+      !UIState.activeReportData.checklistId
+    ) {
+      return;
+    }
+
+    const latestChecklist = getChecklistById(UIState.activeReportData.checklistId);
+    if (!latestChecklist) {
+      return;
+    }
+
+    if (
+      latestChecklist.updatedAt === UIState.activeReportData.updatedAt &&
+      latestChecklist.completedAt === UIState.activeReportData.completedAt
+    ) {
+      return;
+    }
+
+    const reportData = getChecklistReportData(latestChecklist);
+    if (reportData) {
+      populateCompletionReportModal(reportData, true);
+    }
+  }
+
+  function openCompletionReportModal(checklistId) {
+    const checklist = getChecklistById(checklistId);
+    if (!checklist) {
+      showMsg('Checklist not found.', 'error');
+      return;
+    }
+
+    const reportData = getChecklistReportData(checklist);
+    if (!reportData) {
+      showMsg('Could not assemble test report data.', 'error');
+      return;
+    }
+
+    populateCompletionReportModal(reportData, false);
 
     if (els.reportModal) {
       els.reportModal.classList.add('open');
@@ -1812,6 +1846,7 @@ export function initQARunnerAndChecklists({
 
   function renderRunnerView() {
     refreshGlobalBadgesAndBanners();
+    refreshCompletionReportModalIfOpen();
     const { checklists } = loadAllChecklists();
 
     let activeChecklist = UIState.activeChecklistId
