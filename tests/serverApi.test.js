@@ -50,6 +50,11 @@ test('Auth and API endpoints fail closed with HTTP 503 when MongoDB is offline',
 
     const chkRes = await fetch(`${baseUrl}/api/checklists`);
     assert.equal(chkRes.status, 503);
+
+    const csrfRes = await fetch(`${baseUrl}/api/auth/csrf`);
+    assert.equal(csrfRes.status, 503);
+    const csrfSetCookie = csrfRes.headers.get('set-cookie') || '';
+    assert.equal(csrfSetCookie.includes('csrf_token'), false, 'No CSRF cookie should be issued when offline');
   });
 });
 

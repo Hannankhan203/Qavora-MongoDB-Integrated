@@ -969,6 +969,7 @@ interface AuthenticatedRequest extends Request {
     name: string;
     role: string;
   };
+  authToken?: string;
 }
 
 function toSafeUser(user: any): SafeUserProfile {
@@ -1011,15 +1012,22 @@ async function requireAuth(req: Request, res: Response, next: NextFunction) {
         error: "Invalid or duplicate authentication token."
       });
     }
-    let token = cookies[AUTH_COOKIE_NAME];
-    if (!token) {
-      const authHeader = req.headers.authorization;
-      if (authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
-        token = authHeader.substring(7).trim();
-      }
+    const authCookieToken = cookies[AUTH_COOKIE_NAME];
+    const authHeader = req.headers.authorization;
+    let bearerToken: string | undefined;
+    if (authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+      bearerToken = authHeader.substring(7).trim();
     }
 
-    if (!token) {
+    if (authCookieToken && bearerToken && authCookieToken !== bearerToken) {
+      return res.status(401).json({
+        error: "Conflicting authentication credentials provided."
+      });
+    }
+
+    const token = authCookieToken || bearerToken;
+
+    if (!token || typeof token !== 'string' || !token.trim()) {
       return res.status(401).json({
         error: "Authentication token missing or invalid."
       });
@@ -1039,7 +1047,7 @@ async function requireAuth(req: Request, res: Response, next: NextFunction) {
       });
     }
 
-    if (!decoded || !decoded.userId) {
+    if (!decoded || typeof decoded !== 'object' || !decoded.userId || typeof decoded.userId !== 'string' || !decoded.userId.trim()) {
       return res.status(401).json({
         error: "Invalid authentication token payload."
       });
@@ -1052,12 +1060,59 @@ async function requireAuth(req: Request, res: Response, next: NextFunction) {
       });
     }
 
+    // Safe normalization of database tokenVersion (must be integer >= 1, defaults to 1)
+    let expectedTokenVersion = 1;
+    if (typeof user.tokenVersion === 'number' && Number.isInteger(user.tokenVersion) && user.tokenVersion >= 1) {
+      expectedTokenVersion = user.tokenVersion;
+    } else if (typeof user.tokenVersion === 'string' && /^\d+$/.test(user.tokenVersion)) {
+      const parsed = parseInt(user.tokenVersion, 10);
+      if (parsed >= 1) expectedTokenVersion = parsed;
+    }
+
+    // Safe normalization and strict validation of decoded tokenVersion
+    let tokenVersionValid = true;
+    if (decoded.tokenVersion !== undefined) {
+      if (
+        typeof decoded.tokenVersion !== 'number' ||
+        !Number.isInteger(decoded.tokenVersion) ||
+        !Number.isFinite(decoded.tokenVersion) ||
+        decoded.tokenVersion < 1 ||
+        decoded.tokenVersion < expectedTokenVersion
+      ) {
+        tokenVersionValid = false;
+      }
+    } else {
+      // Legacy session without tokenVersion: only valid if user has never incremented version beyond 1
+      if (expectedTokenVersion > 1) {
+        tokenVersionValid = false;
+      }
+    }
+
+    const isRevoked =
+      user.revoked === true ||
+      user.isRevoked === true ||
+      user.disabled === true ||
+      user.sessionRevoked === true ||
+      user.status === 'revoked' ||
+      user.status === 'disabled' ||
+      user.status === 'suspended' ||
+      user.status === 'inactive' ||
+      !tokenVersionValid ||
+      (Array.isArray(user.revokedTokens) && user.revokedTokens.includes(crypto.createHash('sha256').update(token).digest('hex')));
+
+    if (isRevoked) {
+      return res.status(401).json({
+        error: "Session has been revoked. Please log in again."
+      });
+    }
+
     (req as AuthenticatedRequest).user = {
       userId: String(user.userId),
       email: String(user.email),
       name: String(user.name),
       role: String(user.role || 'QA Tester')
     };
+    (req as AuthenticatedRequest).authToken = token;
 
     next();
   } catch (error: any) {
@@ -1252,6 +1307,7 @@ app.post("/api/auth/register", registerRateLimiter, async (req: Request, res: Re
       name: trimmedName,
       role: typeof role === 'string' && role.trim() ? role.trim() : 'QA Tester',
       avatarInitials: getAvatarInitials(trimmedName),
+      tokenVersion: 1,
       createdAt: now,
       updatedAt: now,
       lastLoginAt: now
@@ -1274,7 +1330,8 @@ app.post("/api/auth/register", registerRateLimiter, async (req: Request, res: Re
         userId: newUser.userId,
         email: newUser.email,
         name: newUser.name,
-        role: newUser.role
+        role: newUser.role,
+        tokenVersion: newUser.tokenVersion
       },
       jwtSecret,
       { expiresIn: tokenExpiry }
@@ -1358,7 +1415,8 @@ app.post("/api/auth/login", loginRateLimiter, async (req: Request, res: Response
         userId: user.userId,
         email: user.email,
         name: user.name,
-        role: user.role || 'QA Tester'
+        role: user.role || 'QA Tester',
+        tokenVersion: user.tokenVersion || 1
       },
       jwtSecret,
       { expiresIn: tokenExpiry }
@@ -1381,8 +1439,43 @@ app.post("/api/auth/login", loginRateLimiter, async (req: Request, res: Response
   }
 });
 
-// 2b. POST /api/auth/logout - Clear authentication and CSRF cookies
-app.post("/api/auth/logout", (req: Request, res: Response) => {
+// 2b. POST /api/auth/logout - Clear authentication and CSRF cookies & invalidate session
+app.post("/api/auth/logout", async (req: Request, res: Response) => {
+  try {
+    const { cookies } = parseCookies(req.headers.cookie);
+    let token = cookies[AUTH_COOKIE_NAME];
+    if (!token) {
+      const authHeader = req.headers.authorization;
+      if (authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+        token = authHeader.substring(7).trim();
+      }
+    }
+    if (token && db) {
+      try {
+        const decoded: any = jwt.decode(token);
+        if (decoded && typeof decoded === 'object' && typeof decoded.userId === 'string') {
+          const existingUser = await db.collection("users").findOne({ userId: decoded.userId });
+          const currentVersion = (typeof existingUser?.tokenVersion === 'number' && Number.isInteger(existingUser.tokenVersion) && existingUser.tokenVersion >= 1)
+            ? existingUser.tokenVersion
+            : 1;
+          await db.collection("users").updateOne(
+            { userId: decoded.userId },
+            {
+              $set: {
+                tokenVersion: currentVersion + 1,
+                updatedAt: new Date().toISOString()
+              }
+            }
+          );
+        }
+      } catch {
+        // Ignore decode error during logout cleanup
+      }
+    }
+  } catch {
+    // Ignore error
+  }
+
   clearAuthCookie(res);
   res.clearCookie(CSRF_COOKIE_NAME, {
     httpOnly: false,
@@ -1398,16 +1491,29 @@ app.post("/api/auth/logout", (req: Request, res: Response) => {
 
 // 2c. GET /api/auth/csrf - Issue CSRF token cookie for authenticated sessions only (QAV-AUDIT-003)
 app.get("/api/auth/csrf", requireAuth, (req: Request, res: Response) => {
-  const { cookies, duplicates } = parseCookies(req.headers.cookie);
-  if (duplicates.has(AUTH_COOKIE_NAME)) {
-    return res.status(401).json({ error: "Invalid or duplicate authentication cookie." });
+  try {
+    const { cookies, duplicates } = parseCookies(req.headers.cookie);
+    if (duplicates.has(AUTH_COOKIE_NAME) || duplicates.has(CSRF_COOKIE_NAME)) {
+      return res.status(401).json({ error: "Invalid or duplicate security cookies." });
+    }
+    const cookieAuthToken = cookies[AUTH_COOKIE_NAME];
+    const authReq = req as AuthenticatedRequest;
+    const verifiedToken = authReq.authToken;
+
+    if (!cookieAuthToken || !verifiedToken || cookieAuthToken !== verifiedToken) {
+      return res.status(401).json({ error: "Authentication cookie missing or invalid." });
+    }
+
+    if (!authReq.user || !authReq.user.userId) {
+      return res.status(401).json({ error: "Authenticated user context required." });
+    }
+
+    const csrfToken = setCsrfCookie(res, cookieAuthToken);
+    return res.json({ success: true, csrfToken });
+  } catch (error: any) {
+    console.error(`Error in CSRF token issuance: ${sanitizeDiagnosticText(error?.message || error)}`);
+    return res.status(500).json({ error: "Failed to issue CSRF token." });
   }
-  const authToken = cookies[AUTH_COOKIE_NAME];
-  if (!authToken) {
-    return res.status(401).json({ error: "Authentication cookie missing or invalid." });
-  }
-  const csrfToken = setCsrfCookie(res, authToken);
-  return res.json({ success: true, csrfToken });
 });
 
 // 3. GET /api/auth/me - Verify session token and retrieve user profile
@@ -3356,11 +3462,18 @@ app.delete("/api/checklists/:id", requireAuth, async (req: Request, res: Respons
   }
 });
 
-// Route-level error handler for database connection failures
+// Route-level error handler for database connection failures and API safety
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {
   if (err?.name === 'MongooseError' || err?.name === 'MongoNetworkError' || (err?.message && err.message.includes('buffering timed out'))) {
     console.warn('[Qavora Server] Database offline — returning 503 response');
     return res.status(503).json({ error: 'Service temporarily unavailable (database offline)' });
+  }
+  if (res.headersSent) {
+    return next(err);
+  }
+  if (req.path.startsWith('/api')) {
+    const statusCode = typeof err?.status === 'number' && err.status >= 400 && err.status < 600 ? err.status : 500;
+    return res.status(statusCode).json({ error: 'Internal server error.' });
   }
   next(err);
 });
