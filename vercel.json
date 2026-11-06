@@ -2,6 +2,11 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "vite build",
   "outputDirectory": "dist",
+  "functions": {
+    "api/index.ts": {
+      "includeFiles": "dist/index.html"
+    }
+  },
   "rewrites": [
     {
       "source": "/api/:path*",
@@ -9,7 +14,7 @@
     },
     {
       "source": "/((?!api/|assets/|favicon|.*\\..*).*)",
-      "destination": "/index.html"
+      "destination": "/api"
     }
   ],
   "headers": [

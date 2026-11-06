@@ -339,4 +339,134 @@ test('ISSUE-03: promoteChecklistToProject creates persisted project with testSui
   assert.equal(savedProjectState?.id, 'proj_persisted_123');
 });
 
+test('QAV-AUD-002: updateProjectMetadata supports expectedUpdatedAt and propagates HTTP 409 conflicts', async () => {
+  const { updateProjectMetadata } = await import('../src/modules/projectManager.js');
+  const { setProjects, getProjects } = await import('../src/modules/state.js');
+
+  const initialProj = {
+    id: 'proj_occ_meta_1',
+    name: 'Original Name',
+    type: 'Web Application',
+    status: 'Active',
+    updatedAt: '2026-11-06T10:00:00.000Z'
+  };
+  setProjects([initialProj]);
+
+  const originalFetch = globalThis.fetch;
+  try {
+    // 1. Test successful metadata update with expectedUpdatedAt
+    let capturedBody = null;
+    globalThis.fetch = async (url, options) => {
+      capturedBody = JSON.parse(options.body);
+      return new Response(
+        JSON.stringify({
+          ...initialProj,
+          name: capturedBody.name,
+          updatedAt: '2026-11-06T10:05:00.000Z'
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    };
+
+    const okRes = await updateProjectMetadata(
+      'proj_occ_meta_1',
+      { name: 'Updated Name' },
+      '2026-11-06T10:00:00.000Z'
+    );
+    assert.equal(okRes.ok, true);
+    assert.equal(capturedBody.expectedUpdatedAt, '2026-11-06T10:00:00.000Z');
+    assert.equal(getProjects()[0].name, 'Updated Name');
+    assert.equal(getProjects()[0].updatedAt, '2026-11-06T10:05:00.000Z');
+
+    // 2. Test stale metadata update returning HTTP 409 Conflict
+    globalThis.fetch = async () => {
+      return new Response(
+        JSON.stringify({
+          error: 'Conflict: The project has been modified by another operation.',
+          currentUpdatedAt: '2026-11-06T10:05:00.000Z',
+          expectedUpdatedAt: '2026-11-06T10:00:00.000Z'
+        }),
+        { status: 409, headers: { 'Content-Type': 'application/json' } }
+      );
+    };
+
+    const conflictRes = await updateProjectMetadata(
+      'proj_occ_meta_1',
+      { name: 'Stale Overwrite' },
+      '2026-11-06T10:00:00.000Z'
+    );
+    assert.equal(conflictRes.ok, false);
+    assert.equal(conflictRes.status, 409);
+    assert.ok(conflictRes.error.includes('Conflict'));
+    assert.equal(conflictRes.data?.currentUpdatedAt, '2026-11-06T10:05:00.000Z');
+    assert.equal(conflictRes.data?.expectedUpdatedAt, '2026-11-06T10:00:00.000Z');
+    assert.equal(getProjects()[0].name, 'Updated Name', 'State must not be overwritten on 409 Conflict');
+
+    // 3. Backward compatibility: update without expectedUpdatedAt omits field
+    capturedBody = null;
+    globalThis.fetch = async (url, options) => {
+      capturedBody = JSON.parse(options.body);
+      return new Response(
+        JSON.stringify({
+          ...initialProj,
+          name: capturedBody.name,
+          updatedAt: '2026-11-06T10:10:00.000Z'
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    };
+
+    const compatRes = await updateProjectMetadata('proj_occ_meta_1', { name: 'Compat Name' });
+    assert.equal(compatRes.ok, true);
+    assert.equal(capturedBody.expectedUpdatedAt, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('QAV-AUD-003: Vercel and standalone SPA HTML routes inject matching CSP nonce into script tags', async () => {
+  const fs = await import('node:fs');
+  const vercelConfig = JSON.parse(fs.readFileSync('vercel.json', 'utf8'));
+
+  // 1. Verify vercel.json rewrites SPA navigation routes to /api so Express injects the nonce
+  const spaRewrite = vercelConfig.rewrites?.find((r) => r.source.includes('(?!api/'));
+  assert.ok(spaRewrite, 'SPA rewrite rule must exist in vercel.json');
+  assert.equal(spaRewrite.destination, '/api', 'SPA rewrite must route through /api for dynamic CSP nonce injection');
+  assert.equal(
+    vercelConfig.functions?.['api/index.ts']?.includeFiles,
+    'dist/index.html',
+    'vercel.json must bundle dist/index.html into serverless function'
+  );
+
+  // 2. Verify SPA HTML response has CSP nonce matching injected <script nonce="...">
+  await withTestServer(async (baseUrl) => {
+    const htmlRes = await fetch(`${baseUrl}/projects`);
+    assert.equal(htmlRes.status, 200);
+    const contentType = htmlRes.headers.get('content-security-policy');
+    assert.ok(contentType, 'CSP header must be present on SPA HTML route');
+
+    const nonceMatch = contentType.match(/'nonce-([A-Za-z0-9+/=]+)'/);
+    assert.ok(nonceMatch, 'CSP header must include a cryptographic nonce');
+    const headerNonce = nonceMatch[1];
+
+    // Verify no unsafe-inline or unsafe-eval in script-src
+    const scriptSrcPart = contentType.split(';').find((d) => d.trim().startsWith('script-src')) || '';
+    assert.equal(scriptSrcPart.includes('unsafe-inline'), false, 'script-src must not contain unsafe-inline');
+    assert.equal(scriptSrcPart.includes('unsafe-eval'), false, 'script-src must not contain unsafe-eval');
+
+    const htmlBody = await htmlRes.text();
+    assert.ok(
+      htmlBody.includes(`<script nonce="${headerNonce}"`),
+      'Served SPA HTML must inject matching nonce attribute into <script> tags'
+    );
+  });
+});
+
+test('QAV-AUD-001: mongoIntegration.test.js does not contain unconditional process.exit(0)', async () => {
+  const fs = await import('node:fs');
+  const content = fs.readFileSync('tests/mongoIntegration.test.js', 'utf8');
+  assert.equal(content.includes('process.exit(0)'), false, 'mongoIntegration.test.js must not call process.exit(0)');
+});
+
+
 

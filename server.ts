@@ -2745,7 +2745,8 @@ const ALLOWED_PROJECT_PATCH_FIELDS = new Set([
   'status',
   'environment',
   'baseUrl',
-  'tags'
+  'tags',
+  'expectedUpdatedAt'
 ]);
 
 function hasMongoOperatorInjection(value: unknown): boolean {
@@ -2792,8 +2793,23 @@ app.patch("/api/projects/:id", requireAuth, async (req: Request, res: Response) 
       });
     }
 
+    const expectedUpdatedAt = body.expectedUpdatedAt;
+    if (expectedUpdatedAt !== undefined) {
+      if (typeof expectedUpdatedAt !== 'string' || expectedUpdatedAt.trim() === '') {
+        return res.status(400).json({ error: "Field 'expectedUpdatedAt' must be a non-empty string when provided." });
+      }
+    }
+
+    const dataFieldKeys = keys.filter((k) => k !== 'expectedUpdatedAt');
+    if (dataFieldKeys.length === 0) {
+      return res.status(400).json({ error: "Request body must contain at least one field to update." });
+    }
+
+    const nowIso = new Date().toISOString();
     const updateFields: Record<string, unknown> = {
-      updatedAt: new Date().toISOString()
+      updatedAt: (expectedUpdatedAt && nowIso === expectedUpdatedAt)
+        ? new Date(Date.now() + 1).toISOString()
+        : nowIso
     };
 
     if (body.name !== undefined) {
@@ -2857,7 +2873,26 @@ app.patch("/api/projects/:id", requireAuth, async (req: Request, res: Response) 
       return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
     }
 
-    const query = buildUserProjectQuery(idParam, userId);
+    const baseQuery = buildUserProjectQuery(idParam, userId);
+    let query: any;
+    if (expectedUpdatedAt) {
+      if (baseQuery.$or) {
+        query = {
+          $and: [
+            baseQuery,
+            { updatedAt: expectedUpdatedAt }
+          ]
+        };
+      } else {
+        query = {
+          ...baseQuery,
+          updatedAt: expectedUpdatedAt
+        };
+      }
+    } else {
+      query = baseQuery;
+    }
+
     const result = await db.collection("projects").findOneAndUpdate(
       query,
       { $set: updateFields },
@@ -2865,6 +2900,16 @@ app.patch("/api/projects/:id", requireAuth, async (req: Request, res: Response) 
     );
 
     if (!result) {
+      if (expectedUpdatedAt) {
+        const existingDoc = await db.collection("projects").findOne(baseQuery);
+        if (existingDoc) {
+          return res.status(409).json({
+            error: "Conflict: The project has been modified by another operation.",
+            currentUpdatedAt: existingDoc.updatedAt || null,
+            expectedUpdatedAt
+          });
+        }
+      }
       return res.status(404).json({ error: "Project not found." });
     }
 
@@ -3634,10 +3679,66 @@ app.use('/api', (req: Request, res: Response) => {
 });
 
 // ============================================================================
-// 4. Server Lifecycle & Execution Mode Isolation
+// 4. Server Lifecycle, SPA Nonce Injection & Execution Mode Isolation
 // ============================================================================
+let cachedSpaHtmlTemplate: string | null = null;
+let cachedSpaHtmlPath: string | null = null;
+
+function resolveSpaIndexHtmlTemplate(): { template: string; indexPath: string | null } {
+  if (cachedSpaHtmlTemplate) {
+    return { template: cachedSpaHtmlTemplate, indexPath: cachedSpaHtmlPath };
+  }
+
+  const distDir = path.basename(__dirname) === 'dist' ? __dirname : path.resolve(__dirname, 'dist');
+  const candidatePaths = [
+    path.resolve(distDir, 'index.html'),
+    path.resolve(process.cwd(), 'dist', 'index.html'),
+    path.resolve(__dirname, 'index.html'),
+    path.resolve(process.cwd(), 'index.html')
+  ];
+
+  for (const candidate of candidatePaths) {
+    try {
+      if (fs.existsSync(candidate)) {
+        const content = fs.readFileSync(candidate, 'utf-8');
+        if (content) {
+          cachedSpaHtmlTemplate = content;
+          cachedSpaHtmlPath = candidate;
+          return { template: content, indexPath: candidate };
+        }
+      }
+    } catch {
+      // Ignore read errors and check next candidate
+    }
+  }
+
+  return { template: '', indexPath: null };
+}
+
+function serveSpaHtmlWithNonce(req: Request, res: Response, next: NextFunction) {
+  if (req.method === 'GET' && !req.path.startsWith('/api')) {
+    const { template, indexPath } = resolveSpaIndexHtmlTemplate();
+    const nonce = res.locals.nonce;
+    if (template) {
+      const htmlWithNonce = nonce
+        ? template.replace(/<script\b(?![^>]*\bnonce=)/gi, `<script nonce="${nonce}"`)
+        : template;
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      return res.send(htmlWithNonce);
+    }
+    if (indexPath) {
+      return res.sendFile(indexPath);
+    }
+  }
+  next();
+}
+
 // On Vercel, serverless function runtimes handle the HTTP listener and routing.
 // Standalone execution (local development or container) calls setupServer().
+if (isVercel) {
+  app.use(serveSpaHtmlWithNonce);
+}
 
 async function setupServer() {
   try {
@@ -3684,27 +3785,13 @@ async function setupServer() {
     app.use(express.static(distPath, { maxAge: '1h', index: false }));
 
     // Pre-read index.html template for dynamic per-response CSP nonce injection
-    let indexHtmlTemplate = '';
     try {
-      indexHtmlTemplate = fs.readFileSync(indexPath, 'utf-8');
+      cachedSpaHtmlTemplate = fs.readFileSync(indexPath, 'utf-8');
+      cachedSpaHtmlPath = indexPath;
     } catch (_) {}
 
     // SPA fallback route for all non-API GET requests
-    app.use((req: Request, res: Response, next: NextFunction) => {
-      if (req.method === 'GET' && !req.path.startsWith('/api')) {
-        const nonce = res.locals.nonce;
-        if (nonce && indexHtmlTemplate) {
-          const htmlWithNonce = indexHtmlTemplate.replace(
-            /<script\b(?![^>]*\bnonce=)/gi,
-            `<script nonce="${nonce}"`
-          );
-          res.setHeader('Content-Type', 'text/html; charset=utf-8');
-          return res.send(htmlWithNonce);
-        }
-        return res.sendFile(indexPath);
-      }
-      next();
-    });
+    app.use(serveSpaHtmlWithNonce);
   }
 
   httpServer = app.listen(PORT, '0.0.0.0', () => {

@@ -107,10 +107,14 @@ export function addPromotedProjectToState(project) {
   }
 }
 
-export async function updateProjectMetadata(projectId, payload) {
+export async function updateProjectMetadata(projectId, payload, expectedUpdatedAt) {
+  const bodyPayload = { ...payload };
+  if (expectedUpdatedAt !== undefined && bodyPayload.expectedUpdatedAt === undefined) {
+    bodyPayload.expectedUpdatedAt = expectedUpdatedAt;
+  }
   const res = await apiJson(`/api/projects/${encodeURIComponent(projectId)}`, {
     method: 'PATCH',
-    body: JSON.stringify(payload)
+    body: JSON.stringify(bodyPayload)
   });
   if (res.ok && res.data) {
     const updated = getProjects().map((p) => (p.id === projectId ? { ...p, ...res.data } : p));
@@ -119,7 +123,12 @@ export async function updateProjectMetadata(projectId, payload) {
     renderDashboard();
     return { ok: true, project: res.data };
   }
-  return { ok: false, status: res.status, error: res.data?.error || 'Failed to update project.' };
+  return {
+    ok: false,
+    status: res.status,
+    error: res.data?.error || 'Failed to update project.',
+    data: res.data
+  };
 }
 
 export async function saveProjectData(projectId, dataPayload, expectedUpdatedAt) {
@@ -248,7 +257,14 @@ export function openEditProjectModal(project) {
   const errAlert = document.getElementById('modal-error-alert');
 
   if (errAlert) errAlert.style.display = 'none';
-  if (idInput) idInput.value = project.id || '';
+  if (idInput) {
+    idInput.value = project.id || '';
+    if (project.updatedAt) {
+      idInput.dataset.expectedUpdatedAt = project.updatedAt;
+    } else {
+      delete idInput.dataset.expectedUpdatedAt;
+    }
+  }
   if (nameInput) nameInput.value = project.name || '';
   if (typeInput) typeInput.value = project.type || 'Web Application';
   if (statusInput) statusInput.value = project.status || 'Active';
@@ -275,7 +291,10 @@ export function resetProjectModal() {
   const errAlert = document.getElementById('modal-error-alert');
 
   if (projectForm) projectForm.reset();
-  if (idInput) idInput.value = '';
+  if (idInput) {
+    idInput.value = '';
+    delete idInput.dataset.expectedUpdatedAt;
+  }
   if (modalTitle) modalTitle.textContent = 'Create New Project';
   if (modalSubtitle) modalSubtitle.textContent = 'Configure testing workspace and project properties';
   if (submitBtnText) submitBtnText.textContent = 'Create Project';

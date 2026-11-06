@@ -1,4 +1,4 @@
-import test from 'node:test';
+import { test as nodeTest } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import jwt from 'jsonwebtoken';
@@ -25,17 +25,39 @@ if (!testUri) {
   }
 }
 
-process.env.VERCEL = '1';
-process.env.MONGODB_URI = testUri;
-process.env.MONGODB_DB = 'qavora_integration_test';
-process.env.JWT_SECRET = 'test-jwt-secret-key-for-integration-tests-2026';
+const hasTestDb = Boolean(testUri);
+const SKIP_REASON = 'Skipped: MONGODB_TEST_URI is not configured in this environment';
 
-const { default: app } = await import('../server.ts');
+function test(name, fn) {
+  if (!hasTestDb) {
+    return nodeTest(name, { skip: SKIP_REASON }, () => {});
+  }
+  return nodeTest(name, fn);
+}
+test.before = (fn) => {
+  if (hasTestDb) nodeTest.before(fn);
+};
+test.after = (fn) => {
+  if (hasTestDb) nodeTest.after(fn);
+};
 
+let app;
+let closeDatabase;
 let server;
 let baseUrl;
 let directClient;
 let directDb;
+
+if (hasTestDb) {
+  process.env.VERCEL = '1';
+  process.env.MONGODB_URI = testUri;
+  process.env.MONGODB_DB = 'qavora_integration_test';
+  process.env.JWT_SECRET = 'test-jwt-secret-key-for-integration-tests-2026';
+
+  const serverMod = await import('../server.ts');
+  app = serverMod.default;
+  closeDatabase = serverMod.closeDatabase;
+}
 
 test.before(async () => {
   directClient = new MongoClient(testUri);
@@ -52,13 +74,15 @@ test.after(async () => {
   if (server) {
     await new Promise((resolve) => server.close(resolve));
   }
+  if (typeof closeDatabase === 'function') {
+    await closeDatabase();
+  }
   if (directClient) {
     await directClient.close();
   }
   if (mongod) {
     await mongod.stop({ doCleanup: true, force: true });
   }
-  process.exit(0);
 });
 
 function extractCookies(res) {
@@ -838,6 +862,78 @@ test('ISSUE-05: Optimistic concurrency control on PATCH /api/projects/:id/data w
   assert.equal(compatRes.status, 200, 'Update without expectedUpdatedAt succeeds');
   const compatProject = await compatRes.json();
   assert.equal(compatProject.name, 'Backward Compatible Name Update');
+});
+
+test('QAV-AUD-002: Optimistic concurrency control on PATCH /api/projects/:id metadata endpoint', async () => {
+  const { cookieHeader, csrfToken } = await registerAndLogin(
+    'OCC Metadata User',
+    'occ_meta@example.com',
+    'Password123!',
+    '10.0.8.2'
+  );
+  const headers = {
+    'Cookie': cookieHeader,
+    'x-csrf-token': csrfToken,
+    'Content-Type': 'application/json'
+  };
+
+  // 1. Create initial project
+  const createRes = await fetch(`${baseUrl}/api/projects`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      name: 'Metadata OCC Project',
+      type: 'Web Application',
+      description: 'Initial metadata description'
+    })
+  });
+  assert.equal(createRes.status, 201);
+  const created = await createRes.json();
+  const v1UpdatedAt = created.updatedAt;
+
+  // 2. Update metadata with matching expectedUpdatedAt -> 200 OK
+  const patch1Res = await fetch(`${baseUrl}/api/projects/${created.id}`, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({
+      name: 'Metadata OCC Project v2',
+      description: 'Updated description v2',
+      expectedUpdatedAt: v1UpdatedAt
+    })
+  });
+  assert.equal(patch1Res.status, 200);
+  const v2 = await patch1Res.json();
+  const v2UpdatedAt = v2.updatedAt;
+  assert.equal(v2.name, 'Metadata OCC Project v2');
+  assert.notEqual(v2UpdatedAt, v1UpdatedAt);
+
+  // 3. Stale metadata update with v1UpdatedAt -> 409 Conflict
+  const staleRes = await fetch(`${baseUrl}/api/projects/${created.id}`, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({
+      name: 'Stale Metadata Name',
+      expectedUpdatedAt: v1UpdatedAt
+    })
+  });
+  assert.equal(staleRes.status, 409);
+  const staleData = await staleRes.json();
+  assert.ok(staleData.error.includes('Conflict'));
+  assert.equal(staleData.currentUpdatedAt, v2UpdatedAt);
+  assert.equal(staleData.expectedUpdatedAt, v1UpdatedAt);
+
+  // 4. Backward compatibility without expectedUpdatedAt -> 200 OK
+  const compatRes = await fetch(`${baseUrl}/api/projects/${created.id}`, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({
+      version: '2.0.0'
+    })
+  });
+  assert.equal(compatRes.status, 200);
+  const compatData = await compatRes.json();
+  assert.equal(compatData.version, '2.0.0');
+  assert.equal(compatData.name, 'Metadata OCC Project v2');
 });
 
 test('QAV-AUDIT-003: Prevent Unauthenticated CSRF Token Issuance & enforce session-bound token refresh', async () => {

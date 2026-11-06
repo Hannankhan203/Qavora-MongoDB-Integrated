@@ -499,6 +499,11 @@ export function initUIEventListeners() {
       };
 
       if (isEdit && editingProjectId) {
+        const currentProj = getProjects().find((p) => p.id === editingProjectId);
+        const expectedUpdatedAt = idInput?.dataset?.expectedUpdatedAt || currentProj?.updatedAt;
+        if (expectedUpdatedAt) {
+          payload.expectedUpdatedAt = expectedUpdatedAt;
+        }
         const res = await updateProjectMetadata(editingProjectId, payload);
         if (res.ok) {
           updateSidebarProjectCounters();
@@ -509,6 +514,10 @@ export function initUIEventListeners() {
             renderTestPlanWorkspace();
           }
           showToast('Project updated successfully.', 'success');
+          closeProjectModal();
+        } else if (res.status === 409) {
+          await loadProjectsFromBackend();
+          showToast(res.error || 'Conflict: This project was modified elsewhere. Workspace reloaded with latest data.', 'error');
           closeProjectModal();
         } else {
           showToast(res.error || 'Failed to update project.', 'error');
