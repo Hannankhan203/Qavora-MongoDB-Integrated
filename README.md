@@ -61,8 +61,8 @@
                  │
                  ▼
 ┌─────────────────────────────────┐
-│     Backup & Device Transfer    │
-│  (JSON Backups & Portable TPX1) │
+│     Backup & Data Management    │
+│  (JSON Backups & Disaster Rec.) │
 └─────────────────────────────────┘
 ```
 
@@ -139,23 +139,6 @@ Qavora uses **MongoDB exclusively for persistent data storage**. All user accoun
 
 ---
 
-## Portable Device-to-Device Transfer (`TPX1`)
-
-Qavora includes a proprietary, zero-cloud transfer engine (`qaChecklistTransfer.js`) allowing users to move manual checklists between mobile phones, tablets, and desktop computers without creating accounts or transmitting data to external servers.
-
-### TPX1 Transfer Protocol
-1. **Export**: The user generates a transfer payload for all checklists or a selected checklist.
-2. **Compression**: Payloads are compressed using browser-native `CompressionStream('deflate-raw')` (with uncompressed JSON fallback for environments lacking stream compression).
-3. **Integrity Checksum**: A cryptographic SHA-256 hash is computed via `crypto.subtle.digest('SHA-256')`, and an 8-byte checksum is attached.
-4. **Envelope Encoding**: Encoded as a URL-safe Base64 string prefixed with the `TPX1` envelope identifier:
-   ```text
-   TPX1.<method>.<checksum>.<payload>
-   ```
-5. **Portability**: Payloads can be copied to the clipboard or downloaded as a `.txt` transfer file.
-6. **Import & Verification**: On the receiving device, the string or `.txt` file is decoded, decompressed, verified against the checksum, and normalized through schema validation before being merged or restored.
-
----
-
 ## Storage Architecture
 
 Qavora persists all application data in MongoDB collections (`users`, `projects`, `project_artifacts`, `checklists`) scoped by authenticated `userId`.
@@ -164,7 +147,7 @@ Qavora persists all application data in MongoDB collections (`users`, `projects`
 
 ## Technical Architecture
 
-Qavora is engineered as a **pure client-side single page application (SPA)** with zero runtime server-side dependencies.
+Qavora is engineered as a modern full-stack application with a client-side SPA frontend and an Express/MongoDB backend service.
 
 ```text
 ┌────────────────────────────────────────────────────────┐
@@ -179,12 +162,12 @@ Qavora is engineered as a **pure client-side single page application (SPA)** wit
 │ (Design Sys) │     │ (App Core)   │    │ (Test Exec)  │
 └──────────────┘     └──────┬───────┘    └──────┬───────┘
                             │                   │
-             ┌──────────────┴─────────┬─────────┴────────────┐
-             ▼                        ▼                      ▼
-      ┌──────────────┐         ┌──────────────┐       ┌──────────────┐
-      │ qaParser.js  │         │qaChecklist-  │       │qaChecklist-  │
-      │(Plan Parser) │         │  Store.js    │       │ Transfer.js  │
-      └──────────────┘         └──────────────┘       └──────────────┘
+             ┌──────────────┴─────────┬─────────┘
+             ▼                        ▼          
+      ┌──────────────┐         ┌──────────────┐  
+      │ qaParser.js  │         │qaChecklist-  │  
+      │(Plan Parser) │         │  Store.js    │  
+      └──────────────┘         └──────────────┘  
 ```
 
 - **Markup (`index.html`)**: Semantic HTML5 structure providing 14 distinct workspace views and accessible dialogs.
@@ -193,7 +176,6 @@ Qavora is engineered as a **pure client-side single page application (SPA)** wit
 - **Parser Engine (`qaParser.js`)**: Pure ES6 structural text parsing using regular expressions and deterministic AST line analysis.
 - **Persistence Layer (`qaChecklistStore.js`)**: Encapsulates all read/write/delete operations for checklists with quota safety and schema normalization.
 - **Execution Controller (`qaRunnerUI.js`)**: Manages the interactive test runner DOM, completion toggles, and checklist management views.
-- **Transfer Engine (`qaChecklistTransfer.js`)**: Browser-native cryptographic hashing, compression, and format encoding for portable data transfer.
 
 ---
 
@@ -221,8 +203,6 @@ Test-Pilot/
 ├── metadata.json                   # AI Studio applet configuration metadata
 ├── package.json                    # Project dependencies and script declarations
 ├── qaChecklistStore.js             # Local storage persistence and validation engine
-├── qaChecklistTransfer.js          # TPX1 compression, SHA-256 verification & transfer
-├── qaChecklistTransferUI.js        # Transfer modal and import/export UI controller
 ├── qaParser.js                     # Plain-text & Markdown QA plan structural parser
 ├── qaRunnerUI.js                   # Interactive manual QA test runner and cards UI
 ├── script.js                       # Main application workspace controller
@@ -230,7 +210,6 @@ Test-Pilot/
 ├── test-issue-010.js               # Modal interactions and project deletion test suite
 ├── test-issue-011.js               # Storage quota error, rollback & migration test suite
 ├── test-issue-delete-checklist.js  # Checklist deletion and modal lifecycle test suite
-├── test-issue-transfer-import.js   # TPX1 transfer format and file import test suite
 ├── tsconfig.json                   # TypeScript compiler configuration (type checking)
 └── vite.config.ts                  # Vite development and production build configuration
 ```
@@ -247,8 +226,6 @@ Test-Pilot/
 | **Tooling & Bundling** | Vite 8 | Fast local development server and optimized production packaging |
 | **Static Typing Check** | TypeScript | Type validation across JavaScript and configuration files |
 | **Persistence** | MongoDB | Server-side, tenant-isolated database persistence |
-| **Compression** | `CompressionStream` API | Raw deflate compression for compact transfer strings |
-| **Integrity** | Web Crypto API (`crypto.subtle`) | Cryptographic SHA-256 checksums for imported transfer files |
 | **Deployment** | GitHub Pages & GitHub Actions | Automated static hosting from the repository's `main` branch |
 
 ---
@@ -375,13 +352,12 @@ Qavora has two separate deployment architectures:
 
 ## Testing & Verification Suites
 
-The repository contains four standalone regression test suites executed via Node.js:
+The repository contains standalone regression test suites executed via Node.js:
 
 ```bash
 node test-issue-010.js
 node test-issue-011.js
 node test-issue-delete-checklist.js
-node test-issue-transfer-import.js
 ```
 
 ### Test Suite Coverage
@@ -394,20 +370,19 @@ node test-issue-transfer-import.js
    - Legacy key migration (`testpilot_*` → `qavora_*`).
    - Clean initial boot on uninitialized storage.
 3. **`test-issue-delete-checklist.js`** (5 tests): Checklist deletion modal lifecycle, backdrop independence, scrollbar lock/unlock events, and active runner synchronization.
-4. **`test-issue-transfer-import.js`** (14 tests): TPX1 code generation, format validation, file picker `.txt` and `.json` imports, merge mode ID collision avoidance, replace mode, corrupt/tampered payload rejection, and legacy transfer compatibility.
 
 ### Verification Status
 - **Type Checking (`npm run lint`)**: Passed (0 errors).
 - **Production Build (`npm run build`)**: Passed (clean build in `./dist`).
-- **Regression Suites (`node test-*.js`)**: 100% passing across all 4 suites (36+ automated checks).
+- **Regression Suites (`node test-*.js`)**: 100% passing across automated suites.
 
 ---
 
 ## Data Privacy & Architecture
 
-- **No Remote Database**: Qavora transmits zero test plans, checklist records, defect descriptions, or activity logs to any remote server.
-- **Client-Side Execution**: All structural text parsing, compression, and cryptographic validation occur exclusively inside the client's browser engine.
-- **User-Controlled Data**: Backups and data transfers occur solely when explicitly initiated by the user.
+- **Secure Storage**: Qavora stores all test plans, checklist records, defect descriptions, and activity logs in MongoDB with per-tenant isolation.
+- **Client-Side Execution**: Structural text parsing and checklist rendering occur inside the client's browser engine.
+- **User-Controlled Data**: Backups and export archives occur solely when explicitly initiated by the user.
 
 ---
 
@@ -415,7 +390,6 @@ node test-issue-transfer-import.js
 
 - **Manual QA Tool**: Qavora is designed specifically for organizing and tracking manual testing; it does not execute automated browser tests (e.g., Selenium, Playwright, Cypress).
 - **Database Connectivity**: Data persistence requires an active MongoDB connection.
-- **No Real-Time Cloud Sync**: Checklists do not automatically synchronize in real time across devices; moving data between machines requires the user to generate and import a portable transfer code or backup file.
 - **No External Issue Tracker Sync**: Defect logging is maintained locally within the Qavora workspace and does not automatically synchronize with Jira, GitHub Issues, or Linear.
 
 ---
@@ -434,7 +408,7 @@ node test-issue-transfer-import.js
 1. **Create QA Checklist**: Textarea editor and syntax guidance to paste testing specifications and parse them into structured phases.
 2. **Edit & Review**: Interactive review workspace to edit phases, categories, tests, and priorities before saving.
 3. **Clean Preview**: Formatted typographic preview of the parsed plan.
-4. **My QA Checklists**: Library of saved checklists with completion rates, status badges, rename, delete, and device transfer access.
+4. **My QA Checklists**: Library of saved checklists with completion rates, status badges, rename, and delete actions.
 5. **QA Test Runner**: Full-screen manual test runner with completion checkboxes, progress bar, and accordion phase sections.
 6. **Dashboard**: High-level overview displaying registered projects, total test cases, pass/fail counts, and recent activity logs.
 7. **My Projects**: Multi-project management workspace with status and application type filters.
@@ -443,7 +417,7 @@ node test-issue-transfer-import.js
 10. **Test Execution**: Execution workspace for running formal project test cases, tracking step verification, and logging outcomes.
 11. **Defects**: Defect tracking table with status, severity, and project filters.
 12. **Reports & Analytics**: Visual quality insights, status distribution donut chart, velocity trend lines, and printable executive reports.
-13. **Data Management**: JSON backup creation, restore/merge controls, rollback recovery, and TPX1 device transfer panel.
+13. **Data Management**: JSON backup creation, restore/merge controls, and rollback recovery.
 14. **Settings**: Workspace configuration, category presets, and quick navigation to data management.
 
 ---
@@ -452,7 +426,6 @@ node test-issue-transfer-import.js
 
 Qavora is engineered for modern desktop and mobile browsers supporting standard web APIs:
 - Fetch API with HttpOnly Cookies
-- `CompressionStream` & `DecompressionStream` APIs (with uncompressed JSON fallback)
 - Web Crypto API (`crypto.subtle.digest`)
 - ES6 JavaScript Modules (`import` / `export`)
 - Modern CSS Flexbox & CSS Grid
@@ -479,7 +452,6 @@ Recommended browsers:
    node test-issue-010.js
    node test-issue-011.js
    node test-issue-delete-checklist.js
-   node test-issue-transfer-import.js
    ```
 5. Build the production distribution:
    ```bash

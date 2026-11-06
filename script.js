@@ -8,7 +8,6 @@
 
 import { initChecklistGenerator } from './checklistGeneratorUI.js';
 import { initQARunnerAndChecklists } from './qaRunnerUI.js';
-import { initQAChecklistTransferUI } from './qaChecklistTransferUI.js';
 import authController from './authController.js';
 
 import { apiFetch, apiJson, checkBackendHealth } from './src/modules/apiClient.js';
@@ -146,11 +145,6 @@ async function init() {
       if (typeof initQARunnerAndChecklists === 'function') {
         initQARunnerAndChecklists({
           navigateTo,
-          notify: showToast
-        });
-      }
-      if (typeof initQAChecklistTransferUI === 'function') {
-        initQAChecklistTransferUI({
           notify: showToast
         });
       }

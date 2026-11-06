@@ -139,7 +139,6 @@ export function initQARunnerAndChecklists({
     generatorOpenListBtn: document.getElementById('btn-gen-open-saved-list'),
 
     // My QA Checklists View
-    listTransferDevicesBtn: document.getElementById('btn-mychk-transfer-devices'),
     listCreateNewBtn: document.getElementById('btn-mychk-create-new'),
     listResumeActiveBtn: document.getElementById('btn-mychk-resume-active'),
     listStatTotal: document.getElementById('mychk-stat-total'),
@@ -1855,16 +1854,6 @@ export function initQARunnerAndChecklists({
 
   if (els.generatorOpenListBtn) {
     els.generatorOpenListBtn.addEventListener('click', () => goView('my-checklists'));
-  }
-
-  if (els.listTransferDevicesBtn) {
-    els.listTransferDevicesBtn.addEventListener('click', () => {
-      goView('data');
-      const transferSection = document.getElementById('transfer-between-devices-section');
-      if (transferSection && typeof transferSection.scrollIntoView === 'function') {
-        transferSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }
-    });
   }
 
   if (els.listCreateNewBtn) {

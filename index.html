@@ -856,15 +856,6 @@
               <p class="section-hero-desc">Access, resume, rename, or manage all your saved manual QA testing checklists.</p>
             </div>
             <div class="section-hero-actions qa-hero-btn-group">
-              <button type="button" id="btn-mychk-transfer-devices" class="btn btn-secondary">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                  <polyline points="17 1 21 5 17 9"></polyline>
-                  <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
-                  <polyline points="7 23 3 19 7 15"></polyline>
-                  <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
-                </svg>
-                <span>Transfer Between Devices</span>
-              </button>
               <button type="button" id="btn-mychk-resume-active" class="btn btn-secondary" style="display: none;">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                   <polygon points="5 3 19 12 5 21 5 3"></polygon>
@@ -3410,242 +3401,6 @@
             </div>
           </div>
 
-          <!-- ================================================================
-               TRANSFER BETWEEN DEVICES (Portable QA Checklist Transfer)
-               ================================================================ -->
-          <div id="transfer-between-devices-section" class="panel transfer-devices-panel" aria-labelledby="transfer-devices-heading">
-            <div class="panel-header transfer-devices-header">
-              <div class="transfer-devices-title-block">
-                <h3 id="transfer-devices-heading" class="panel-title transfer-devices-main-title">Transfer Between Devices</h3>
-                <p class="transfer-devices-subtitle">
-                  Send your QA checklists and progress to another device without downloading or managing JSON files. Copy the code generated on one device and paste it into Qavora on the other device.
-                </p>
-              </div>
-            </div>
-
-            <div class="panel-body">
-              <div class="transfer-devices-grid">
-                <!-- A. Send from This Device -->
-                <div class="transfer-column-card">
-                  <div class="transfer-column-head">
-                    <h4 class="transfer-column-title">Send from This Device</h4>
-                    <p id="transfer-send-ready-summary" class="transfer-column-meta">
-                      Ready to send saved QA checklists
-                    </p>
-                  </div>
-
-                  <p class="transfer-step-desc">
-                    Generate a portable transfer code containing your saved QA checklists, phases, categories, notes, priorities, and completed test states. Open Qavora on your receiving device and paste this code there.
-                  </p>
-
-                  <div class="transfer-primary-actions">
-                    <button type="button" id="btn-generate-transfer-code" class="btn btn-primary">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                        <polyline points="17 1 21 5 17 9"></polyline>
-                        <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
-                        <polyline points="7 23 3 19 7 15"></polyline>
-                        <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
-                      </svg>
-                      <span>Generate Transfer Code</span>
-                    </button>
-                  </div>
-
-                  <div id="transfer-send-error" class="alert-banner alert-warning" style="display: none;" role="alert">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                      <circle cx="12" cy="12" r="10"></circle>
-                      <line x1="12" y1="8" x2="12" y2="12"></line>
-                      <line x1="12" y1="16" x2="12.01" y2="16"></line>
-                    </svg>
-                    <span id="transfer-send-error-text">No saved QA checklists found to transfer.</span>
-                  </div>
-
-                  <!-- Generated Code Output Area -->
-                  <div id="transfer-generated-panel" class="transfer-generated-panel" style="display: none;">
-                    <label for="transfer-generated-code" class="form-label">Generated Transfer Code</label>
-                    <textarea
-                      id="transfer-generated-code"
-                      class="form-control transfer-code-textarea"
-                      rows="4"
-                      readonly
-                      spellcheck="false"
-                      aria-describedby="transfer-code-meta"
-                    ></textarea>
-
-                    <div id="transfer-code-meta" class="transfer-code-meta"></div>
-
-                    <!-- Graceful Large Payload Alternative Notice -->
-                    <div id="transfer-large-code-notice" class="alert-banner alert-warning transfer-large-notice" style="display: none;">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
-                        <line x1="12" y1="9" x2="12" y2="13"></line>
-                        <line x1="12" y1="17" x2="12.01" y2="17"></line>
-                      </svg>
-                      <div class="transfer-large-notice-body">
-                        <span>This transfer code is large and some chat apps may truncate long messages. Copy the full code directly or save it as a transfer code file to share intact.</span>
-                        <button type="button" id="btn-large-download-transfer-code" class="btn btn-secondary btn-xs">
-                          <span>Save Code File (.txt)</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    <div class="transfer-output-actions">
-                      <button type="button" id="btn-copy-transfer-code" class="btn btn-primary btn-sm">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                        </svg>
-                        <span id="copy-transfer-code-label">Copy Code</span>
-                      </button>
-
-                      <button type="button" id="btn-download-transfer-code" class="btn btn-secondary btn-sm">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                          <polyline points="7 10 12 15 17 10"></polyline>
-                          <line x1="12" y1="15" x2="12" y2="3"></line>
-                        </svg>
-                        <span>Save Code (.txt)</span>
-                      </button>
-                    </div>
-
-                    <p class="transfer-helper-note">
-                      Next step: Open Qavora on your receiving device, go to <strong>Data Management → Transfer Between Devices</strong>, and paste this code under <strong>Receive on Another Device</strong>.
-                    </p>
-                  </div>
-                </div>
-
-                <!-- B. Receive on Another Device -->
-                <div class="transfer-column-card">
-                  <div class="transfer-column-head">
-                    <h4 class="transfer-column-title">Receive on Another Device</h4>
-                    <p class="transfer-column-meta">
-                      Verified with SHA-256 before importing
-                    </p>
-                  </div>
-
-                  <div class="form-group">
-                    <div class="transfer-input-label-row">
-                      <label for="transfer-receive-input" class="form-label">Enter Transfer Code</label>
-                      <input type="file" id="transfer-code-file-input" accept=".txt,.json,text/plain,application/json,application/octet-stream" style="display: none;" />
-                      <button type="button" id="btn-load-transfer-code-file" class="btn btn-ghost btn-xs">
-                        <span>Load Code File (.txt)</span>
-                      </button>
-                    </div>
-                    <textarea
-                      id="transfer-receive-input"
-                      class="form-control transfer-code-textarea"
-                      rows="4"
-                      placeholder="Paste your Qavora transfer code here (starts with TPX1.)..."
-                      spellcheck="false"
-                    ></textarea>
-                  </div>
-
-                  <div class="transfer-primary-actions">
-                    <button type="button" id="btn-import-transfer-code" class="btn btn-primary">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                        <polyline points="7 10 12 15 17 10"></polyline>
-                        <line x1="12" y1="15" x2="12" y2="3"></line>
-                      </svg>
-                      <span>Import Checklists</span>
-                    </button>
-                    <button type="button" id="btn-clear-transfer-input" class="btn btn-secondary">
-                      <span>Clear</span>
-                    </button>
-                  </div>
-
-                  <!-- Validation Error Alert -->
-                  <div id="transfer-receive-error" class="alert-banner alert-danger" style="display: none;" role="alert">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                      <circle cx="12" cy="12" r="10"></circle>
-                      <line x1="12" y1="8" x2="12" y2="12"></line>
-                      <line x1="12" y1="16" x2="12.01" y2="16"></line>
-                    </svg>
-                    <span id="transfer-receive-error-text">Invalid or corrupted transfer code.</span>
-                  </div>
-
-                  <!-- Post-Validation Strategy & Preview Panel -->
-                  <div id="transfer-confirm-panel" class="transfer-confirm-panel" style="display: none;">
-                    <div class="transfer-preview-header">
-                      <div id="transfer-preview-stats" class="transfer-preview-stats"></div>
-                      <div id="transfer-preview-meta" class="transfer-preview-meta"></div>
-                    </div>
-
-                    <div id="transfer-preview-list" class="transfer-preview-list"></div>
-
-                    <div class="form-group">
-                      <span class="form-label">Choose How to Import</span>
-                      <div class="import-strategy-options">
-                        <label class="strategy-option">
-                          <input type="radio" name="transfer-import-mode" value="merge" id="transfer-mode-merge" checked />
-                          <div class="strategy-details">
-                            <div class="strategy-title">
-                              <span>Merge with Existing Data</span>
-                              <span class="transfer-recommended-note">Recommended · Default</span>
-                            </div>
-                            <div class="strategy-desc">
-                              Keeps all your current checklists untouched and adds transferred checklists alongside them. Duplicate IDs or titles are safely separated so nothing is overwritten.
-                            </div>
-                          </div>
-                        </label>
-
-                        <label class="strategy-option">
-                          <input type="radio" name="transfer-import-mode" value="replace" id="transfer-mode-replace" />
-                          <div class="strategy-details">
-                            <div class="strategy-title">
-                              <span style="color: var(--color-amber);">Replace Existing Workspace Data</span>
-                            </div>
-                            <div class="strategy-desc">
-                              Replaces your saved QA checklists on this device with the transferred checklists. A pre-replace recovery snapshot is saved so you can undo via Rollback if needed.
-                            </div>
-                          </div>
-                        </label>
-                      </div>
-                    </div>
-
-                    <div id="transfer-replace-warning" class="alert-banner alert-warning" style="display: none;">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
-                        <line x1="12" y1="9" x2="12" y2="13"></line>
-                        <line x1="12" y1="17" x2="12.01" y2="17"></line>
-                      </svg>
-                      <span>Existing saved QA checklists on this device will be replaced. A recovery snapshot will be preserved automatically.</span>
-                    </div>
-
-                    <div class="transfer-confirm-actions">
-                      <button type="button" id="btn-cancel-transfer-import" class="btn btn-secondary btn-sm">
-                        <span>Cancel</span>
-                      </button>
-                      <button type="button" id="btn-confirm-transfer-import" class="btn btn-primary btn-sm">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                          <polyline points="20 6 9 17 4 12"></polyline>
-                        </svg>
-                        <span id="transfer-confirm-btn-label">Confirm &amp; Merge Checklists</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  <!-- Post-Import Success Banner -->
-                  <div id="transfer-receive-success" class="alert-banner transfer-success-banner" style="display: none;" role="status">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                      <polyline points="20 6 9 17 4 12"></polyline>
-                    </svg>
-                    <div class="transfer-success-body">
-                      <span id="transfer-receive-success-text">Checklists imported successfully.</span>
-                      <button type="button" id="btn-transfer-open-checklists" class="btn btn-primary btn-xs">
-                        <span>Open My QA Checklists</span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Manual Transfer Advisory (No Automatic Syncing) -->
-              <div class="transfer-sync-notice">
-                <strong>Manual Device Transfer Only (No Cloud Sync):</strong> Transfer codes create a point-in-time snapshot of your QA checklists with zero servers or accounts. Checklists do not sync automatically across devices—if you continue testing independently on both devices, always generate and transfer the latest code carefully to avoid losing newer progress.
-              </div>
-            </div>
-          </div>
-
           <!-- Section Tabs -->
           <div class="data-tabs-container">
             <div class="data-tabs-nav" role="tablist">
@@ -3921,13 +3676,13 @@
               <div class="panel" style="grid-column: 1 / -1;">
                 <div class="panel-header">
                   <div class="panel-title-group">
-                    <h3 class="panel-title">Import Project, Workspace Backup, or Device Transfer</h3>
+                    <h3 class="panel-title">Import Project or Workspace Backup</h3>
                     <span class="panel-tag">Drag &amp; Drop Ready</span>
                   </div>
                 </div>
                 <div class="panel-body">
                   <div id="import-dropzone" class="file-dropzone">
-                    <input type="file" id="import-file-input" accept=".json,.txt,application/json,text/plain,application/octet-stream" class="file-dropzone-input" />
+                    <input type="file" id="import-file-input" accept=".json,application/json" class="file-dropzone-input" />
                     <div class="dropzone-content">
                       <div class="dropzone-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -3936,9 +3691,9 @@
                           <line x1="12" y1="3" x2="12" y2="15"></line>
                         </svg>
                       </div>
-                      <h4 class="dropzone-title">Select a JSON or Transfer File, or Drag &amp; Drop Here</h4>
+                      <h4 class="dropzone-title">Select a JSON Backup File, or Drag &amp; Drop Here</h4>
                       <p class="dropzone-desc">
-                        Supports single project exports (<code class="code-tag">Qavora_Project_*.json</code>), full application backups (<code class="code-tag">Qavora_Full_Backup_*.json</code>), or device transfer files (<code class="code-tag">Qavora_Transfer_Code_*.txt</code>).
+                        Supports single project exports (<code class="code-tag">Qavora_Project_*.json</code>) or full application backups (<code class="code-tag">Qavora_Full_Backup_*.json</code>).
                       </p>
                       <button type="button" id="btn-browse-file" class="btn btn-primary btn-sm" style="margin-top: 10px;">
                         <span>Browse Files</span>
