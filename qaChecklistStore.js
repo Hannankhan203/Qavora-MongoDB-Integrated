@@ -34,7 +34,10 @@ export const SCHEMA_VERSION = 1;
 
 export const TEST_STATUS = Object.freeze({
   NOT_STARTED: 'Not Started',
-  COMPLETED: 'Completed'
+  COMPLETED: 'Completed',
+  PASSED: 'Passed',
+  FAILED: 'Failed',
+  SKIPPED: 'Skipped'
 });
 
 let fallbackCounter = 1;
@@ -158,20 +161,30 @@ function normalizeTestRecord(rawTest) {
     : (rawTest.priority !== undefined && rawTest.priority !== null ? String(rawTest.priority).trim() : '');
 
   const rawStatusStr = typeof rawTest.status === 'string' ? rawTest.status.trim() : '';
-  const isRecognizedStatus =
-    rawStatusStr.toLowerCase() === TEST_STATUS.COMPLETED.toLowerCase() ||
-    rawStatusStr.toLowerCase() === TEST_STATUS.NOT_STARTED.toLowerCase();
+  const statusLower = rawStatusStr.toLowerCase();
+  let status = TEST_STATUS.NOT_STARTED;
+  let isCompleted = rawTest.completed === true;
 
-  const isCompleted = isRecognizedStatus
-    ? rawStatusStr.toLowerCase() === TEST_STATUS.COMPLETED.toLowerCase()
-    : rawTest.completed === true;
+  if (statusLower === 'passed' || statusLower === 'pass') {
+    status = TEST_STATUS.PASSED;
+    isCompleted = true;
+  } else if (statusLower === 'failed' || statusLower === 'fail') {
+    status = TEST_STATUS.FAILED;
+    isCompleted = true;
+  } else if (statusLower === 'skipped' || statusLower === 'skip') {
+    status = TEST_STATUS.SKIPPED;
+    isCompleted = true;
+  } else if (statusLower === 'completed' || isCompleted) {
+    status = TEST_STATUS.COMPLETED;
+    isCompleted = true;
+  }
 
   return {
     id: typeof rawTest.id === 'string' && rawTest.id.trim() ? rawTest.id.trim() : generateStableId('test'),
     testId,
     priority,
     text: text !== '' ? text : 'Untitled test item',
-    status: isCompleted ? TEST_STATUS.COMPLETED : TEST_STATUS.NOT_STARTED,
+    status,
     completed: isCompleted
   };
 }
@@ -419,6 +432,26 @@ export function normalizeChecklistRecord(rawChecklist) {
       ? rawChecklist.promotedAt
       : null;
 
+  const originalPrompt = typeof rawChecklist.originalPrompt === 'string'
+    ? rawChecklist.originalPrompt
+    : (typeof rawChecklist.rawText === 'string' ? rawChecklist.rawText : '');
+
+  const completedAt =
+    typeof rawChecklist.completedAt === 'string' && !Number.isNaN(Date.parse(rawChecklist.completedAt))
+      ? rawChecklist.completedAt
+      : null;
+
+  const completedBy =
+    rawChecklist.completedBy && typeof rawChecklist.completedBy === 'object'
+      ? {
+          name: String(rawChecklist.completedBy.name || ''),
+          email: String(rawChecklist.completedBy.email || ''),
+          role: String(rawChecklist.completedBy.role || '')
+        }
+      : (typeof rawChecklist.completedBy === 'string' && rawChecklist.completedBy.trim()
+          ? { name: rawChecklist.completedBy.trim(), email: '', role: 'QA Tester' }
+          : null);
+
   return {
     id:
       typeof rawChecklist.id === 'string' && rawChecklist.id.trim()
@@ -428,6 +461,9 @@ export function normalizeChecklistRecord(rawChecklist) {
     title,
     createdAt,
     updatedAt,
+    originalPrompt,
+    completedAt,
+    completedBy,
     documentNotes,
     phases,
     promotedProjectId,
@@ -1203,6 +1239,7 @@ export function createChecklistFromParsedPlan(parsedPlan, customTitle = '') {
     title: resolvedTitle,
     createdAt: nowIso,
     updatedAt: nowIso,
+    originalPrompt: parsedPlan.originalPrompt || parsedPlan.rawText || '',
     documentNotes: Array.isArray(parsedPlan.documentNotes) ? parsedPlan.documentNotes : [],
     phases: cleanedPhases
   });
@@ -1281,7 +1318,50 @@ export function toggleChecklistTest(checklistId, targetTestId, completedState) {
         if (tc) {
           const nextBool = typeof completedState === 'boolean' ? completedState : !tc.completed;
           tc.completed = nextBool;
-          tc.status = nextBool ? TEST_STATUS.COMPLETED : TEST_STATUS.NOT_STARTED;
+          if (nextBool) {
+            if (!tc.status || tc.status === TEST_STATUS.NOT_STARTED) {
+              tc.status = TEST_STATUS.PASSED;
+            }
+          } else {
+            tc.status = TEST_STATUS.NOT_STARTED;
+          }
+          matchedPhaseId = phase.id;
+          updatedTest = tc;
+          return true;
+        }
+      }
+    }
+    return false;
+  });
+
+  return {
+    ...res,
+    phaseId: matchedPhaseId,
+    test: updatedTest
+  };
+}
+
+export function setChecklistTestStatus(checklistId, targetTestId, newStatus) {
+  let matchedPhaseId = null;
+  let updatedTest = null;
+
+  const validStatuses = [
+    TEST_STATUS.NOT_STARTED,
+    TEST_STATUS.COMPLETED,
+    TEST_STATUS.PASSED,
+    TEST_STATUS.FAILED,
+    TEST_STATUS.SKIPPED
+  ];
+
+  const targetStatus = validStatuses.includes(newStatus) ? newStatus : TEST_STATUS.PASSED;
+
+  const res = mutateChecklistById(checklistId, checklist => {
+    for (const phase of checklist.phases) {
+      for (const sec of phase.sections) {
+        const tc = sec.tests.find(t => t.id === targetTestId);
+        if (tc) {
+          tc.status = targetStatus;
+          tc.completed = targetStatus !== TEST_STATUS.NOT_STARTED;
           matchedPhaseId = phase.id;
           updatedTest = tc;
           return true;
@@ -2148,4 +2228,451 @@ export function promoteChecklistToProject(checklistId, options = {}) {
     };
   }
 }
+
+// ============================================================================
+// Test Completion Report Generator (Prompt 5)
+// ============================================================================
+
+/**
+ * Marks a testing checklist session as formally completed.
+ * Verifies that all test cases across all phases/failures are executed.
+ */
+export function completeChecklistTesting(checklistId, completedBy = null) {
+  let finalChecklist = null;
+  const nowIso = new Date().toISOString();
+
+  let resolvedUser = completedBy;
+  if (!resolvedUser) {
+    const current = authController && typeof authController.getCurrentUser === 'function'
+      ? authController.getCurrentUser()
+      : null;
+    resolvedUser = current ? {
+      name: current.name || current.username || current.email || 'QA Tester',
+      email: current.email || '',
+      role: current.role || 'QA Analyst'
+    } : {
+      name: 'QA Tester',
+      email: '',
+      role: 'QA Analyst'
+    };
+  }
+
+  const res = mutateChecklistById(checklistId, checklist => {
+    const progress = calculateChecklistProgress(checklist);
+    if (!progress.isComplete) {
+      return false;
+    }
+    checklist.completedAt = nowIso;
+    checklist.completedBy = resolvedUser;
+    finalChecklist = checklist;
+    return true;
+  });
+
+  if (!res.ok) {
+    const target = getChecklistById(checklistId);
+    if (target) {
+      const p = calculateChecklistProgress(target);
+      if (!p.isComplete) {
+        return {
+          ok: false,
+          checklist: target,
+          error: `Cannot complete testing: ${p.remainingTests} of ${p.totalTests} tests are still pending.`
+        };
+      }
+    }
+    return res;
+  }
+
+  return {
+    ok: true,
+    checklist: res.checklist,
+    error: null
+  };
+}
+
+/**
+ * Aggregates complete session data, statistics, failures, prompt, and test results.
+ */
+export function getChecklistReportData(checklist) {
+  if (!checklist) return null;
+
+  const overall = calculateChecklistProgress(checklist);
+  let passedCount = 0;
+  let failedCount = 0;
+  let skippedCount = 0;
+  let otherCount = 0;
+
+  const phasesData = (checklist.phases || []).map((ph, idx) => {
+    let phasePassed = 0;
+    let phaseFailed = 0;
+    let phaseSkipped = 0;
+    let phaseTotal = 0;
+
+    const sections = (ph.sections || []).map(sec => {
+      const tests = (sec.tests || []).map(t => {
+        phaseTotal += 1;
+        const st = t.status || (t.completed ? TEST_STATUS.COMPLETED : TEST_STATUS.NOT_STARTED);
+        if (st === TEST_STATUS.PASSED || st === TEST_STATUS.COMPLETED) {
+          passedCount += 1;
+          phasePassed += 1;
+        } else if (st === TEST_STATUS.FAILED) {
+          failedCount += 1;
+          phaseFailed += 1;
+        } else if (st === TEST_STATUS.SKIPPED) {
+          skippedCount += 1;
+          phaseSkipped += 1;
+        } else {
+          otherCount += 1;
+        }
+
+        return {
+          id: t.id,
+          testId: t.testId || '',
+          priority: t.priority || '',
+          text: t.text || '',
+          status: st,
+          completed: Boolean(t.completed)
+        };
+      });
+
+      return {
+        id: sec.id,
+        name: sec.name || '',
+        type: sec.type || 'direct',
+        notes: sec.notes || [],
+        tests
+      };
+    });
+
+    const phaseCompleted = phasePassed + phaseFailed + phaseSkipped;
+    const phasePct = phaseTotal > 0 ? Math.round((phaseCompleted / phaseTotal) * 100) : 0;
+    const phasePassRate = phaseTotal > 0 ? Math.round((phasePassed / phaseTotal) * 100) : 0;
+
+    return {
+      id: ph.id,
+      phaseLabel: ph.phaseLabel || `Phase ${idx + 1}`,
+      phaseNumber: ph.phaseNumber || String(idx + 1),
+      name: ph.name || `Phase ${idx + 1}`,
+      description: ph.description || '',
+      notes: ph.notes || [],
+      sections,
+      stats: {
+        total: phaseTotal,
+        passed: phasePassed,
+        failed: phaseFailed,
+        skipped: phaseSkipped,
+        percentage: phasePct,
+        passRate: phasePassRate
+      }
+    };
+  });
+
+  const totalTests = overall.totalTests;
+  const passRate = totalTests > 0 ? Math.round((passedCount / totalTests) * 100) : 0;
+  const failRate = totalTests > 0 ? Math.round((failedCount / totalTests) * 100) : 0;
+
+  return {
+    checklistId: checklist.id,
+    title: checklist.title || 'Manual QA Checklist',
+    createdAt: checklist.createdAt,
+    updatedAt: checklist.updatedAt,
+    completedAt: checklist.completedAt || new Date().toISOString(),
+    completedBy: checklist.completedBy || { name: 'QA Tester', email: '', role: 'QA Analyst' },
+    originalPrompt: checklist.originalPrompt || '',
+    documentNotes: checklist.documentNotes || [],
+    stats: {
+      totalPhases: phasesData.length,
+      totalTests,
+      completedTests: overall.completedTests,
+      remainingTests: overall.remainingTests,
+      passedCount,
+      failedCount,
+      skippedCount,
+      otherCount,
+      passRate,
+      failRate,
+      isComplete: overall.isComplete
+    },
+    phases: phasesData
+  };
+}
+
+/**
+ * Generates README-compatible Markdown (.md) report with headings, summary tables, lists, and code blocks.
+ */
+export function generateMarkdownReport(reportData) {
+  if (!reportData) return '';
+
+  const {
+    title,
+    createdAt,
+    completedAt,
+    completedBy,
+    originalPrompt,
+    stats,
+    phases,
+    documentNotes
+  } = reportData;
+
+  const formatDate = (isoStr) => {
+    if (!isoStr) return 'N/A';
+    const d = new Date(isoStr);
+    return Number.isNaN(d.getTime()) ? isoStr : d.toUTCString();
+  };
+
+  const testerStr = completedBy
+    ? `${completedBy.name || 'QA Tester'}${completedBy.role ? ` (${completedBy.role})` : ''}${completedBy.email ? ` <${completedBy.email}>` : ''}`
+    : 'QA Testing Team';
+
+  let md = '';
+
+  md += `# Test Completion Report: ${title}\n\n`;
+  md += `> **Status**: Completed  \n`;
+  md += `> **Completion Date**: ${formatDate(completedAt)}  \n`;
+  md += `> **Session Started**: ${formatDate(createdAt)}  \n`;
+  md += `> **Executed By**: ${testerStr}  \n`;
+  md += `> **Platform**: Qavora Manual QA Testing Manager  \n\n`;
+
+  md += `## 1. Executive Summary & Statistics\n\n`;
+  md += `| Metric | Count | Percentage |\n`;
+  md += `| :--- | :---: | :---: |\n`;
+  md += `| **Total Failure Areas / Scenarios** | ${stats.totalPhases} | 100% |\n`;
+  md += `| **Total Test Cases Executed** | ${stats.totalTests} | 100% |\n`;
+  md += `| **Passed Tests** | ${stats.passedCount} | ${stats.passRate}% |\n`;
+  md += `| **Failed Tests** | ${stats.failedCount} | ${stats.failRate}% |\n`;
+  md += `| **Skipped Tests** | ${stats.skippedCount} | ${stats.totalTests > 0 ? Math.round((stats.skippedCount / stats.totalTests) * 100) : 0}% |\n\n`;
+
+  md += `### Failure Area Summary Breakdown\n\n`;
+  md += `| # | Failure Area / Phase | Total Tests | Passed | Failed | Skipped | Pass Rate |\n`;
+  md += `| :---: | :--- | :---: | :---: | :---: | :---: | :---: |\n`;
+  phases.forEach((p, idx) => {
+    const label = p.phaseLabel ? `${p.phaseLabel}: ${p.name}` : p.name;
+    md += `| ${idx + 1} | ${label.replace(/\|/g, '\\|')} | ${p.stats.total} | ${p.stats.passed} | ${p.stats.failed} | ${p.stats.skipped} | ${p.stats.passRate}% |\n`;
+  });
+  md += `\n---\n\n`;
+
+  if (documentNotes && documentNotes.length > 0) {
+    md += `## 2. Test Environment & Prerequisites\n\n`;
+    documentNotes.forEach(n => {
+      md += `- **[${(n.kind || 'Note').toUpperCase()}]**: ${n.text}\n`;
+    });
+    md += `\n---\n\n`;
+  }
+
+  md += `## 3. Original Testing Prompt & Requirements\n\n`;
+  md += `The testing session was generated from the following specification prompt:\n\n`;
+  md += `\`\`\`text\n`;
+  md += (originalPrompt && originalPrompt.trim() ? originalPrompt.trim() : '(No initial prompt recorded for this checklist session)') + '\n';
+  md += `\`\`\`\n\n`;
+  md += `---\n\n`;
+
+  md += `## 4. Comprehensive Test Results by Failure Area\n\n`;
+  phases.forEach((p, idx) => {
+    const heading = p.phaseLabel ? `${p.phaseLabel} — ${p.name}` : p.name;
+    md += `### 4.${idx + 1}. ${heading}\n\n`;
+    if (p.description) {
+      md += `**Failure Description / Scope**:\n${p.description}\n\n`;
+    }
+
+    if (p.notes && p.notes.length > 0) {
+      p.notes.forEach(n => {
+        md += `> **${(n.kind || 'Note').toUpperCase()}**: ${n.text}\n`;
+      });
+      md += `\n`;
+    }
+
+    let flatTests = [];
+    (p.sections || []).forEach(sec => {
+      const secName = sec.type === 'category' ? sec.name : '';
+      (sec.tests || []).forEach(tc => {
+        flatTests.push({ ...tc, categoryName: secName });
+      });
+    });
+
+    if (flatTests.length === 0) {
+      md += `*No tests recorded for this phase.*\n\n`;
+    } else {
+      md += `| Test ID | Category / Scenario | Test Performed | Priority | Result |\n`;
+      md += `| :--- | :--- | :--- | :---: | :---: |\n`;
+      flatTests.forEach(t => {
+        const tid = t.testId ? `\`${t.testId.replace(/\|/g, '\\|')}\`` : '—';
+        const cat = t.categoryName ? t.categoryName.replace(/\|/g, '\\|') : 'General';
+        const desc = (t.text || '').replace(/\|/g, '\\|');
+        const prio = t.priority ? t.priority : '—';
+        let resBadge = `**${t.status}**`;
+        if (t.status === 'Passed' || t.status === 'Completed') {
+          resBadge = '✅ **PASSED**';
+        } else if (t.status === 'Failed') {
+          resBadge = '❌ **FAILED**';
+        } else if (t.status === 'Skipped') {
+          resBadge = '⚠️ **SKIPPED**';
+        }
+        md += `| ${tid} | ${cat} | ${desc} | ${prio} | ${resBadge} |\n`;
+      });
+      md += `\n`;
+    }
+  });
+
+  md += `---\n\n`;
+  md += `*Report generated on ${formatDate(completedAt)} by [Qavora](https://github.com/Hannankhan203/Qavora-MongoDB-Integrated) — Manual QA Testing Manager.*\n`;
+
+  return md;
+}
+
+/**
+ * Generates clean, readable plain-text (.txt) report with ASCII dividers.
+ */
+export function generatePlainTextReport(reportData) {
+  if (!reportData) return '';
+
+  const {
+    title,
+    createdAt,
+    completedAt,
+    completedBy,
+    originalPrompt,
+    stats,
+    phases,
+    documentNotes
+  } = reportData;
+
+  const formatDate = (isoStr) => {
+    if (!isoStr) return 'N/A';
+    const d = new Date(isoStr);
+    return Number.isNaN(d.getTime()) ? isoStr : d.toUTCString();
+  };
+
+  const divider = '='.repeat(80);
+  const subDivider = '-'.repeat(80);
+
+  let out = [];
+
+  out.push(divider);
+  out.push('QAVORA — MANUAL QA TEST COMPLETION REPORT');
+  out.push(divider);
+  out.push(`Project / Title   : ${title}`);
+  out.push(`Testing Status    : COMPLETED (100% Executed)`);
+  out.push(`Completion Date   : ${formatDate(completedAt)}`);
+  out.push(`Session Started   : ${formatDate(createdAt)}`);
+  const testerName = completedBy
+    ? `${completedBy.name || 'QA Tester'}${completedBy.role ? ` (${completedBy.role})` : ''}`
+    : 'QA Tester';
+  out.push(`Tester / Role     : ${testerName}`);
+  out.push(divider);
+  out.push('');
+
+  out.push(subDivider);
+  out.push('1. OVERALL TESTING SUMMARY & STATISTICS');
+  out.push(subDivider);
+  out.push(`Total Failure Areas / Scenarios : ${stats.totalPhases}`);
+  out.push(`Total Tests Executed            : ${stats.totalTests}`);
+  out.push(`  - Passed                      : ${stats.passedCount} (${stats.passRate}%)`);
+  out.push(`  - Failed                      : ${stats.failedCount} (${stats.failRate}%)`);
+  out.push(`  - Skipped                     : ${stats.skippedCount}`);
+  out.push('');
+  out.push('Breakdown by Failure Area:');
+  phases.forEach((p, idx) => {
+    const label = p.phaseLabel ? `${p.phaseLabel}: ${p.name}` : p.name;
+    out.push(`  [${idx + 1}] ${label}`);
+    out.push(`      Total: ${p.stats.total} | Passed: ${p.stats.passed} | Failed: ${p.stats.failed} | Skipped: ${p.stats.skipped} | Pass Rate: ${p.stats.passRate}%`);
+  });
+  out.push('');
+
+  if (documentNotes && documentNotes.length > 0) {
+    out.push(subDivider);
+    out.push('2. TEST ENVIRONMENT & PREREQUISITES');
+    out.push(subDivider);
+    documentNotes.forEach(n => {
+      out.push(`* [${(n.kind || 'NOTE').toUpperCase()}] ${n.text}`);
+    });
+    out.push('');
+  }
+
+  out.push(subDivider);
+  out.push('3. ORIGINAL TESTING PROMPT & REQUIREMENTS');
+  out.push(subDivider);
+  if (originalPrompt && originalPrompt.trim()) {
+    out.push(originalPrompt.trim());
+  } else {
+    out.push('(No initial prompt recorded for this checklist session)');
+  }
+  out.push('');
+
+  out.push(subDivider);
+  out.push('4. DETAILED RESULTS BY FAILURE AREA & TESTS');
+  out.push(subDivider);
+
+  phases.forEach((p, idx) => {
+    const heading = p.phaseLabel ? `${p.phaseLabel} — ${p.name}` : p.name;
+    out.push('--------------------------------------------------------------------------------');
+    out.push(`FAILURE AREA ${idx + 1}: ${heading}`);
+    out.push('--------------------------------------------------------------------------------');
+    if (p.description) {
+      out.push(`Description: ${p.description}`);
+    }
+    if (p.notes && p.notes.length > 0) {
+      p.notes.forEach(n => {
+        out.push(`Note [${(n.kind || 'NOTE').toUpperCase()}]: ${n.text}`);
+      });
+    }
+    out.push('');
+
+    let flatTests = [];
+    (p.sections || []).forEach(sec => {
+      const secName = sec.type === 'category' ? sec.name : '';
+      (sec.tests || []).forEach(tc => {
+        flatTests.push({ ...tc, categoryName: secName });
+      });
+    });
+
+    if (flatTests.length === 0) {
+      out.push('  No tests recorded for this failure area.');
+    } else {
+      flatTests.forEach(t => {
+        const statusTag = String(t.status || 'DONE').toUpperCase().padEnd(7, ' ');
+        const testIdPart = t.testId ? `[${t.testId}] ` : '';
+        const prioPart = t.priority ? `(${t.priority}) ` : '';
+        const catPart = t.categoryName ? `[${t.categoryName}] ` : '';
+        out.push(`  [${statusTag}] ${testIdPart}${catPart}${prioPart}${t.text}`);
+      });
+    }
+    out.push('');
+  });
+
+  out.push(divider);
+  out.push(`Report generated by Qavora — Manual QA Testing Manager on ${formatDate(completedAt)}`);
+  out.push(divider);
+
+  return out.join('\n');
+}
+
+/**
+ * Returns a standardized, meaningful filename for exporting reports.
+ */
+export function getReportFilename(title, ext = 'md') {
+  const cleanExt = ext.replace(/^\./, '');
+  const cleanTitle = (title || 'QA_Checklist')
+    .replace(/[^\w\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '_')
+    .slice(0, 50);
+  const dateStr = new Date().toISOString().slice(0, 10);
+  return `Test_Completion_Report_${cleanTitle || 'QA_Checklist'}_${dateStr}.${cleanExt}`;
+}
+
+/**
+ * Initiates client-side file download with given filename, contents, and MIME type.
+ */
+export function downloadFile(filename, content, mimeType = 'text/plain;charset=utf-8') {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 

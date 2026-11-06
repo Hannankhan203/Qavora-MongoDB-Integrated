@@ -19,6 +19,13 @@ import {
   calculatePhaseProgress,
   calculateChecklistProgress,
   toggleChecklistTest,
+  setChecklistTestStatus,
+  completeChecklistTesting,
+  getChecklistReportData,
+  generateMarkdownReport,
+  generatePlainTextReport,
+  getReportFilename,
+  downloadFile,
   setChecklistPhaseExpanded,
   setAllChecklistPhasesExpanded,
   renameChecklistById,
@@ -179,11 +186,41 @@ export function initQARunnerAndChecklists({
     // Runner Toolbar Controls
     runnerExpandAllBtn: document.getElementById('btn-runner-expand-all'),
     runnerCollapseAllBtn: document.getElementById('btn-runner-collapse-all'),
+    runnerCompleteTestingBtn: document.getElementById('btn-runner-complete-testing'),
+    runnerViewReportBtn: document.getElementById('btn-runner-view-report'),
     runnerPromoteBtn: document.getElementById('btn-runner-promote-project'),
     runnerPromoteBtnText: document.getElementById('runner-promote-btn-text'),
     runnerToggleEditModeBtn: document.getElementById('btn-runner-toggle-edit'),
     runnerAddPhaseBtn: document.getElementById('btn-runner-add-phase'),
     runnerPhasesContainer: document.getElementById('runner-phases-container'),
+
+    // Complete Testing Modal (Prompt 5)
+    completeModal: document.getElementById('qa-complete-testing-modal'),
+    completeModalTitle: document.getElementById('qa-complete-modal-title'),
+    completeModalStats: document.getElementById('qa-complete-stats-summary'),
+    completeModalTesterName: document.getElementById('qa-complete-tester-name'),
+    completeModalTesterRole: document.getElementById('qa-complete-tester-role'),
+    completeModalClose: document.getElementById('qa-complete-close'),
+    completeModalCancel: document.getElementById('qa-complete-cancel'),
+    completeModalConfirmBtn: document.getElementById('qa-complete-confirm-btn'),
+
+    // Test Completion Report Modal (Prompt 5)
+    reportModal: document.getElementById('qa-completion-report-modal'),
+    reportModalClose: document.getElementById('qa-report-modal-close'),
+    reportModalChecklistTitle: document.getElementById('qa-report-modal-checklist-title'),
+    reportModalCompletionDate: document.getElementById('qa-report-modal-completion-date'),
+    reportDownloadMdBtn: document.getElementById('qa-report-download-md'),
+    reportDownloadTxtBtn: document.getElementById('qa-report-download-txt'),
+    reportCopyBtn: document.getElementById('qa-report-copy-btn'),
+    reportCopyText: document.getElementById('qa-report-copy-text'),
+    reportTabOverview: document.getElementById('qa-report-tab-overview'),
+    reportTabMarkdown: document.getElementById('qa-report-tab-markdown'),
+    reportTabPlainText: document.getElementById('qa-report-tab-plaintext'),
+    reportPanelOverview: document.getElementById('qa-report-panel-overview'),
+    reportPanelMarkdown: document.getElementById('qa-report-panel-markdown'),
+    reportPanelPlainText: document.getElementById('qa-report-panel-plaintext'),
+    reportMarkdownCode: document.getElementById('qa-report-markdown-code'),
+    reportPlaintextCode: document.getElementById('qa-report-plaintext-code'),
 
     // Promote Checklist to Project Modal (QAV-ISS-001)
     promoteModal: document.getElementById('qa-checklist-promote-modal'),
@@ -220,6 +257,11 @@ export function initQARunnerAndChecklists({
     pendingDelete: null, // { type: 'checklist' | 'phase' | 'test', checklistId, phaseId, testId, title }
     pendingPromoteChecklistId: null,
     pendingAddTestTarget: null, // { phaseId, sectionId }
+    pendingCompleteChecklistId: null,
+    activeReportData: null,
+    activeReportTab: 'overview',
+    activeReportMd: '',
+    activeReportTxt: '',
     listSearchQuery: '',
     lastFocusedElement: null
   };
@@ -549,6 +591,21 @@ export function initQARunnerAndChecklists({
       });
 
       actionsRow.appendChild(openBtn);
+      if (prog.isComplete || chk.completedAt) {
+        const reportBtn = document.createElement('button');
+        reportBtn.type = 'button';
+        reportBtn.className = 'btn btn-secondary btn-sm';
+        reportBtn.appendChild(ICONS.clipboard());
+        const repTxt = document.createElement('span');
+        repTxt.textContent = 'Report';
+        reportBtn.appendChild(repTxt);
+        reportBtn.title = 'View and export Test Completion Report';
+        reportBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openCompletionReportModal(chk.id);
+        });
+        actionsRow.appendChild(reportBtn);
+      }
       actionsRow.appendChild(promoteBtn);
       actionsRow.appendChild(renameBtn);
       actionsRow.appendChild(deleteBtn);
@@ -918,6 +975,435 @@ export function initQARunnerAndChecklists({
   }
 
   // ==========================================================================
+  // Test Completion Confirmation Modal (Prompt 5)
+  // ==========================================================================
+  function openCompleteTestingModal(checklistId) {
+    const checklist = getChecklistById(checklistId);
+    if (!checklist) {
+      showMsg('Checklist not found.', 'error');
+      return;
+    }
+
+    const progress = calculateChecklistProgress(checklist);
+    if (!progress.isComplete) {
+      showMsg(`Cannot complete testing: ${progress.remainingTests} of ${progress.totalTests} tests are still pending.`, 'warning');
+      return;
+    }
+
+    UIState.lastFocusedElement = document.activeElement;
+    UIState.pendingCompleteChecklistId = checklist.id;
+
+    if (els.completeModalTitle) {
+      els.completeModalTitle.textContent = checklist.title;
+    }
+
+    if (els.completeModalStats) {
+      els.completeModalStats.textContent = `All ${progress.totalTests} tests across ${progress.totalPhases} ${progress.totalPhases === 1 ? 'failure scenario' : 'failure scenarios'} have been completed.`;
+    }
+
+    if (els.completeModalTesterName) {
+      els.completeModalTesterName.value = (checklist.completedBy && checklist.completedBy.name) ? checklist.completedBy.name : '';
+    }
+
+    if (els.completeModalTesterRole) {
+      els.completeModalTesterRole.value = (checklist.completedBy && checklist.completedBy.role) ? checklist.completedBy.role : '';
+    }
+
+    if (els.completeModal) {
+      els.completeModal.classList.add('open');
+      els.completeModal.setAttribute('aria-hidden', 'false');
+    }
+    if (document.body) {
+      document.body.classList.add('modal-open');
+    }
+
+    setTimeout(() => {
+      if (els.completeModalConfirmBtn) {
+        els.completeModalConfirmBtn.focus();
+      }
+    }, 0);
+  }
+
+  function closeCompleteTestingModal() {
+    UIState.pendingCompleteChecklistId = null;
+    if (els.completeModal) {
+      els.completeModal.classList.remove('open');
+      els.completeModal.setAttribute('aria-hidden', 'true');
+    }
+    if (document.body && (!els.reportModal || !els.reportModal.classList.contains('open'))) {
+      document.body.classList.remove('modal-open');
+    }
+    const prevFocus = UIState.lastFocusedElement;
+    UIState.lastFocusedElement = null;
+    if (prevFocus && typeof prevFocus.focus === 'function' && document.contains(prevFocus)) {
+      prevFocus.focus();
+    }
+  }
+
+  function confirmCompleteTesting() {
+    const targetId = UIState.pendingCompleteChecklistId;
+    if (!targetId) return;
+
+    const testerName = els.completeModalTesterName ? els.completeModalTesterName.value.trim() : '';
+    const testerRole = els.completeModalTesterRole ? els.completeModalTesterRole.value.trim() : '';
+
+    const completedBy = {
+      name: testerName || 'QA Tester',
+      email: '',
+      role: testerRole || 'QA Analyst'
+    };
+
+    const res = completeChecklistTesting(targetId, completedBy);
+    if (!res.ok || !res.checklist) {
+      showMsg(res.error || 'Failed to complete testing session.', 'error');
+      return;
+    }
+
+    closeCompleteTestingModal();
+    showMsg(`Testing completed for "${res.checklist.title}"! Generating report...`, 'success');
+
+    updateRunnerOverallDOM(res.checklist);
+    renderMyChecklistsView();
+    refreshGlobalBadgesAndBanners();
+
+    // Open Test Completion Report modal immediately
+    openCompletionReportModal(res.checklist.id);
+  }
+
+  // ==========================================================================
+  // Test Completion Report Viewer & Exporter (Prompt 5)
+  // ==========================================================================
+  function openCompletionReportModal(checklistId) {
+    const checklist = getChecklistById(checklistId);
+    if (!checklist) {
+      showMsg('Checklist not found.', 'error');
+      return;
+    }
+
+    const reportData = getChecklistReportData(checklist);
+    if (!reportData) {
+      showMsg('Could not assemble test report data.', 'error');
+      return;
+    }
+
+    UIState.activeReportData = reportData;
+    UIState.activeReportMd = generateMarkdownReport(reportData);
+    UIState.activeReportTxt = generatePlainTextReport(reportData);
+    UIState.activeReportTab = 'overview';
+
+    if (els.reportModalChecklistTitle) {
+      els.reportModalChecklistTitle.textContent = reportData.title;
+    }
+    if (els.reportModalCompletionDate) {
+      els.reportModalCompletionDate.textContent = `Completed ${formatDateTimeShort(reportData.completedAt)}`;
+    }
+
+    // Populate Markdown preview
+    if (els.reportMarkdownCode) {
+      els.reportMarkdownCode.textContent = UIState.activeReportMd;
+    }
+
+    // Populate Plain text preview
+    if (els.reportPlaintextCode) {
+      els.reportPlaintextCode.textContent = UIState.activeReportTxt;
+    }
+
+    // Populate Visual Overview
+    renderCompletionReportVisual(reportData);
+
+    // Switch to Overview tab
+    switchReportTab('overview');
+
+    if (els.reportModal) {
+      els.reportModal.classList.add('open');
+      els.reportModal.setAttribute('aria-hidden', 'false');
+    }
+    if (document.body) {
+      document.body.classList.add('modal-open');
+    }
+  }
+
+  function closeCompletionReportModal() {
+    UIState.activeReportData = null;
+    UIState.activeReportMd = '';
+    UIState.activeReportTxt = '';
+    if (els.reportModal) {
+      els.reportModal.classList.remove('open');
+      els.reportModal.setAttribute('aria-hidden', 'true');
+    }
+    if (document.body && (!els.completeModal || !els.completeModal.classList.contains('open'))) {
+      document.body.classList.remove('modal-open');
+    }
+  }
+
+  function switchReportTab(tabName) {
+    UIState.activeReportTab = tabName;
+
+    const tabs = [
+      { name: 'overview', btn: els.reportTabOverview, panel: els.reportPanelOverview },
+      { name: 'markdown', btn: els.reportTabMarkdown, panel: els.reportPanelMarkdown },
+      { name: 'plaintext', btn: els.reportTabPlainText, panel: els.reportPanelPlainText }
+    ];
+
+    tabs.forEach(t => {
+      const isActive = t.name === tabName;
+      if (t.btn) {
+        t.btn.classList.toggle('active', isActive);
+        t.btn.setAttribute('aria-selected', String(isActive));
+      }
+      if (t.panel) {
+        t.panel.style.display = isActive ? '' : 'none';
+        t.panel.classList.toggle('active', isActive);
+      }
+    });
+  }
+
+  function renderCompletionReportVisual(data) {
+    if (!els.reportPanelOverview) return;
+    clearElement(els.reportPanelOverview);
+
+    // 1. Executive Summary Cards Grid
+    const cardsGrid = document.createElement('div');
+    cardsGrid.className = 'qa-report-summary-cards';
+
+    const cardDefs = [
+      { label: 'Failure Scenarios', val: String(data.stats.totalPhases), color: 'var(--text-primary)' },
+      { label: 'Total Tests', val: String(data.stats.totalTests), color: 'var(--text-primary)' },
+      { label: 'Passed Tests', val: `${data.stats.passedCount} (${data.stats.passRate}%)`, color: '#10b981' },
+      { label: 'Failed Tests', val: String(data.stats.failedCount), color: data.stats.failedCount > 0 ? '#ef4444' : 'var(--text-muted)' },
+      { label: 'Skipped Tests', val: String(data.stats.skippedCount), color: data.stats.skippedCount > 0 ? '#f59e0b' : 'var(--text-muted)' }
+    ];
+
+    cardDefs.forEach(c => {
+      const card = document.createElement('div');
+      card.className = 'qa-report-card';
+      const labelSpan = document.createElement('div');
+      labelSpan.className = 'qa-report-card-label';
+      labelSpan.textContent = c.label;
+      const valStrong = document.createElement('strong');
+      valStrong.className = 'qa-report-card-val';
+      valStrong.style.color = c.color;
+      valStrong.textContent = c.val;
+      card.appendChild(labelSpan);
+      card.appendChild(valStrong);
+      cardsGrid.appendChild(card);
+    });
+    els.reportPanelOverview.appendChild(cardsGrid);
+
+    // 2. Original Prompt & Requirements Block
+    const promptBox = document.createElement('div');
+    promptBox.className = 'qa-report-prompt-box';
+    const promptTitle = document.createElement('div');
+    promptTitle.className = 'qa-report-prompt-title';
+    promptTitle.appendChild(ICONS.clipboard());
+    const promptTitleSpan = document.createElement('span');
+    promptTitleSpan.textContent = 'Original Testing Prompt & Requirements';
+    promptTitle.appendChild(promptTitleSpan);
+
+    const promptPre = document.createElement('pre');
+    promptPre.className = 'qa-report-prompt-text';
+    promptPre.textContent = data.originalPrompt && data.originalPrompt.trim()
+      ? data.originalPrompt.trim()
+      : '(No initial prompt recorded for this checklist session)';
+
+    promptBox.appendChild(promptTitle);
+    promptBox.appendChild(promptPre);
+    els.reportPanelOverview.appendChild(promptBox);
+
+    // 3. Breakdown Summary Table
+    const breakdownCard = document.createElement('div');
+    breakdownCard.className = 'qa-report-section-card';
+    const breakdownHeader = document.createElement('div');
+    breakdownHeader.className = 'qa-report-section-header';
+    const breakdownTitle = document.createElement('h4');
+    breakdownTitle.className = 'qa-report-section-title';
+    breakdownTitle.textContent = 'Failure Area Breakdown Summary';
+    breakdownHeader.appendChild(breakdownTitle);
+    breakdownCard.appendChild(breakdownHeader);
+
+    const bTable = document.createElement('table');
+    bTable.className = 'qa-report-table';
+    const bThead = document.createElement('thead');
+    const bTrHead = document.createElement('tr');
+    ['#', 'Failure Area / Scenario', 'Total Tests', 'Passed', 'Failed', 'Skipped', 'Pass Rate'].forEach(thText => {
+      const th = document.createElement('th');
+      th.textContent = thText;
+      bTrHead.appendChild(th);
+    });
+    bThead.appendChild(bTrHead);
+    bTable.appendChild(bThead);
+
+    const bTbody = document.createElement('tbody');
+    data.phases.forEach((p, idx) => {
+      const tr = document.createElement('tr');
+      const tdNum = document.createElement('td');
+      tdNum.textContent = String(idx + 1);
+      const tdName = document.createElement('td');
+      tdName.textContent = p.phaseLabel ? `${p.phaseLabel}: ${p.name}` : p.name;
+      const tdTot = document.createElement('td');
+      tdTot.textContent = String(p.stats.total);
+      const tdPass = document.createElement('td');
+      tdPass.textContent = String(p.stats.passed);
+      tdPass.style.color = '#10b981';
+      tdPass.style.fontWeight = '600';
+      const tdFail = document.createElement('td');
+      tdFail.textContent = String(p.stats.failed);
+      if (p.stats.failed > 0) tdFail.style.color = '#ef4444';
+      const tdSkip = document.createElement('td');
+      tdSkip.textContent = String(p.stats.skipped);
+      if (p.stats.skipped > 0) tdSkip.style.color = '#f59e0b';
+      const tdRate = document.createElement('td');
+      tdRate.textContent = `${p.stats.passRate}%`;
+      tdRate.style.fontWeight = '700';
+
+      tr.appendChild(tdNum);
+      tr.appendChild(tdName);
+      tr.appendChild(tdTot);
+      tr.appendChild(tdPass);
+      tr.appendChild(tdFail);
+      tr.appendChild(tdSkip);
+      tr.appendChild(tdRate);
+      bTbody.appendChild(tr);
+    });
+    bTable.appendChild(bTbody);
+    breakdownCard.appendChild(bTable);
+    els.reportPanelOverview.appendChild(breakdownCard);
+
+    // 4. Detailed Results by Failure Area
+    data.phases.forEach((p, idx) => {
+      const sectionCard = document.createElement('div');
+      sectionCard.className = 'qa-report-section-card';
+
+      const secHeader = document.createElement('div');
+      secHeader.className = 'qa-report-section-header';
+      const secTitle = document.createElement('h4');
+      secTitle.className = 'qa-report-section-title';
+      secTitle.textContent = `${idx + 1}. ${p.phaseLabel ? `${p.phaseLabel} — ` : ''}${p.name}`;
+      secHeader.appendChild(secTitle);
+
+      const secBadge = document.createElement('span');
+      secBadge.className = 'qa-status-pill qa-pill-completed';
+      secBadge.textContent = `${p.stats.passed} / ${p.stats.total} Passed (${p.stats.passRate}%)`;
+      secHeader.appendChild(secBadge);
+      sectionCard.appendChild(secHeader);
+
+      if (p.description) {
+        const descP = document.createElement('p');
+        descP.className = 'qa-report-section-desc';
+        descP.textContent = p.description;
+        sectionCard.appendChild(descP);
+      }
+
+      let flatTests = [];
+      (p.sections || []).forEach(sec => {
+        const secName = sec.type === 'category' ? sec.name : '';
+        (sec.tests || []).forEach(tc => {
+          flatTests.push({ ...tc, categoryName: secName });
+        });
+      });
+
+      if (flatTests.length > 0) {
+        const dTable = document.createElement('table');
+        dTable.className = 'qa-report-table';
+        const dThead = document.createElement('thead');
+        const dTrHead = document.createElement('tr');
+        ['Test ID', 'Category / Scenario', 'Test Description', 'Priority', 'Status'].forEach(hText => {
+          const th = document.createElement('th');
+          th.textContent = hText;
+          dTrHead.appendChild(th);
+        });
+        dThead.appendChild(dTrHead);
+        dTable.appendChild(dThead);
+
+        const dTbody = document.createElement('tbody');
+        flatTests.forEach(t => {
+          const tr = document.createElement('tr');
+          const tdId = document.createElement('td');
+          tdId.textContent = t.testId || '—';
+          if (t.testId) tdId.style.fontFamily = 'var(--font-mono, monospace)';
+
+          const tdCat = document.createElement('td');
+          tdCat.textContent = t.categoryName || 'General';
+
+          const tdDesc = document.createElement('td');
+          tdDesc.textContent = t.text || 'Untitled Test';
+
+          const tdPrio = document.createElement('td');
+          tdPrio.textContent = t.priority || '—';
+
+          const tdStatus = document.createElement('td');
+          const badge = document.createElement('span');
+          badge.className = `qa-runner-state-tag ${getTestStatusTagClass(t.status)}`;
+          badge.textContent = t.status || 'Passed';
+          tdStatus.appendChild(badge);
+
+          tr.appendChild(tdId);
+          tr.appendChild(tdCat);
+          tr.appendChild(tdDesc);
+          tr.appendChild(tdPrio);
+          tr.appendChild(tdStatus);
+          dTbody.appendChild(tr);
+        });
+        dTable.appendChild(dTbody);
+        sectionCard.appendChild(dTable);
+      }
+
+      els.reportPanelOverview.appendChild(sectionCard);
+    });
+  }
+
+  function handleDownloadReport(format) {
+    if (!UIState.activeReportData) return;
+    const isMd = format === 'md';
+    const content = isMd ? UIState.activeReportMd : UIState.activeReportTxt;
+    const mime = isMd ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8';
+    const filename = getReportFilename(UIState.activeReportData.title, isMd ? 'md' : 'txt');
+    downloadFile(filename, content, mime);
+    showMsg(`Downloaded "${filename}"`, 'success');
+  }
+
+  function handleCopyReport() {
+    if (!UIState.activeReportData) return;
+    const content = UIState.activeReportTab === 'plaintext' ? UIState.activeReportTxt : UIState.activeReportMd;
+
+    const doSuccess = () => {
+      if (els.reportCopyText) {
+        const orig = els.reportCopyText.textContent;
+        els.reportCopyText.textContent = 'Copied!';
+        setTimeout(() => {
+          if (els.reportCopyText) els.reportCopyText.textContent = orig;
+        }, 2000);
+      }
+      showMsg('Report copied to clipboard!', 'success');
+    };
+
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      navigator.clipboard.writeText(content).then(doSuccess).catch(() => {
+        fallbackCopy(content, doSuccess);
+      });
+    } else {
+      fallbackCopy(content, doSuccess);
+    }
+  }
+
+  function fallbackCopy(text, cb) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+      document.execCommand('copy');
+      if (typeof cb === 'function') cb();
+    } catch (_e) {
+      showMsg('Failed to copy to clipboard.', 'error');
+    }
+    document.body.removeChild(ta);
+  }
+
+  // ==========================================================================
   // Manual QA Test Runner View Rendering & Instant Checkbox Updates
   // ==========================================================================
   function syncChecklistSwitcherDropdown(checklists, activeId) {
@@ -985,6 +1471,23 @@ export function initQARunnerAndChecklists({
       const linkedProj = findPromotedProjectForChecklist(checklist);
       els.runnerPromoteBtnText.textContent = linkedProj ? 'Open Promoted Project' : 'Promote to Project';
     }
+
+    // Complete Testing & Completion Report action buttons (Prompt 5)
+    if (els.runnerCompleteTestingBtn) {
+      if (overall.isComplete && !checklist.completedAt) {
+        els.runnerCompleteTestingBtn.style.display = '';
+      } else {
+        els.runnerCompleteTestingBtn.style.display = 'none';
+      }
+    }
+
+    if (els.runnerViewReportBtn) {
+      if (checklist.completedAt || overall.isComplete) {
+        els.runnerViewReportBtn.style.display = '';
+      } else {
+        els.runnerViewReportBtn.style.display = 'none';
+      }
+    }
   }
 
   function updateSinglePhaseProgressDOM(phaseCardEl, phase) {
@@ -1008,6 +1511,19 @@ export function initQARunnerAndChecklists({
     phaseCardEl.classList.toggle('qa-runner-phase-complete', pp.isComplete);
   }
 
+  function getTestStatusTagClass(statusStr) {
+    if (statusStr === TEST_STATUS.PASSED || statusStr === TEST_STATUS.COMPLETED) {
+      return 'state-passed';
+    }
+    if (statusStr === TEST_STATUS.FAILED) {
+      return 'state-failed';
+    }
+    if (statusStr === TEST_STATUS.SKIPPED) {
+      return 'state-skipped';
+    }
+    return 'state-not-started';
+  }
+
   function handleRunnerCheckboxChange(checklistId, testId, isChecked, rowEl, statusBadgeEl, phaseCardEl) {
     const res = toggleChecklistTest(checklistId, testId, isChecked);
     if (!res.ok || !res.checklist) {
@@ -1021,11 +1537,10 @@ export function initQARunnerAndChecklists({
 
     // Immediate in-place row update without rebuilding scroll container
     rowEl.classList.toggle('qa-runner-test-completed', isChecked);
+    const updatedStatus = res.test?.status || (isChecked ? TEST_STATUS.PASSED : TEST_STATUS.NOT_STARTED);
     if (statusBadgeEl) {
-      statusBadgeEl.textContent = isChecked ? TEST_STATUS.COMPLETED : TEST_STATUS.NOT_STARTED;
-      statusBadgeEl.className = isChecked
-        ? 'qa-runner-state-tag state-completed'
-        : 'qa-runner-state-tag state-not-started';
+      statusBadgeEl.textContent = updatedStatus;
+      statusBadgeEl.className = `qa-runner-state-tag qa-runner-state-btn ${getTestStatusTagClass(updatedStatus)}`;
     }
 
     const updatedPhase = res.checklist.phases.find(p => p.id === res.phaseId);
@@ -1129,11 +1644,47 @@ export function initQARunnerAndChecklists({
     checkbox.checked = Boolean(tc.completed);
     checkbox.setAttribute('aria-label', tc.text);
 
-    const statusTag = document.createElement('span');
-    statusTag.className = tc.completed
-      ? 'qa-runner-state-tag state-completed'
-      : 'qa-runner-state-tag state-not-started';
-    statusTag.textContent = tc.completed ? TEST_STATUS.COMPLETED : TEST_STATUS.NOT_STARTED;
+    const initialStatus = tc.status || (tc.completed ? TEST_STATUS.PASSED : TEST_STATUS.NOT_STARTED);
+    const statusTag = document.createElement('button');
+    statusTag.type = 'button';
+    statusTag.className = `qa-runner-state-tag qa-runner-state-btn ${getTestStatusTagClass(initialStatus)}`;
+    statusTag.textContent = initialStatus;
+    statusTag.title = 'Click to cycle status: Passed -> Failed -> Skipped -> Not Started';
+    statusTag.setAttribute('aria-label', `Test status: ${initialStatus}. Click to cycle.`);
+
+    statusTag.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      let nextStatus = TEST_STATUS.PASSED;
+      const cur = tc.status || (tc.completed ? TEST_STATUS.PASSED : TEST_STATUS.NOT_STARTED);
+      if (cur === TEST_STATUS.PASSED || cur === TEST_STATUS.COMPLETED) {
+        nextStatus = TEST_STATUS.FAILED;
+      } else if (cur === TEST_STATUS.FAILED) {
+        nextStatus = TEST_STATUS.SKIPPED;
+      } else if (cur === TEST_STATUS.SKIPPED) {
+        nextStatus = TEST_STATUS.NOT_STARTED;
+      } else {
+        nextStatus = TEST_STATUS.PASSED;
+      }
+
+      const res = setChecklistTestStatus(checklist.id, tc.id, nextStatus);
+      if (res.ok && res.checklist && res.test) {
+        tc.status = res.test.status;
+        tc.completed = res.test.completed;
+        checkbox.checked = Boolean(tc.completed);
+        row.classList.toggle('qa-runner-test-completed', tc.completed);
+        statusTag.textContent = tc.status;
+        statusTag.className = `qa-runner-state-tag qa-runner-state-btn ${getTestStatusTagClass(tc.status)}`;
+        const updatedPhase = res.checklist.phases.find(p => p.id === res.phaseId);
+        updateSinglePhaseProgressDOM(phaseCardEl, updatedPhase);
+        updateRunnerOverallDOM(res.checklist);
+        const { checklists } = loadAllChecklists();
+        syncChecklistSwitcherDropdown(checklists, checklist.id);
+        refreshGlobalBadgesAndBanners();
+      } else {
+        showMsg(res.error || 'Failed to update test status.', 'error');
+      }
+    });
 
     checkbox.addEventListener('change', () => {
       handleRunnerCheckboxChange(checklist.id, tc.id, checkbox.checked, row, statusTag, phaseCardEl);
@@ -2007,7 +2558,59 @@ export function initQARunnerAndChecklists({
     });
   }
 
+  // Complete Testing Modal Events (Prompt 5)
+  if (els.runnerCompleteTestingBtn) {
+    els.runnerCompleteTestingBtn.addEventListener('click', () => {
+      if (UIState.activeChecklistId) {
+        openCompleteTestingModal(UIState.activeChecklistId);
+      }
+    });
+  }
+  if (els.runnerViewReportBtn) {
+    els.runnerViewReportBtn.addEventListener('click', () => {
+      if (UIState.activeChecklistId) {
+        openCompletionReportModal(UIState.activeChecklistId);
+      }
+    });
+  }
+  if (els.completeModalClose) els.completeModalClose.addEventListener('click', closeCompleteTestingModal);
+  if (els.completeModalCancel) els.completeModalCancel.addEventListener('click', closeCompleteTestingModal);
+  if (els.completeModalConfirmBtn) els.completeModalConfirmBtn.addEventListener('click', confirmCompleteTesting);
+  if (els.completeModal) {
+    els.completeModal.addEventListener('click', e => {
+      if (e.target === els.completeModal) closeCompleteTestingModal();
+    });
+  }
+
+  // Test Completion Report Modal Events (Prompt 5)
+  if (els.reportModalClose) els.reportModalClose.addEventListener('click', closeCompletionReportModal);
+  if (els.reportModal) {
+    els.reportModal.addEventListener('click', e => {
+      if (e.target === els.reportModal) closeCompletionReportModal();
+    });
+  }
+  if (els.reportTabOverview) els.reportTabOverview.addEventListener('click', () => switchReportTab('overview'));
+  if (els.reportTabMarkdown) els.reportTabMarkdown.addEventListener('click', () => switchReportTab('markdown'));
+  if (els.reportTabPlainText) els.reportTabPlainText.addEventListener('click', () => switchReportTab('plaintext'));
+  if (els.reportDownloadMdBtn) els.reportDownloadMdBtn.addEventListener('click', () => handleDownloadReport('md'));
+  if (els.reportDownloadTxtBtn) els.reportDownloadTxtBtn.addEventListener('click', () => handleDownloadReport('txt'));
+  if (els.reportCopyBtn) els.reportCopyBtn.addEventListener('click', handleCopyReport);
+
   document.addEventListener('keydown', e => {
+    if (els.completeModal && els.completeModal.classList.contains('open')) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeCompleteTestingModal();
+      }
+      return;
+    }
+    if (els.reportModal && els.reportModal.classList.contains('open')) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeCompletionReportModal();
+      }
+      return;
+    }
     if (els.promoteModal && els.promoteModal.classList.contains('open')) {
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -2043,6 +2646,8 @@ export function initQARunnerAndChecklists({
   return {
     openChecklistInRunner,
     openPromoteChecklistModal,
+    openCompleteTestingModal,
+    openCompletionReportModal,
     renderMyChecklistsView,
     renderRunnerView,
     refreshGlobalBadgesAndBanners,

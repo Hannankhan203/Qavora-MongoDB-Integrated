@@ -1341,6 +1341,8 @@ export function parseQAPlanText(rawInput) {
     documentNotes,
     phases,
     unclassified,
+    rawText: normalizedText,
+    originalPrompt: normalizedText,
     stats: {
       totalLines: rawLines.length,
       nonEmptyLines,
