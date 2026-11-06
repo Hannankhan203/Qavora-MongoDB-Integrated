@@ -95,7 +95,7 @@
 - **Active Runner State**: Remembers the currently active checklist across sessions and view switches.
 
 ### 5. Multi-Checklist Workspace (`qaChecklistStore.js`)
-- **Independent Checklists**: Create and store multiple distinct checklists simultaneously in browser storage.
+- **Independent Checklists**: Create and store multiple distinct checklists simultaneously with server-authoritative MongoDB persistence and offline caching.
 - **Checklist Management**: Open, resume, rename, or delete saved checklists from the "My QA Checklists" view.
 - **Progress Badges**: Immediate visual indicators (`Not Started`, `In Progress`, `Completed`) with completion timestamps and test counts.
 - **Quick Resume**: Contextual banners in the checklist generator allow resuming active test sessions in one click.

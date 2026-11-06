@@ -1644,60 +1644,6 @@ export function replaceActiveRunnerState(rawRunnerState, checklists = null) {
 }
 
 // ============================================================================
-// Persistent Storage Footprint Calculation (QAV-ISS-009)
-// ============================================================================
-
-export const QAVORA_PERSISTENT_STORAGE_KEYS = Object.freeze([
-  'qavora_projects_v1',
-  'qavora_activities_v1',
-  'qavora_theme_preference',
-  CHECKLISTS_STORAGE_KEY,
-  ACTIVE_RUNNER_STORAGE_KEY
-]);
-
-export function calculateQavoraStorageFootprint(quotaBytes = 5 * 1024 * 1024) {
-  const { backend } = getStorageBackend();
-  const keyBytes = {};
-  let totalBytes = 0;
-
-  for (const key of QAVORA_PERSISTENT_STORAGE_KEYS) {
-    let raw = '';
-    try {
-      const val = backend.getItem(key);
-      raw = typeof val === 'string' ? val : '';
-    } catch (_err) {
-      raw = '';
-    }
-    const bytes = raw.length * 2; // UTF-16 code units in browser Web Storage
-    keyBytes[key] = bytes;
-    totalBytes += bytes;
-  }
-
-  const kbNumeric = totalBytes / 1024;
-  const formattedKB = totalBytes === 0 ? '0.0 KB' : `${kbNumeric.toFixed(1)} KB`;
-  const rawPercent = quotaBytes > 0 ? (totalBytes / quotaBytes) * 100 : 0;
-  const clampedPercent = totalBytes === 0 ? 0 : Math.min(100, Math.max(0.01, rawPercent));
-  const formattedPercent =
-    totalBytes === 0
-      ? '0% used'
-      : rawPercent < 1
-        ? `< 1% used (${ kbNumeric.toFixed(1) } KB)`
-        : `${Math.min(100, rawPercent).toFixed(2)}% used`;
-  const barWidthPercent = totalBytes === 0 ? 0 : Math.min(100, Math.max(1, rawPercent));
-
-  return {
-    totalBytes,
-    kbNumeric,
-    formattedKB,
-    rawPercent,
-    clampedPercent,
-    formattedPercent,
-    barWidthPercent,
-    keyBytes
-  };
-}
-
-// ============================================================================
 // Promote Saved QA Checklist to Formal Project (QAV-ISS-001)
 // ============================================================================
 
