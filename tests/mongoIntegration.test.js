@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import jwt from 'jsonwebtoken';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 
 // Safeguard: never allow integration tests to use production MONGODB_URI
@@ -67,6 +68,7 @@ async function registerAndLogin(name, email, password, ip = '10.0.0.1') {
   const cookies = extractCookies(regRes);
   return {
     cookieHeader: `qavora_auth_token=${cookies.qavora_auth_token}; qavora_csrf_token=${cookies.qavora_csrf_token}`,
+    authToken: cookies.qavora_auth_token,
     csrfToken: cookies.qavora_csrf_token
   };
 }
@@ -271,19 +273,11 @@ test('CSRF Session Binding: rejects cross-session token reuse, tampered tokens, 
   });
   assert.equal(tamperedRes.status, 403);
 
-  // 4. Anonymous CSRF token cannot be used on state-changing endpoints
+  // 4. QAV-AUDIT-003: Unauthenticated CSRF token request is rejected with 401 and no cookie
   const anonCsrfRes = await fetch(`${baseUrl}/api/auth/csrf`);
+  assert.equal(anonCsrfRes.status, 401);
   const anonCookies = extractCookies(anonCsrfRes);
-  const anonPostRes = await fetch(`${baseUrl}/api/checklists`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Cookie: `qavora_csrf_token=${anonCookies.qavora_csrf_token}`,
-      'X-CSRF-Token': anonCookies.qavora_csrf_token
-    },
-    body: JSON.stringify({ title: 'Anon CSRF' })
-  });
-  assert.equal(anonPostRes.status, 403);
+  assert.equal(anonCookies.qavora_csrf_token, undefined, 'No CSRF cookie should be issued to unauthenticated requests');
 
   // 5. Duplicate CSRF cookies rejected
   const dupCookieRes = await fetch(`${baseUrl}/api/checklists`, {
@@ -708,3 +702,73 @@ test('QAV-AUDIT-002: Optimistic concurrency control on PATCH /api/checklists/:id
   const finalChecklist = await backwardCompatRes.json();
   assert.equal(finalChecklist.title, 'Backward Compatible Update');
 });
+
+test('QAV-AUDIT-003: Prevent Unauthenticated CSRF Token Issuance & enforce session-bound token refresh', async () => {
+  // 1. Unauthenticated GET /api/auth/csrf returns HTTP 401 and no Set-Cookie
+  const unauthRes = await fetch(`${baseUrl}/api/auth/csrf`);
+  assert.equal(unauthRes.status, 401);
+  const unauthCookies = extractCookies(unauthRes);
+  assert.equal(unauthCookies.qavora_csrf_token, undefined, 'No CSRF cookie should be issued for unauthenticated requests');
+
+  // 2. Invalid JWT authentication cookie is rejected with 401 and no CSRF cookie
+  const invalidRes = await fetch(`${baseUrl}/api/auth/csrf`, {
+    headers: { Cookie: 'qavora_auth_token=invalid.jwt.token' }
+  });
+  assert.equal(invalidRes.status, 401);
+  const invalidCookies = extractCookies(invalidRes);
+  assert.equal(invalidCookies.qavora_csrf_token, undefined, 'No CSRF cookie should be issued for invalid auth token');
+
+  // 3. Expired JWT authentication cookie is rejected with 401 and no CSRF cookie
+  const expiredToken = jwt.sign(
+    { userId: 'usr_audit_expired', email: 'expired@example.com', name: 'Expired', role: 'QA Tester' },
+    process.env.JWT_SECRET,
+    { expiresIn: -10 }
+  );
+  const expiredRes = await fetch(`${baseUrl}/api/auth/csrf`, {
+    headers: { Cookie: `qavora_auth_token=${expiredToken}` }
+  });
+  assert.equal(expiredRes.status, 401);
+  const expiredCookies = extractCookies(expiredRes);
+  assert.equal(expiredCookies.qavora_csrf_token, undefined, 'No CSRF cookie should be issued for expired auth token');
+
+  // 4. Authenticated session receives valid session-bound CSRF token
+  const userA = await registerAndLogin('Audit User A', 'audita@example.com', 'Password123!', '10.0.9.1');
+  const userB = await registerAndLogin('Audit User B', 'auditb@example.com', 'Password123!', '10.0.9.2');
+
+  const authCsrfRes = await fetch(`${baseUrl}/api/auth/csrf`, {
+    headers: { Cookie: `qavora_auth_token=${userA.authToken}` }
+  });
+  assert.equal(authCsrfRes.status, 200);
+  const authCookies = extractCookies(authCsrfRes);
+  assert.ok(authCookies.qavora_csrf_token, 'CSRF cookie should be issued for authenticated user');
+  const authBody = await authCsrfRes.json();
+  assert.equal(authBody.success, true);
+  assert.equal(authBody.csrfToken, authCookies.qavora_csrf_token);
+
+  // 5. Refreshed token works on state-changing requests for the authenticated session
+  const postRes = await fetch(`${baseUrl}/api/checklists`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Origin: baseUrl,
+      Cookie: `qavora_auth_token=${userA.authToken}; qavora_csrf_token=${authBody.csrfToken}`,
+      'X-CSRF-Token': authBody.csrfToken
+    },
+    body: JSON.stringify({ title: 'Refreshed CSRF Token Checklist' })
+  });
+  assert.equal(postRes.status, 201);
+
+  // 6. Token issued for user A is rejected if used with user B's session (cross-session binding)
+  const crossRes = await fetch(`${baseUrl}/api/checklists`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Origin: baseUrl,
+      Cookie: `qavora_auth_token=${userB.authToken}; qavora_csrf_token=${authBody.csrfToken}`,
+      'X-CSRF-Token': authBody.csrfToken
+    },
+    body: JSON.stringify({ title: 'Cross User Exploit' })
+  });
+  assert.equal(crossRes.status, 403);
+});
+

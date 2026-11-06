@@ -190,17 +190,21 @@ function clearAuthCookie(res: Response) {
   res.clearCookie(AUTH_COOKIE_NAME, getAuthCookieOptions());
 }
 
-function computeCsrfSignature(nonce: string, authToken?: string): string {
-  const sessionKey = authToken
-    ? crypto.createHash('sha256').update(authToken).digest('hex')
-    : 'anonymous';
+function computeCsrfSignature(nonce: string, authToken: string): string {
+  if (!authToken || typeof authToken !== 'string' || !authToken.trim()) {
+    throw new Error('Authentication token is required to compute session-bound CSRF signature.');
+  }
+  const sessionKey = crypto.createHash('sha256').update(authToken).digest('hex');
   return crypto
     .createHmac('sha256', getJwtSecret())
     .update(`${sessionKey}.${nonce}`)
     .digest('hex');
 }
 
-function setCsrfCookie(res: Response, authToken?: string): string {
+function setCsrfCookie(res: Response, authToken: string): string {
+  if (!authToken || typeof authToken !== 'string' || !authToken.trim()) {
+    throw new Error('Cannot issue CSRF token without a valid authenticated session.');
+  }
   const isProd = process.env.NODE_ENV === 'production';
   const nonce = crypto.randomBytes(24).toString('hex');
   const sig = computeCsrfSignature(nonce, authToken);
@@ -1001,7 +1005,12 @@ async function requireAuth(req: Request, res: Response, next: NextFunction) {
       });
     }
 
-    const { cookies } = parseCookies(req.headers.cookie);
+    const { cookies, duplicates } = parseCookies(req.headers.cookie);
+    if (duplicates.has(AUTH_COOKIE_NAME)) {
+      return res.status(401).json({
+        error: "Invalid or duplicate authentication token."
+      });
+    }
     let token = cookies[AUTH_COOKIE_NAME];
     if (!token) {
       const authHeader = req.headers.authorization;
@@ -1387,11 +1396,18 @@ app.post("/api/auth/logout", (req: Request, res: Response) => {
   });
 });
 
-// 2c. GET /api/auth/csrf - Issue CSRF token cookie
-app.get("/api/auth/csrf", (req: Request, res: Response) => {
-  const { cookies } = parseCookies(req.headers.cookie);
-  setCsrfCookie(res, cookies[AUTH_COOKIE_NAME]);
-  return res.json({ success: true });
+// 2c. GET /api/auth/csrf - Issue CSRF token cookie for authenticated sessions only (QAV-AUDIT-003)
+app.get("/api/auth/csrf", requireAuth, (req: Request, res: Response) => {
+  const { cookies, duplicates } = parseCookies(req.headers.cookie);
+  if (duplicates.has(AUTH_COOKIE_NAME)) {
+    return res.status(401).json({ error: "Invalid or duplicate authentication cookie." });
+  }
+  const authToken = cookies[AUTH_COOKIE_NAME];
+  if (!authToken) {
+    return res.status(401).json({ error: "Authentication cookie missing or invalid." });
+  }
+  const csrfToken = setCsrfCookie(res, authToken);
+  return res.json({ success: true, csrfToken });
 });
 
 // 3. GET /api/auth/me - Verify session token and retrieve user profile
