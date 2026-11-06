@@ -145,9 +145,16 @@ export async function fetchStorageUsage(force = false) {
         statusBadge.innerHTML = '<span style="width: 6px; height: 6px; border-radius: 50%; background: #10b981;"></span> Live Atlas Connection';
       }
 
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('qavora:db-status-change', { detail: { database: 'connected' } }));
+      }
+
       return data;
     } else {
       // API error or offline (HTTP 503 / 500) - Never display misleading zero usage
+      if (typeof window !== 'undefined' && res.status === 503) {
+        window.dispatchEvent(new CustomEvent('qavora:db-status-change', { detail: { database: 'disconnected' } }));
+      }
       const err = await res.json().catch(() => ({}));
       const errorMsg = err.error || (res.status === 503 ? 'Database is offline' : 'Storage service unavailable');
 
@@ -172,6 +179,9 @@ export async function fetchStorageUsage(force = false) {
       return null;
     }
   } catch (netErr) {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('qavora:db-status-change', { detail: { database: 'disconnected' } }));
+    }
     // Network failure
     setEl('data-stat-storage-used', 'Unavailable');
     setEl('data-stat-storage-size', 'Unavailable');

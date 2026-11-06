@@ -135,6 +135,10 @@ export async function computeStorageHealth() {
       if (availableEl) {
         availableEl.textContent = `${availableMb} MB available`;
       }
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('qavora:db-status-change', { detail: { database: 'connected' } }));
+      }
     } else {
       const errData = await res.json().catch(() => ({}));
       const isOffline = res.status === 503 || errData.status === 'offline';
@@ -145,6 +149,10 @@ export async function computeStorageHealth() {
           : (errData.error || 'Storage service unavailable');
       }
       if (availableEl) availableEl.textContent = 'Unavailable';
+
+      if (typeof window !== 'undefined' && isOffline) {
+        window.dispatchEvent(new CustomEvent('qavora:db-status-change', { detail: { database: 'disconnected' } }));
+      }
     }
   } catch (err) {
     if (usedEl) usedEl.textContent = 'Unavailable';
@@ -440,6 +448,9 @@ export function initSettingsEventListeners() {
         if (loadingBanner) loadingBanner.style.display = 'none';
 
         if (response.ok) {
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('qavora:db-status-change', { detail: { database: 'connected' } }));
+          }
           const items = await response.json();
           if (resultsContainer) resultsContainer.style.display = 'block';
           if (countLabel) {
@@ -462,6 +473,9 @@ export function initSettingsEventListeners() {
             }
           }
         } else {
+          if (typeof window !== 'undefined' && response.status === 503) {
+            window.dispatchEvent(new CustomEvent('qavora:db-status-change', { detail: { database: 'disconnected' } }));
+          }
           const errData = await response.json().catch(() => ({}));
           if (errorBanner) {
             errorBanner.style.display = 'flex';
@@ -469,6 +483,9 @@ export function initSettingsEventListeners() {
           }
         }
       } catch (err) {
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('qavora:db-status-change', { detail: { database: 'disconnected' } }));
+        }
         if (loadingBanner) loadingBanner.style.display = 'none';
         if (errorBanner) {
           errorBanner.style.display = 'flex';

@@ -347,14 +347,52 @@ textarea:focus-visible,
   gap: 7px;
   font-size: 0.75rem;
   color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s ease;
+}
+
+.storage-badge:hover {
+  color: var(--text-primary);
 }
 
 .storage-dot {
   width: 7px;
   height: 7px;
   border-radius: var(--radius-full);
+  background-color: var(--color-amber);
+  box-shadow: 0 0 6px var(--color-amber);
+  flex-shrink: 0;
+  transition: background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.storage-dot.connected {
   background-color: var(--color-green);
   box-shadow: 0 0 6px var(--color-green);
+  animation: none;
+}
+
+.storage-dot.disconnected {
+  background-color: var(--color-red);
+  box-shadow: 0 0 6px var(--color-red);
+  animation: none;
+}
+
+.storage-dot.connecting {
+  background-color: var(--color-amber);
+  box-shadow: 0 0 6px var(--color-amber);
+  animation: storage-dot-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes storage-dot-pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.85);
+  }
 }
 
 .version-label {

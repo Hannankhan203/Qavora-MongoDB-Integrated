@@ -81,7 +81,9 @@ import {
   showToast,
   navigateTo,
   resolveInitialRoute,
-  initUIEventListeners
+  initUIEventListeners,
+  updateSidebarDbStatus,
+  syncSidebarDbStatus
 } from './src/modules/uiRenderer.js';
 
 let _initialized = false;
@@ -93,7 +95,7 @@ async function init() {
   initUIEventListeners();
   const initialRoute = resolveInitialRoute();
 
-  await checkBackendHealth();
+  await syncSidebarDbStatus();
 
   await initAuthAndSession({
     onAuthenticated: async () => {
@@ -182,6 +184,8 @@ if (typeof window !== 'undefined') {
     apiFetch,
     apiJson,
     checkBackendHealth,
+    updateSidebarDbStatus,
+    syncSidebarDbStatus,
     utils,
     getAppState,
     getProjects,

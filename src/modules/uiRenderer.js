@@ -6,6 +6,7 @@
  */
 
 import authController from '../../authController.js';
+import { checkBackendHealth } from './apiClient.js';
 import {
   getAppState,
   getProjects,
@@ -269,6 +270,31 @@ export function initUIEventListeners() {
   });
   sidebarCloseBtn?.addEventListener('click', closeSidebar);
   sidebarOverlay?.addEventListener('click', closeSidebar);
+
+  // 2b. Sidebar MongoDB Connection Status Badge Click & Dynamic Event Listeners
+  const dbBadge = document.getElementById('sidebar-db-badge') || document.querySelector('.storage-badge');
+  if (dbBadge) {
+    dbBadge.addEventListener('click', () => {
+      syncSidebarDbStatus(true);
+    });
+  }
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('qavora:db-status-change', (e) => {
+      const status = e.detail?.database;
+      if (status === 'connected' || status === 'disconnected' || status === 'connecting') {
+        updateSidebarDbStatus(status);
+      }
+    });
+
+    window.addEventListener('online', () => {
+      syncSidebarDbStatus(true);
+    });
+
+    window.addEventListener('offline', () => {
+      updateSidebarDbStatus('disconnected');
+    });
+  }
 
   // 3. Sidebar navigation links (.nav-link[data-view]) & browser popstate
   document.querySelectorAll('.nav-link[data-view]').forEach((navEl) => {
@@ -1537,4 +1563,69 @@ export function initUIEventListeners() {
       openTestCaseModal(currentCase, currentSuite.id);
     }
   });
+}
+
+// ============================================================================
+// MongoDB Connection Status Badge Manager
+// ============================================================================
+let _dbStatusCheckInFlight = null;
+let _lastDbStatus = null;
+
+export function updateSidebarDbStatus(status) {
+  if (typeof document === 'undefined') return;
+  const badge = document.getElementById('sidebar-db-badge') || document.querySelector('.storage-badge');
+  const dot = document.getElementById('sidebar-db-dot') || document.querySelector('.storage-badge .storage-dot');
+  const text = document.getElementById('sidebar-db-text') || document.querySelector('.storage-badge .storage-text');
+
+  if (!dot || !text) return;
+
+  dot.classList.remove('connected');
+  dot.classList.remove('disconnected');
+  dot.classList.remove('connecting');
+
+  if (status === 'connected') {
+    _lastDbStatus = 'connected';
+    dot.classList.add('connected');
+    text.textContent = 'MongoDB Connected';
+    if (badge) badge.setAttribute('title', 'MongoDB database is connected and active. Click to refresh.');
+  } else if (status === 'connecting') {
+    _lastDbStatus = 'connecting';
+    dot.classList.add('connecting');
+    text.textContent = 'MongoDB Connecting...';
+    if (badge) badge.setAttribute('title', 'Connecting to MongoDB database...');
+  } else {
+    _lastDbStatus = 'disconnected';
+    dot.classList.add('disconnected');
+    text.textContent = 'MongoDB Disconnected';
+    if (badge) badge.setAttribute('title', 'MongoDB database is disconnected or offline. Click to retry.');
+  }
+}
+
+export async function syncSidebarDbStatus(force = false) {
+  if (typeof document === 'undefined') return _lastDbStatus;
+
+  // Deduplicate overlapping requests
+  if (_dbStatusCheckInFlight) {
+    return _dbStatusCheckInFlight;
+  }
+
+  if (!_lastDbStatus || _lastDbStatus === 'connecting' || force) {
+    updateSidebarDbStatus('connecting');
+  }
+
+  _dbStatusCheckInFlight = (async () => {
+    try {
+      const health = await checkBackendHealth();
+      const status = health && health.database === 'connected' ? 'connected' : 'disconnected';
+      updateSidebarDbStatus(status);
+      return status;
+    } catch {
+      updateSidebarDbStatus('disconnected');
+      return 'disconnected';
+    } finally {
+      _dbStatusCheckInFlight = null;
+    }
+  })();
+
+  return _dbStatusCheckInFlight;
 }

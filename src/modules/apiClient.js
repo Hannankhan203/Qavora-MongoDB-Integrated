@@ -43,6 +43,10 @@ export async function apiFetch(url, options = {}) {
     authController.handleUnauthorized();
   }
 
+  if (response.status === 503 && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('qavora:db-status-change', { detail: { database: 'disconnected' } }));
+  }
+
   return response;
 }
 
@@ -55,10 +59,22 @@ export async function apiJson(url, options = {}) {
 export async function checkBackendHealth() {
   try {
     const res = await fetch('/api/health', { cache: 'no-store', credentials: 'include' });
-    if (!res.ok) return { ok: false, database: 'disconnected' };
+    if (!res.ok) {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('qavora:db-status-change', { detail: { database: 'disconnected' } }));
+      }
+      return { ok: false, database: 'disconnected' };
+    }
     const data = await res.json().catch(() => ({}));
+    const dbStatus = data.database === 'connected' ? 'connected' : 'disconnected';
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('qavora:db-status-change', { detail: { database: dbStatus } }));
+    }
     return { ok: Boolean(data.success), database: data.database || 'unknown' };
   } catch {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('qavora:db-status-change', { detail: { database: 'disconnected' } }));
+    }
     return { ok: false, database: 'disconnected' };
   }
 }
