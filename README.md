@@ -367,7 +367,6 @@ node test-issue-delete-checklist.js
    - `SecurityError` handling and graceful degradation.
    - Corrupt JSON isolation without destructive auto-deletion.
    - Multi-operation rollback snapshots.
-   - Legacy key migration (`testpilot_*` → `qavora_*`).
    - Clean initial boot on uninitialized storage.
 3. **`test-issue-delete-checklist.js`** (5 tests): Checklist deletion modal lifecycle, backdrop independence, scrollbar lock/unlock events, and active runner synchronization.
 

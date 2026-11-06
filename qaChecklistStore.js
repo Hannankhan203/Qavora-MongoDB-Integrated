@@ -30,8 +30,6 @@ export {
 
 export const CHECKLISTS_STORAGE_KEY = 'qavora_qa_checklists_v1';
 export const ACTIVE_RUNNER_STORAGE_KEY = 'qavora_qa_active_runner_v1';
-export const LEGACY_CHECKLISTS_STORAGE_KEY = 'testpilot_qa_checklists_v1';
-export const LEGACY_ACTIVE_RUNNER_STORAGE_KEY = 'testpilot_qa_active_runner_v1';
 export const SCHEMA_VERSION = 1;
 
 export const TEST_STATUS = Object.freeze({
@@ -595,67 +593,12 @@ export function deriveDefaultChecklistTitle(parsedPlan) {
 }
 
 // ============================================================================
-// Storage Read / Write Operations & Safe Migration
+// Storage Read / Write Operations
 // ============================================================================
-
-/**
- * Performs a safe, one-time backward-compatible migration from legacy TestPilot
- * storage keys to Qavora storage keys. Existing Qavora data is never overwritten.
- * Old keys are removed only after verified successful write to the new key.
- */
-export function migrateLegacyChecklistStorage() {
-  const { backend } = getStorageBackend();
-  try {
-    // 1. Migrate Checklists Key
-    const currentQavoraData = backend.getItem(CHECKLISTS_STORAGE_KEY);
-    const legacyChecklistData = backend.getItem(LEGACY_CHECKLISTS_STORAGE_KEY);
-    if (!currentQavoraData && legacyChecklistData) {
-      try {
-        const parsed = JSON.parse(legacyChecklistData);
-        if (parsed) {
-          const writeRes = safeStorageWrite(CHECKLISTS_STORAGE_KEY, legacyChecklistData, 'migrating QA checklists from legacy storage');
-          if (writeRes && writeRes.ok) {
-            const verified = backend.getItem(CHECKLISTS_STORAGE_KEY);
-            if (verified === legacyChecklistData) {
-              try {
-                backend.removeItem(LEGACY_CHECKLISTS_STORAGE_KEY);
-              } catch (_) {}
-            }
-          }
-        }
-      } catch (_parseErr) {
-        // If malformed, let loadAllChecklists handle safe recovery
-      }
-    }
-
-    // 2. Migrate Active Runner State Key
-    const currentRunnerData = backend.getItem(ACTIVE_RUNNER_STORAGE_KEY);
-    const legacyRunnerData = backend.getItem(LEGACY_ACTIVE_RUNNER_STORAGE_KEY);
-    if (!currentRunnerData && legacyRunnerData) {
-      try {
-        const parsed = JSON.parse(legacyRunnerData);
-        if (parsed && typeof parsed === 'object') {
-          const writeRes = safeStorageWrite(ACTIVE_RUNNER_STORAGE_KEY, legacyRunnerData, 'migrating active runner state from legacy storage');
-          if (writeRes && writeRes.ok) {
-            const verified = backend.getItem(ACTIVE_RUNNER_STORAGE_KEY);
-            if (verified === legacyRunnerData) {
-              try {
-                backend.removeItem(LEGACY_ACTIVE_RUNNER_STORAGE_KEY);
-              } catch (_) {}
-            }
-          }
-        }
-      } catch (_) {}
-    }
-  } catch (err) {
-    console.warn('Qavora: Error during legacy checklist storage migration', err);
-  }
-}
 
 export function loadAllChecklists() {
   const { backend, isFallback } = getStorageBackend();
   try {
-    migrateLegacyChecklistStorage();
     const raw = backend.getItem(CHECKLISTS_STORAGE_KEY);
     if (!raw) {
       return { checklists: [], warning: null };
@@ -1152,7 +1095,6 @@ export function saveAllChecklists(checklistsArray, meta = {}) {
 export function getActiveRunnerState() {
   const { backend } = getStorageBackend();
   try {
-    migrateLegacyChecklistStorage();
     const raw = backend.getItem(ACTIVE_RUNNER_STORAGE_KEY);
     if (!raw) return { activeChecklistId: null, lastQaView: null };
     const parsed = JSON.parse(raw);
