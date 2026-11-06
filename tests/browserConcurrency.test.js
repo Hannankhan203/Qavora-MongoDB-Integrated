@@ -217,6 +217,114 @@ test('Browser Multi-Tab Concurrency: IndexedDB locks, renewal, expiration, atomi
     assert.equal(dupResult.ok, true);
     assert.equal(dupResult.syncedCount, 1);
     assert.equal(dupResult.putCalled, true);
+
+    // 8. In-flight UPDATE with stale expectedUpdatedAt returns 409, reconciles with server, and retries safely
+    const updateConflictResult = await page2.evaluate(async () => {
+      const { authController } = await import('/authController.js');
+      authController.getUser = () => ({ userId: 'update_conflict_user' });
+
+      let patchAttempts = 0;
+      let getAttempts = 0;
+      const serverDoc = {
+        id: 'chk_browser_update_1',
+        title: 'Newer Server Baseline',
+        updatedAt: '2026-11-06T18:00:00.000Z',
+        phases: [
+          {
+            id: 'p1',
+            name: 'Phase 1',
+            sections: [
+              {
+                id: 's1',
+                name: 'Sec 1',
+                tests: [
+                  { id: 't1', text: 'Test 1', status: 'Passed', completed: true },
+                  { id: 't2', text: 'Test 2', status: 'Not Started', completed: false }
+                ]
+              }
+            ]
+          }
+        ]
+      };
+
+      window.fetch = async (url, opts) => {
+        const method = opts?.method || 'GET';
+        if (method === 'PATCH') {
+          patchAttempts += 1;
+          const body = JSON.parse(opts.body);
+          if (patchAttempts === 1) {
+            // First patch attempt arrives with stale expectedUpdatedAt -> reject with 409
+            return new Response(JSON.stringify({
+              error: 'Conflict: The checklist has been modified by another operation.',
+              currentUpdatedAt: '2026-11-06T18:00:00.000Z',
+              expectedUpdatedAt: body.expectedUpdatedAt
+            }), {
+              status: 409,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+          // Reconciled second patch attempt arrives with updated expectedUpdatedAt
+          return new Response(JSON.stringify({
+            id: 'chk_browser_update_1',
+            ...body,
+            updatedAt: '2026-11-06T18:05:00.000Z'
+          }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        if (method === 'GET' && String(url).includes('/chk_browser_update_1')) {
+          getAttempts += 1;
+          return new Response(JSON.stringify(serverDoc), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        return new Response('{}', { status: 200 });
+      };
+
+      const mod = await import('/qaChecklistSyncQueue.js');
+      // Queue update with old expectedUpdatedAt and client marking t2 completed
+      await mod.queueChecklistUpdate({
+        id: 'chk_browser_update_1',
+        title: 'Old Client Title',
+        expectedUpdatedAt: '2026-11-06T12:00:00.000Z',
+        phases: [
+          {
+            id: 'p1',
+            name: 'Phase 1',
+            sections: [
+              {
+                id: 's1',
+                name: 'Sec 1',
+                tests: [
+                  { id: 't2', text: 'Test 2', status: 'Passed', completed: true, notes: 'Passed in browser' }
+                ]
+              }
+            ]
+          }
+        ]
+      }, 'update_conflict_user');
+
+      const res = await mod.processChecklistSyncQueue('update_conflict_user');
+      const pendingOps = await mod.getPendingOperations('update_conflict_user');
+      const cached = await mod.getCachedChecklistsForUser('update_conflict_user');
+
+      return {
+        res,
+        patchAttempts,
+        getAttempts,
+        remainingPending: pendingOps.length,
+        cachedChecklist: cached[0] || null
+      };
+    });
+
+    assert.equal(updateConflictResult.res.ok, true);
+    assert.equal(updateConflictResult.res.syncedCount, 1);
+    assert.equal(updateConflictResult.patchAttempts, 2, 'Should attempt first PATCH, receive 409, reconcile, and retry');
+    assert.equal(updateConflictResult.getAttempts, 1, 'Should fetch latest server doc for reconciliation');
+    assert.equal(updateConflictResult.remainingPending, 0, 'Operation successfully dequeued');
+    assert.equal(updateConflictResult.cachedChecklist.title, 'Newer Server Baseline', 'Preserves newer server baseline title');
   } finally {
     await browser.close();
     server.close();

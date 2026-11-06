@@ -3025,7 +3025,8 @@ const CHECKLIST_PATCH_ALLOWED_FIELDS = new Set([
   'promotedAt',
   'completedAt',
   'completedBy',
-  'originalPrompt'
+  'originalPrompt',
+  'expectedUpdatedAt'
 ]);
 
 // 3. POST /api/checklists - Create and persist a new checklist for the authenticated user
@@ -3171,6 +3172,14 @@ app.patch("/api/checklists/:id", requireAuth, async (req: Request, res: Response
       }
     }
 
+    let expectedUpdatedAt: string | null = null;
+    if (req.body.expectedUpdatedAt !== undefined) {
+      if (typeof req.body.expectedUpdatedAt !== 'string' || req.body.expectedUpdatedAt.trim() === '') {
+        return res.status(400).json({ error: "Field 'expectedUpdatedAt' must be a non-empty string when provided." });
+      }
+      expectedUpdatedAt = req.body.expectedUpdatedAt.trim();
+    }
+
     const updateDoc: Record<string, any> = {};
 
     if (req.body.title !== undefined) {
@@ -3237,9 +3246,31 @@ app.patch("/api/checklists/:id", requireAuth, async (req: Request, res: Response
       return res.status(400).json({ error: "No valid fields provided for update." });
     }
 
-    updateDoc.updatedAt = new Date().toISOString();
+    const nowIso = new Date().toISOString();
+    updateDoc.updatedAt = (nowIso === expectedUpdatedAt)
+      ? new Date(Date.now() + 1).toISOString()
+      : nowIso;
 
-    const query = buildUserChecklistQuery(idParam, userId);
+    const baseQuery = buildUserChecklistQuery(idParam, userId);
+    let query: any;
+    if (expectedUpdatedAt) {
+      if (baseQuery.$or) {
+        query = {
+          $and: [
+            baseQuery,
+            { updatedAt: expectedUpdatedAt }
+          ]
+        };
+      } else {
+        query = {
+          ...baseQuery,
+          updatedAt: expectedUpdatedAt
+        };
+      }
+    } else {
+      query = baseQuery;
+    }
+
     const result = await db.collection("checklists").findOneAndUpdate(
       query,
       { $set: updateDoc },
@@ -3247,6 +3278,17 @@ app.patch("/api/checklists/:id", requireAuth, async (req: Request, res: Response
     );
 
     if (!result) {
+      if (expectedUpdatedAt) {
+        // Document may exist for this user but its updatedAt did not match expectedUpdatedAt (concurrent modification)
+        const existingDoc = await db.collection("checklists").findOne(baseQuery);
+        if (existingDoc) {
+          return res.status(409).json({
+            error: "Conflict: The checklist has been modified by another operation.",
+            currentUpdatedAt: existingDoc.updatedAt || null,
+            expectedUpdatedAt
+          });
+        }
+      }
       return res.status(404).json({ error: "Checklist not found." });
     }
 

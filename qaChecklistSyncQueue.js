@@ -321,11 +321,17 @@ export async function queueChecklistUpdate(checklist, userId) {
   const allOps = await idbGetAll(STORE_OPERATIONS);
   const existingOp = allOps.find(op => op.userId === normalizedUserId && op.checklistId === checklistId);
 
+  const expectedUpdatedAt = checklist.expectedUpdatedAt || checklist.updatedAt || null;
+
   if (existingOp) {
     // If pending CREATE or UPDATE exists, coalesce the newest state in-place
     existingOp.payload = JSON.parse(JSON.stringify(checklist));
     existingOp.updatedAt = nowIso;
     existingOp.status = 'pending';
+    // Preserve original expectedUpdatedAt across retries if already present, or initialize if missing
+    if (!existingOp.expectedUpdatedAt && expectedUpdatedAt) {
+      existingOp.expectedUpdatedAt = expectedUpdatedAt;
+    }
     await idbPut(STORE_OPERATIONS, existingOp);
     return existingOp;
   }
@@ -337,6 +343,7 @@ export async function queueChecklistUpdate(checklist, userId) {
     checklistId,
     type: 'UPDATE',
     payload: JSON.parse(JSON.stringify(checklist)),
+    expectedUpdatedAt,
     status: 'pending',
     retryCount: 0,
     lastError: null,
@@ -739,6 +746,133 @@ export async function dequeueOperationIfLockValid(
   });
 }
 
+/**
+ * Safely reconciles a conflicting client update payload with the latest server state (409 Conflict).
+ * Ensures newer server data is preserved while client changes (e.g. test results, new sections, updated fields)
+ * are not silently discarded.
+ */
+export function reconcileChecklistUpdate(clientPayload, serverChecklist) {
+  if (!serverChecklist || typeof serverChecklist !== 'object') {
+    return null;
+  }
+  if (!clientPayload || typeof clientPayload !== 'object') {
+    return null;
+  }
+
+  // Clone server state as base to preserve newer server data
+  const reconciled = JSON.parse(JSON.stringify(serverChecklist));
+  delete reconciled._id;
+  delete reconciled.userId;
+  delete reconciled.id;
+
+  // 1. Title reconciliation:
+  // If server title is empty or default, adopt client's title; otherwise preserve newer server title
+  if (clientPayload.title && (!reconciled.title || reconciled.title === 'Untitled QA Checklist')) {
+    reconciled.title = clientPayload.title;
+  }
+
+  // 2. Document notes reconciliation:
+  if (Array.isArray(clientPayload.documentNotes)) {
+    const existingTexts = new Set(
+      (reconciled.documentNotes || []).map(n => (typeof n === 'string' ? n : n?.text || ''))
+    );
+    const mergedNotes = [...(reconciled.documentNotes || [])];
+    for (const note of clientPayload.documentNotes) {
+      const txt = typeof note === 'string' ? note : note?.text || '';
+      if (txt && !existingTexts.has(txt)) {
+        mergedNotes.push(note);
+        existingTexts.add(txt);
+      }
+    }
+    reconciled.documentNotes = mergedNotes;
+  }
+
+  // 3. Phases, sections, and test case execution results:
+  if (Array.isArray(clientPayload.phases) && clientPayload.phases.length > 0) {
+    if (!Array.isArray(reconciled.phases) || reconciled.phases.length === 0) {
+      reconciled.phases = JSON.parse(JSON.stringify(clientPayload.phases));
+    } else {
+      const serverPhaseMap = new Map();
+      reconciled.phases.forEach((ph, idx) => {
+        const key = ph.id || ph.name || `ph_${idx}`;
+        serverPhaseMap.set(key, ph);
+      });
+
+      for (const clientPhase of clientPayload.phases) {
+        const pKey = clientPhase.id || clientPhase.name;
+        const matchingServerPhase = pKey ? serverPhaseMap.get(pKey) : null;
+
+        if (!matchingServerPhase) {
+          // Client created a new phase: preserve it
+          reconciled.phases.push(JSON.parse(JSON.stringify(clientPhase)));
+        } else {
+          // Merge sections within matching phase
+          const serverSecMap = new Map();
+          (matchingServerPhase.sections || []).forEach((sec, idx) => {
+            const sKey = sec.id || sec.name || `sec_${idx}`;
+            serverSecMap.set(sKey, sec);
+          });
+
+          for (const clientSec of (clientPhase.sections || [])) {
+            const sKey = clientSec.id || clientSec.name;
+            const matchingServerSec = sKey ? serverSecMap.get(sKey) : null;
+
+            if (!matchingServerSec) {
+              if (!matchingServerPhase.sections) matchingServerPhase.sections = [];
+              matchingServerPhase.sections.push(JSON.parse(JSON.stringify(clientSec)));
+            } else {
+              // Merge tests within matching section
+              const serverTestMap = new Map();
+              (matchingServerSec.tests || []).forEach((t, idx) => {
+                const tKey = t.id || t.testId || t.text || `test_${idx}`;
+                serverTestMap.set(tKey, t);
+              });
+
+              for (const clientTest of (clientSec.tests || [])) {
+                const tKey = clientTest.id || clientTest.testId || clientTest.text;
+                const matchingServerTest = tKey ? serverTestMap.get(tKey) : null;
+
+                if (!matchingServerTest) {
+                  if (!matchingServerSec.tests) matchingServerSec.tests = [];
+                  matchingServerSec.tests.push(JSON.parse(JSON.stringify(clientTest)));
+                } else {
+                  // Both have the test:
+                  // If client marked test completed or changed status and server test is not completed, keep client result
+                  const serverNotCompleted = !matchingServerTest.completed || matchingServerTest.status === 'Not Started';
+                  if (clientTest.completed || (clientTest.status && clientTest.status !== 'Not Started')) {
+                    if (serverNotCompleted) {
+                      matchingServerTest.status = clientTest.status;
+                      matchingServerTest.completed = Boolean(clientTest.completed);
+                      if (clientTest.notes) matchingServerTest.notes = clientTest.notes;
+                      if (clientTest.executedAt) matchingServerTest.executedAt = clientTest.executedAt;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 4. Metadata fields
+  if (clientPayload.promotedProjectId && !reconciled.promotedProjectId) {
+    reconciled.promotedProjectId = clientPayload.promotedProjectId;
+  }
+  if (clientPayload.promotedAt && !reconciled.promotedAt) {
+    reconciled.promotedAt = clientPayload.promotedAt;
+  }
+  if (clientPayload.completedAt && !reconciled.completedAt) {
+    reconciled.completedAt = clientPayload.completedAt;
+  }
+  if (clientPayload.completedBy && !reconciled.completedBy) {
+    reconciled.completedBy = clientPayload.completedBy;
+  }
+
+  return reconciled;
+}
+
 async function runSyncPass(activeUserId, verifyLock = null, lockContext = null) {
   let syncedCount = 0;
 
@@ -772,7 +906,15 @@ async function runSyncPass(activeUserId, verifyLock = null, lockContext = null) 
           let res = await ChecklistAPI.create(op.payload);
           // Idempotent retry: if 409 Conflict (already exists on server), gracefully update
           if (!res.ok && (res.status === 409 || (res.error && res.error.includes('already exists')))) {
-            res = await ChecklistAPI.update(op.checklistId, op.payload);
+            const createPatch = { ...op.payload };
+            delete createPatch._id;
+            delete createPatch.userId;
+            delete createPatch.id;
+            delete createPatch.updatedAt;
+            if (op.expectedUpdatedAt) {
+              createPatch.expectedUpdatedAt = op.expectedUpdatedAt;
+            }
+            res = await ChecklistAPI.update(op.checklistId, createPatch);
           }
 
           if (res.ok) {
@@ -785,10 +927,75 @@ async function runSyncPass(activeUserId, verifyLock = null, lockContext = null) 
             shouldHaltQueue = true;
           }
         } else if (op.type === 'UPDATE') {
-          let res = await ChecklistAPI.update(op.checklistId, op.payload);
+          // Prepare PATCH payload without server-controlled/immutable fields
+          const patchPayload = { ...op.payload };
+          delete patchPayload._id;
+          delete patchPayload.userId;
+          delete patchPayload.id;
+
+          // Include expected server version if available
+          const versionToSend = op.expectedUpdatedAt || patchPayload.expectedUpdatedAt || patchPayload.updatedAt || null;
+          if (versionToSend) {
+            if (!op.expectedUpdatedAt) {
+              op.expectedUpdatedAt = versionToSend;
+            }
+            patchPayload.expectedUpdatedAt = versionToSend;
+          }
+          delete patchPayload.updatedAt;
+
+          let res = await ChecklistAPI.update(op.checklistId, patchPayload);
+
+          // Handle HTTP 409 Conflict: in-flight concurrent update race condition
+          if (!res.ok && res.status === 409) {
+            console.warn(`Qavora SyncQueue: 409 Conflict detected for checklist ${op.checklistId}. Fetching latest server state for reconciliation.`);
+            const serverRes = await ChecklistAPI.get(op.checklistId);
+
+            if (serverRes.ok && serverRes.data) {
+              const serverChecklist = serverRes.data;
+              const reconciled = reconcileChecklistUpdate(op.payload, serverChecklist);
+
+              if (reconciled) {
+                // Update queue operation with reconciled payload and update expectedUpdatedAt to latest server version
+                op.payload = reconciled;
+                op.expectedUpdatedAt = serverChecklist.updatedAt || null;
+                op.updatedAt = new Date().toISOString();
+                await idbPut(STORE_OPERATIONS, op);
+
+                // Update durable offline cache with reconciled data
+                await idbPut(STORE_CACHE, {
+                  ...reconciled,
+                  id: op.checklistId,
+                  userId: activeUserId,
+                  _offlineCachedAt: new Date().toISOString()
+                });
+
+                // Retry update request with reconciled payload and latest server expectedUpdatedAt
+                const retryPayload = { ...reconciled };
+                delete retryPayload._id;
+                delete retryPayload.userId;
+                delete retryPayload.id;
+                delete retryPayload.updatedAt;
+                if (op.expectedUpdatedAt) {
+                  retryPayload.expectedUpdatedAt = op.expectedUpdatedAt;
+                }
+
+                res = await ChecklistAPI.update(op.checklistId, retryPayload);
+              } else {
+                op.lastError = 'Conflict reconciliation failed: invalid data structure';
+                shouldHaltQueue = true;
+              }
+            } else {
+              // Failed to fetch latest server state -> retain operation in queue for next sync
+              op.lastError = serverRes?.error || 'Conflict (409): unable to retrieve latest server state';
+              shouldHaltQueue = true;
+            }
+          }
+
           // Idempotent fallback: if 404 (not found on server), create it
           if (!res.ok && res.status === 404) {
-            res = await ChecklistAPI.create(op.payload);
+            const createPayload = { ...op.payload, id: op.checklistId };
+            delete createPayload.expectedUpdatedAt;
+            res = await ChecklistAPI.create(createPayload);
           }
 
           if (res.ok) {

@@ -538,3 +538,173 @@ test('QAV-AUDIT-001: NoSQL operator injection and prototype pollution protection
   assert.equal(legitUpdated.title, 'Updated Title: Price is now $150.00 (v2.0 constructor text).');
   assert.equal(legitUpdated.phases.length, 1);
 });
+
+test('QAV-AUDIT-002: Optimistic concurrency control on PATCH /api/checklists/:id with expectedUpdatedAt', async () => {
+  const { cookieHeader: cookie1, csrfToken: csrf1 } = await registerAndLogin(
+    'OCC User 1',
+    'occ1@example.com',
+    'Password123!',
+    '10.0.7.1'
+  );
+  const headers1 = {
+    'Cookie': cookie1,
+    'x-csrf-token': csrf1,
+    'Content-Type': 'application/json'
+  };
+
+  const { cookieHeader: cookie2, csrfToken: csrf2 } = await registerAndLogin(
+    'OCC User 2',
+    'occ2@example.com',
+    'Password123!',
+    '10.0.7.2'
+  );
+  const headers2 = {
+    'Cookie': cookie2,
+    'x-csrf-token': csrf2,
+    'Content-Type': 'application/json'
+  };
+
+  // 1. Create initial checklist
+  const createRes = await fetch(`${baseUrl}/api/checklists`, {
+    method: 'POST',
+    headers: headers1,
+    body: JSON.stringify({
+      title: 'Initial Concurrent Checklist',
+      phases: [
+        {
+          name: 'Phase 1',
+          sections: [
+            {
+              name: 'Section 1',
+              tests: [{ text: 'Test 1', status: 'Not Started', completed: false }]
+            }
+          ]
+        }
+      ]
+    })
+  });
+  assert.equal(createRes.status, 201);
+  const created = await createRes.json();
+  const v1UpdatedAt = created.updatedAt;
+  assert.ok(v1UpdatedAt, 'Created checklist must have updatedAt');
+
+  // 2. Successful UPDATE with matching expectedUpdatedAt
+  const update1Res = await fetch(`${baseUrl}/api/checklists/${created.id}`, {
+    method: 'PATCH',
+    headers: headers1,
+    body: JSON.stringify({
+      title: 'Checklist Version 2',
+      expectedUpdatedAt: v1UpdatedAt
+    })
+  });
+  assert.equal(update1Res.status, 200, 'Valid expectedUpdatedAt must succeed');
+  const v2 = await update1Res.json();
+  const v2UpdatedAt = v2.updatedAt;
+  assert.equal(v2.title, 'Checklist Version 2');
+  assert.notEqual(v2UpdatedAt, v1UpdatedAt, 'updatedAt must advance after successful update');
+
+  // 3. Stale UPDATE returning HTTP 409 Conflict
+  const staleRes = await fetch(`${baseUrl}/api/checklists/${created.id}`, {
+    method: 'PATCH',
+    headers: headers1,
+    body: JSON.stringify({
+      title: 'Stale Attempt with V1',
+      expectedUpdatedAt: v1UpdatedAt
+    })
+  });
+  assert.equal(staleRes.status, 409, 'Stale expectedUpdatedAt must return HTTP 409 Conflict');
+  const staleJson = await staleRes.json();
+  assert.ok(staleJson.error.includes('Conflict'));
+  assert.equal(staleJson.currentUpdatedAt, v2UpdatedAt);
+  assert.equal(staleJson.expectedUpdatedAt, v1UpdatedAt);
+
+  // Verify database was NOT mutated by stale update
+  const getAfterStale = await fetch(`${baseUrl}/api/checklists/${created.id}`, {
+    method: 'GET',
+    headers: headers1
+  });
+  const currentChecklist = await getAfterStale.json();
+  assert.equal(currentChecklist.title, 'Checklist Version 2', 'Newer server data must be preserved');
+  assert.equal(currentChecklist.updatedAt, v2UpdatedAt);
+
+  // 4. Two concurrent UPDATE requests with same expectedUpdatedAt — exactly one succeeds
+  const [resA, resB] = await Promise.all([
+    fetch(`${baseUrl}/api/checklists/${created.id}`, {
+      method: 'PATCH',
+      headers: headers1,
+      body: JSON.stringify({
+        title: 'Concurrent Winner A',
+        expectedUpdatedAt: v2UpdatedAt
+      })
+    }),
+    fetch(`${baseUrl}/api/checklists/${created.id}`, {
+      method: 'PATCH',
+      headers: headers1,
+      body: JSON.stringify({
+        title: 'Concurrent Winner B',
+        expectedUpdatedAt: v2UpdatedAt
+      })
+    })
+  ]);
+
+  const statuses = [resA.status, resB.status].sort();
+  assert.deepEqual(statuses, [200, 409], 'Exactly one concurrent request must succeed (200) and one must conflict (409)');
+
+  const winnerRes = resA.status === 200 ? resA : resB;
+  const loserRes = resA.status === 409 ? resA : resB;
+  const winnerData = await winnerRes.json();
+  const loserData = await loserRes.json();
+
+  assert.ok(loserData.error.includes('Conflict'));
+  const v3UpdatedAt = winnerData.updatedAt;
+
+  // 5. Delayed in-flight UPDATE arriving after newer updates cannot overwrite data
+  const delayedRes = await fetch(`${baseUrl}/api/checklists/${created.id}`, {
+    method: 'PATCH',
+    headers: headers1,
+    body: JSON.stringify({
+      title: 'Delayed In-Flight Old Update',
+      expectedUpdatedAt: v1UpdatedAt
+    })
+  });
+  assert.equal(delayedRes.status, 409);
+  const verifyUnchanged = await fetch(`${baseUrl}/api/checklists/${created.id}`, {
+    headers: headers1
+  });
+  const currentDoc = await verifyUnchanged.json();
+  assert.equal(currentDoc.title, winnerData.title, 'Delayed update must not overwrite newer server data');
+
+  // 6. Tenant isolation: Other user cannot modify or probe version via 409
+  const crossUserRes = await fetch(`${baseUrl}/api/checklists/${created.id}`, {
+    method: 'PATCH',
+    headers: headers2,
+    body: JSON.stringify({
+      title: 'Attacker update',
+      expectedUpdatedAt: v3UpdatedAt
+    })
+  });
+  assert.equal(crossUserRes.status, 404, 'Cross-user update must return 404 without leaking existence or concurrency');
+
+  // 7. Validation: Empty or non-string expectedUpdatedAt is rejected safely with 400
+  const emptyVersionRes = await fetch(`${baseUrl}/api/checklists/${created.id}`, {
+    method: 'PATCH',
+    headers: headers1,
+    body: JSON.stringify({
+      title: 'Bad version',
+      expectedUpdatedAt: '   '
+    })
+  });
+  assert.equal(emptyVersionRes.status, 400);
+
+  // 8. Backward compatibility: updates without expectedUpdatedAt continue working
+  const backwardCompatRes = await fetch(`${baseUrl}/api/checklists/${created.id}`, {
+    method: 'PATCH',
+    headers: headers1,
+    body: JSON.stringify({
+      title: 'Backward Compatible Update'
+    })
+  });
+  assert.equal(backwardCompatRes.status, 200);
+  const finalChecklist = await backwardCompatRes.json();
+  assert.equal(finalChecklist.title, 'Backward Compatible Update');
+});

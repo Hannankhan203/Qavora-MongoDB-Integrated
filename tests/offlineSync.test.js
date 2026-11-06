@@ -177,3 +177,217 @@ test('dequeueOperationIfLockValid atomically rejects stale/wrong owners and dele
   await releaseIndexedDbSyncLock(lockKey, 'tab_1', lock1.generation);
 });
 
+test('QAV-AUDIT-002: reconcileChecklistUpdate preserves newer server data while merging client changes', async () => {
+  const { reconcileChecklistUpdate } = await import('../qaChecklistSyncQueue.js');
+
+  const serverDoc = {
+    id: 'chk_rec_1',
+    title: 'Newer Server Title',
+    updatedAt: '2026-11-06T12:00:00.000Z',
+    documentNotes: [{ text: 'Server note 1' }],
+    phases: [
+      {
+        id: 'phase_1',
+        name: 'Smoke',
+        sections: [
+          {
+            id: 'sec_1',
+            name: 'Login',
+            tests: [
+              { id: 't1', text: 'Login with email', status: 'Passed', completed: true },
+              { id: 't2', text: 'Login with SSO', status: 'Not Started', completed: false }
+            ]
+          }
+        ]
+      }
+    ]
+  };
+
+  const clientPayload = {
+    title: 'Client Changed Title',
+    documentNotes: [{ text: 'Client note 2' }],
+    phases: [
+      {
+        id: 'phase_1',
+        name: 'Smoke',
+        sections: [
+          {
+            id: 'sec_1',
+            name: 'Login',
+            tests: [
+              // Client marked t2 as passed while t1 was passed on server
+              { id: 't2', text: 'Login with SSO', status: 'Passed', completed: true, notes: 'Passed in 12ms' }
+            ]
+          },
+          {
+            id: 'sec_2',
+            name: 'New Client Section',
+            tests: [{ id: 't3', text: 'Forgot password', status: 'Passed', completed: true }]
+          }
+        ]
+      }
+    ]
+  };
+
+  const reconciled = reconcileChecklistUpdate(clientPayload, serverDoc);
+  assert.ok(reconciled);
+
+  // 1. Preserves newer server title
+  assert.equal(reconciled.title, 'Newer Server Title');
+
+  // 2. Merges document notes
+  assert.equal(reconciled.documentNotes.length, 2);
+
+  // 3. Merges test cases without losing server test t1 or client test t2
+  const smokePhase = reconciled.phases.find(p => p.id === 'phase_1');
+  assert.ok(smokePhase);
+  const sec1 = smokePhase.sections.find(s => s.id === 'sec_1');
+  const t1 = sec1.tests.find(t => t.id === 't1');
+  const t2 = sec1.tests.find(t => t.id === 't2');
+  assert.equal(t1.status, 'Passed', 'Server test t1 is preserved');
+  assert.equal(t2.status, 'Passed', 'Client test t2 is merged');
+  assert.equal(t2.notes, 'Passed in 12ms');
+
+  // 4. Preserves client newly added section sec_2
+  const sec2 = smokePhase.sections.find(s => s.id === 'sec_2');
+  assert.ok(sec2, 'Client added section sec_2 must be preserved');
+
+  // 5. Invalid inputs return null safely
+  assert.equal(reconcileChecklistUpdate(null, serverDoc), null);
+  assert.equal(reconcileChecklistUpdate(clientPayload, null), null);
+});
+
+test('QAV-AUDIT-002: processChecklistSyncQueue handles HTTP 409 conflict, reconciles, and retries with updated expectedUpdatedAt', async () => {
+  const {
+    clearAllOfflineData,
+    queueChecklistUpdate,
+    getPendingOperations,
+    processChecklistSyncQueue
+  } = await import('../qaChecklistSyncQueue.js');
+  const { ChecklistAPI } = await import('../qaChecklistStore.js');
+  const { authController } = await import('../authController.js');
+
+  await clearAllOfflineData();
+
+  const userId = 'sync_occ_user';
+  const origGetUser = authController.getUser;
+  authController.getUser = () => ({ userId });
+
+  const origUpdate = ChecklistAPI.update;
+  const origGet = ChecklistAPI.get;
+
+  let updateCalls = [];
+  let getCalls = [];
+
+  const serverState = {
+    id: 'chk_occ_sync_1',
+    title: 'Server Authoritative Title',
+    updatedAt: '2026-11-06T15:00:00.000Z',
+    phases: []
+  };
+
+  ChecklistAPI.update = async (id, payload) => {
+    updateCalls.push({ id, payload: JSON.parse(JSON.stringify(payload)) });
+    if (updateCalls.length === 1) {
+      // First attempt fails with 409 Conflict due to stale expectedUpdatedAt
+      return { ok: false, status: 409, error: 'Conflict: Stale version' };
+    }
+    // Second attempt (after reconciliation) succeeds
+    return { ok: true, status: 200, data: { ...payload, id, updatedAt: '2026-11-06T15:05:00.000Z' } };
+  };
+
+  ChecklistAPI.get = async (id) => {
+    getCalls.push(id);
+    return { ok: true, status: 200, data: serverState };
+  };
+
+  try {
+    // Queue update with old expectedUpdatedAt
+    await queueChecklistUpdate({
+      id: 'chk_occ_sync_1',
+      title: 'Client Title',
+      phases: [],
+      expectedUpdatedAt: '2026-11-06T10:00:00.000Z'
+    }, userId);
+
+    const pendingBefore = await getPendingOperations(userId);
+    assert.equal(pendingBefore.length, 1);
+    assert.equal(pendingBefore[0].expectedUpdatedAt, '2026-11-06T10:00:00.000Z');
+
+    // Process sync queue
+    const syncRes = await processChecklistSyncQueue(userId);
+    assert.equal(syncRes.ok, true);
+    assert.equal(syncRes.syncedCount, 1);
+
+    // Verify 2 update calls occurred: first with stale version, second with reconciled version
+    assert.equal(updateCalls.length, 2);
+    assert.equal(updateCalls[0].payload.expectedUpdatedAt, '2026-11-06T10:00:00.000Z');
+    assert.equal(getCalls.length, 1);
+    assert.equal(updateCalls[1].payload.expectedUpdatedAt, '2026-11-06T15:00:00.000Z');
+
+    // Operation was successfully dequeued after reconciliation and retry
+    const pendingAfter = await getPendingOperations(userId);
+    assert.equal(pendingAfter.length, 0);
+  } finally {
+    ChecklistAPI.update = origUpdate;
+    ChecklistAPI.get = origGet;
+    authController.getUser = origGetUser;
+    await clearAllOfflineData();
+  }
+});
+
+test('QAV-AUDIT-002: processChecklistSyncQueue preserves operation in queue when 409 reconciliation fails', async () => {
+  const {
+    clearAllOfflineData,
+    queueChecklistUpdate,
+    getPendingOperations,
+    processChecklistSyncQueue
+  } = await import('../qaChecklistSyncQueue.js');
+  const { ChecklistAPI } = await import('../qaChecklistStore.js');
+  const { authController } = await import('../authController.js');
+
+  await clearAllOfflineData();
+
+  const userId = 'sync_occ_fail_user';
+  const origGetUser = authController.getUser;
+  authController.getUser = () => ({ userId });
+
+  const origUpdate = ChecklistAPI.update;
+  const origGet = ChecklistAPI.get;
+
+  ChecklistAPI.update = async () => {
+    return { ok: false, status: 409, error: 'Conflict: Stale version' };
+  };
+
+  // Simulate network failure when trying to fetch server state for reconciliation
+  ChecklistAPI.get = async () => {
+    return { ok: false, status: 503, error: 'Failed to contact server' };
+  };
+
+  try {
+    await queueChecklistUpdate({
+      id: 'chk_occ_fail_1',
+      title: 'Client Pending Title',
+      phases: [],
+      expectedUpdatedAt: '2026-11-06T08:00:00.000Z'
+    }, userId);
+
+    const syncRes = await processChecklistSyncQueue(userId);
+    // Queue processor stops gracefully and reports syncedCount 0
+    assert.equal(syncRes.syncedCount, 0);
+
+    // Queue operation MUST be retained with status 'pending' and original expectedUpdatedAt preserved across retries
+    const pendingAfter = await getPendingOperations(userId);
+    assert.equal(pendingAfter.length, 1);
+    assert.equal(pendingAfter[0].status, 'pending');
+    assert.equal(pendingAfter[0].expectedUpdatedAt, '2026-11-06T08:00:00.000Z');
+    assert.ok(pendingAfter[0].lastError.includes('Conflict'));
+    assert.equal(pendingAfter[0].retryCount, 1);
+  } finally {
+    ChecklistAPI.update = origUpdate;
+    ChecklistAPI.get = origGet;
+    authController.getUser = origGetUser;
+    await clearAllOfflineData();
+  }
+});
+
