@@ -83,43 +83,11 @@ export function clearMemoryDataStore() {
   inMemoryDataStore.clear();
 }
 
-export function isQuotaExceededError(err) {
-  if (!err) return false;
-  return Boolean(
-    err.name === 'QuotaExceededError' ||
-    err.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
-    err.name === 'QUOTA_EXCEEDED_ERR' ||
-    err.name === 'W3CException_DOM_QUOTA_EXCEEDED_ERR' ||
-    err.code === 22 ||
-    err.code === 1014 ||
-    err.number === -2147024882 ||
-    (typeof err.message === 'string' &&
-      /quota.*(?:exceeded|reached)|(?:exceeded|reached).*quota|storage.*full|insufficient.*(?:storage|space|quota)/i.test(err.message))
-  );
-}
-
-export function isSecurityError(err) {
-  if (!err) return false;
-  return Boolean(
-    err.name === 'SecurityError' ||
-    err.name === 'SECURITY_ERR' ||
-    err.code === 18 ||
-    (typeof err.message === 'string' &&
-      /security|denied|insecure|permission|access.*denied|operation.*insecure/i.test(err.message))
-  );
-}
-
 export function getStorageErrorMessage(err, context = 'saving data') {
-  if (isQuotaExceededError(err)) {
-    return 'Browser storage is full or has insufficient available space. The latest changes could not be saved. Previously saved data remains available. Please export a backup and free storage space before retrying.';
-  }
-  if (isSecurityError(err)) {
-    return 'Storage access is restricted or denied by your browser security settings (e.g. strict private browsing mode). Changes cannot be saved to browser storage.';
-  }
   if (err && typeof err.message === 'string' && err.message.trim()) {
     return `Storage write failed during ${context}: ${err.message}`;
   }
-  return `Storage write failed during ${context}: Unable to save changes to browser storage.`;
+  return `Storage write failed during ${context}: Unable to save changes.`;
 }
 
 export function getStorageBackend() {
@@ -136,21 +104,15 @@ export function safeStorageWrite(key, serializedValue, context = 'saving data') 
     return {
       ok: true,
       isFallback,
-      isQuota: false,
-      isSecurity: false,
       error: null,
       valueOf() { return true; }
     };
   } catch (err) {
-    const isQuota = isQuotaExceededError(err);
-    const isSecurity = isSecurityError(err);
     const errorMsg = getStorageErrorMessage(err, context);
     console.error(`Qavora: Storage write failed during ${context}`, err);
     return {
       ok: false,
       isFallback,
-      isQuota,
-      isSecurity,
       error: errorMsg,
       valueOf() { return false; }
     };
@@ -1077,15 +1039,11 @@ export function saveAllChecklists(checklistsArray, meta = {}) {
 
     return writeRes;
   } catch (err) {
-    const isQuota = isQuotaExceededError(err);
-    const isSecurity = isSecurityError(err);
     const errorMsg = getStorageErrorMessage(err, 'saving QA checklists');
     console.error('Qavora: Failed saving QA checklists', err);
     return {
       ok: false,
       isFallback: false,
-      isQuota,
-      isSecurity,
       error: errorMsg,
       valueOf() { return false; }
     };
@@ -1127,17 +1085,13 @@ export function saveActiveRunnerState(partialState) {
       next.activeChecklistId === current.activeChecklistId &&
       next.lastQaView === current.lastQaView
     ) {
-      return { ok: true, isFallback: false, isQuota: false, isSecurity: false, error: null, valueOf() { return true; } };
+      return { ok: true, isFallback: false, error: null, valueOf() { return true; } };
     }
     return safeStorageWrite(ACTIVE_RUNNER_STORAGE_KEY, JSON.stringify(next), 'saving active runner state');
   } catch (err) {
-    const isQuota = isQuotaExceededError(err);
-    const isSecurity = isSecurityError(err);
     return {
       ok: false,
       isFallback: false,
-      isQuota,
-      isSecurity,
       error: getStorageErrorMessage(err, 'saving active runner state'),
       valueOf() { return false; }
     };
@@ -1266,8 +1220,6 @@ export function createChecklistFromParsedPlan(parsedPlan, customTitle = '') {
     return {
       ok: false,
       checklist: null,
-      isQuota: saveRes.isQuota,
-      isSecurity: saveRes.isSecurity,
       error: saveRes.error
     };
   }
@@ -1311,8 +1263,6 @@ function mutateChecklistById(checklistId, mutatorFn, touchUpdatedAt = true) {
     return {
       ok: false,
       checklist: targetOriginal,
-      isQuota: saveRes.isQuota,
-      isSecurity: saveRes.isSecurity,
       error: saveRes.error
     };
   }
@@ -1397,8 +1347,6 @@ export function deleteChecklistById(checklistId) {
     return {
       ok: false,
       remaining: checklists,
-      isQuota: saveRes.isQuota,
-      isSecurity: saveRes.isSecurity,
       error: saveRes.error
     };
   }
@@ -1685,13 +1633,9 @@ export function replaceActiveRunnerState(rawRunnerState, checklists = null) {
       state: normalized
     };
   } catch (err) {
-    const isQuota = isQuotaExceededError(err);
-    const isSecurity = isSecurityError(err);
     return {
       ok: false,
       isFallback: false,
-      isQuota,
-      isSecurity,
       state: { activeChecklistId: null, lastQaView: null },
       error: getStorageErrorMessage(err, 'restoring active runner state'),
       valueOf() { return false; }
@@ -2199,8 +2143,6 @@ export function promoteChecklistToProject(checklistId, options = {}) {
       return {
         ok: false,
         rolledBack: true,
-        isQuota: writeProjRes.isQuota,
-        isSecurity: writeProjRes.isSecurity,
         error: writeProjRes.error || 'Failed to save promoted project to storage.'
       };
     }
@@ -2224,8 +2166,6 @@ export function promoteChecklistToProject(checklistId, options = {}) {
       return {
         ok: false,
         rolledBack: true,
-        isQuota: writeChkRes.isQuota,
-        isSecurity: writeChkRes.isSecurity,
         error: writeChkRes.error || 'Failed to link promoted project to checklist; changes were rolled back.'
       };
     }
@@ -2255,13 +2195,9 @@ export function promoteChecklistToProject(checklistId, options = {}) {
     };
   } catch (err) {
     restorePrePromotionStorage();
-    const isQuota = isQuotaExceededError(err);
-    const isSecurity = isSecurityError(err);
     return {
       ok: false,
       rolledBack: true,
-      isQuota,
-      isSecurity,
       error: getStorageErrorMessage(err, 'promoting checklist to formal project')
     };
   }

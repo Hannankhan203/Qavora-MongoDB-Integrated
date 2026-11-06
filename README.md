@@ -129,8 +129,7 @@ Qavora uses **MongoDB exclusively for persistent data storage**. All user accoun
 
 ### Persistence Features
 - **Deterministic Storage Keys**: Checklists and projects are stored under isolated, versioned keys.
-- **Quota Error Handling**: Automatically detects `QuotaExceededError` and Firefox `NS_ERROR_DOM_QUOTA_REACHED` during persistence operations, rolling back state to prevent corrupted records and alerting the user.
-- **SecurityError Graceful Degradation**: Protects execution in restrictive iframe environments (e.g., third-party storage blocks) via in-memory storage fallbacks.
+- **MongoDB Atlas Integration**: Server-authoritative write-through persistence with multi-tenant isolation and IndexedDB offline cache synchronization.
 - **JSON Application Backups**: Export all application data into a single `.json` file for offline archival and disaster recovery.
 - **Restore & Merge Operations**:
   - **Replace Mode**: Completely restores the application state from a JSON backup, automatically preserving an emergency recovery snapshot in `qavora_rollback_v1`.
@@ -174,7 +173,7 @@ Qavora is engineered as a modern full-stack application with a client-side SPA f
 - **Styling (`style.css`)**: Vanilla CSS3 design system using CSS Custom Properties (variables), CSS Grid, and Flexbox with responsive breakpoints covering 320px to 2560px.
 - **Core Controller (`script.js`)**: Coordinates project management, test suites, case authoring, step execution, defect tracking, and analytics.
 - **Parser Engine (`qaParser.js`)**: Pure ES6 structural text parsing using regular expressions and deterministic AST line analysis.
-- **Persistence Layer (`qaChecklistStore.js`)**: Encapsulates all read/write/delete operations for checklists with quota safety and schema normalization.
+- **Persistence Layer (`qaChecklistStore.js`)**: Encapsulates all read/write/delete operations for checklists with in-memory caching, offline synchronization, and schema normalization.
 - **Execution Controller (`qaRunnerUI.js`)**: Manages the interactive test runner DOM, completion toggles, and checklist management views.
 
 ---
@@ -208,7 +207,7 @@ Test-Pilot/
 ├── script.js                       # Main application workspace controller
 ├── style.css                       # Complete CSS design system and media queries
 ├── test-issue-010.js               # Modal interactions and project deletion test suite
-├── test-issue-011.js               # Storage quota error, rollback & migration test suite
+├── test-issue-011.js               # Storage resilience, rollback & migration test suite
 ├── test-issue-delete-checklist.js  # Checklist deletion and modal lifecycle test suite
 ├── tsconfig.json                   # TypeScript compiler configuration (type checking)
 └── vite.config.ts                  # Vite development and production build configuration
@@ -362,9 +361,7 @@ node test-issue-delete-checklist.js
 
 ### Test Suite Coverage
 1. **`test-issue-010.js`**: Universal confirmation modal DOM structures, modal focus trapping, double-click protection, and phase/test deletion cascades.
-2. **`test-issue-011.js`** (17 tests): Comprehensive storage resilience testing:
-   - `QuotaExceededError` and Firefox `NS_ERROR_DOM_QUOTA_REACHED` handling.
-   - `SecurityError` handling and graceful degradation.
+2. **`test-issue-011.js`**: Storage resilience and data persistence testing:
    - Corrupt JSON isolation without destructive auto-deletion.
    - Multi-operation rollback snapshots.
    - Clean initial boot on uninitialized storage.

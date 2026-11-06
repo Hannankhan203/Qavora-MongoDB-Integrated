@@ -1155,7 +1155,7 @@ export function initQARunnerAndChecklists({
           tc.testId = idInput.value.trim();
           updateRunnerOverallDOM(res.checklist);
         } else {
-          showMsg(res.error || 'Storage is full: Test ID changes could not be saved.', 'error');
+          showMsg(res.error || 'Test ID changes could not be saved.', 'error');
         }
       });
 
@@ -1172,7 +1172,7 @@ export function initQARunnerAndChecklists({
           tc.text = trimmed;
           updateRunnerOverallDOM(res.checklist);
         } else {
-          showMsg(res.error || 'Storage is full: Test description changes could not be saved.', 'error');
+          showMsg(res.error || 'Test description changes could not be saved.', 'error');
         }
       });
       textInput.addEventListener('blur', () => {
@@ -1207,7 +1207,7 @@ export function initQARunnerAndChecklists({
           updateRunnerOverallDOM(res.checklist);
         } else {
           prioSelect.value = prevPrio !== undefined && prevPrio !== null ? String(prevPrio) : '';
-          showMsg(res.error || 'Storage is full: Priority change could not be saved.', 'error');
+          showMsg(res.error || 'Priority change could not be saved.', 'error');
         }
       });
 
@@ -1440,7 +1440,7 @@ export function initQARunnerAndChecklists({
             phase.phaseLabel = lblIn.value.trim();
             updateRunnerOverallDOM(res.checklist);
           } else {
-            showMsg(res.error || 'Storage is full: Phase label changes could not be saved.', 'error');
+            showMsg(res.error || 'Phase label changes could not be saved.', 'error');
           }
         });
 
@@ -1457,7 +1457,7 @@ export function initQARunnerAndChecklists({
             phase.name = trimmed;
             updateRunnerOverallDOM(res.checklist);
           } else {
-            showMsg(res.error || 'Storage is full: Phase name changes could not be saved.', 'error');
+            showMsg(res.error || 'Phase name changes could not be saved.', 'error');
           }
         });
         nameIn.addEventListener('blur', () => {
