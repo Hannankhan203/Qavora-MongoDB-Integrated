@@ -86,7 +86,6 @@ export async function fetchStorageUsage(force = false) {
         usedText = `0 MB`;
       }
       setEl('data-stat-storage-used', usedText);
-      setEl('data-stat-storage-size', usedText);
 
       // 2. Total Capacity
       const capacityMb = typeof storage.capacityMb === 'number' ? storage.capacityMb : 512;
@@ -159,7 +158,6 @@ export async function fetchStorageUsage(force = false) {
       const errorMsg = err.error || (res.status === 503 ? 'Database is offline' : 'Storage service unavailable');
 
       setEl('data-stat-storage-used', 'Unavailable');
-      setEl('data-stat-storage-size', 'Unavailable');
       setEl('data-stat-storage-available', '--');
       setEl('data-stat-storage-percent', '--%');
       setEl('data-stat-storage-ratio', '-- / 512 MB');
@@ -184,7 +182,6 @@ export async function fetchStorageUsage(force = false) {
     }
     // Network failure
     setEl('data-stat-storage-used', 'Unavailable');
-    setEl('data-stat-storage-size', 'Unavailable');
     setEl('data-stat-storage-available', '--');
     setEl('data-stat-storage-percent', '--%');
     setEl('data-stat-storage-ratio', '-- / 512 MB');
