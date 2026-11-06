@@ -15,7 +15,8 @@ import {
   getCachedChecklistsForUser,
   processChecklistSyncQueue,
   clearAllOfflineData,
-  dequeueOperation
+  dequeueOperation,
+  getStorageStatus
 } from './qaChecklistSyncQueue.js';
 
 export {
@@ -25,7 +26,8 @@ export {
   getPendingOperations,
   getCachedChecklistsForUser,
   processChecklistSyncQueue,
-  clearAllOfflineData
+  clearAllOfflineData,
+  getStorageStatus
 };
 
 export const CHECKLISTS_STORAGE_KEY = 'qavora_qa_checklists_v1';
@@ -745,6 +747,23 @@ export const ChecklistsPersistence = {
   inFlightSync: new Map(),
   pendingSync: new Map(),
   lastSyncError: null,
+  lastOfflineStorageError: null,
+  persistenceListeners: new Set(),
+
+  onPersistenceFailure(callback) {
+    if (typeof callback === 'function') {
+      this.persistenceListeners.add(callback);
+      return () => this.persistenceListeners.delete(callback);
+    }
+  },
+
+  notifyPersistenceFailure(checklistId, action, error) {
+    this.persistenceListeners.forEach(fn => {
+      try {
+        fn({ checklistId, action, error: error?.message || String(error) });
+      } catch (_) {}
+    });
+  },
 
   markPersisted(idOrIds) {
     if (!idOrIds) return;
@@ -816,6 +835,7 @@ export const ChecklistsPersistence = {
 
     const syncPromise = (async () => {
       try {
+        let queueError = null;
         // Enqueue operation in durable IndexedDB queue
         if (userId) {
           try {
@@ -825,6 +845,8 @@ export const ChecklistsPersistence = {
               await queueChecklistUpdate(payload, userId);
             }
           } catch (qErr) {
+            queueError = qErr;
+            this.lastOfflineStorageError = qErr?.message || String(qErr);
             console.warn('Qavora: Failed to enqueue checklist in offline queue', qErr);
           }
         }
@@ -851,7 +873,7 @@ export const ChecklistsPersistence = {
           this.lastSyncError = null;
 
           // Dequeue from durable IndexedDB queue on verified server success
-          if (userId) {
+          if (userId && !queueError) {
             try {
               const pendingOps = await getPendingOperations(userId);
               const match = pendingOps.find(op => op.checklistId === checklistId && op.type !== 'DELETE');
@@ -863,9 +885,14 @@ export const ChecklistsPersistence = {
             }
           }
         } else {
-          const errMsg = (result && (result.error || result.message)) || 'Failed to synchronize checklist with MongoDB.';
+          const errMsg = queueError
+            ? `Durable persistence failed: Server unreachable (${result?.error || 'offline'}) and offline storage unavailable (${queueError.message}).`
+            : ((result && (result.error || result.message)) || 'Failed to synchronize checklist with MongoDB.');
           this.lastSyncError = errMsg;
           console.warn(`Qavora: MongoDB sync for checklist "${checklistId}" returned:`, result ? result.status : 'no-result', errMsg);
+          if (queueError) {
+            this.notifyPersistenceFailure(checklistId, options.isNew ? 'create' : 'update', queueError);
+          }
         }
         return result;
       } catch (syncErr) {
@@ -898,10 +925,13 @@ export const ChecklistsPersistence = {
     const opKey = `delete:${checklistId}`;
     const delPromise = (async () => {
       try {
+        let queueError = null;
         if (userId) {
           try {
             await queueChecklistDelete(checklistId, userId, wasPersisted);
           } catch (qErr) {
+            queueError = qErr;
+            this.lastOfflineStorageError = qErr?.message || String(qErr);
             console.warn('Qavora: Failed to queue delete operation', qErr);
           }
         }
@@ -912,7 +942,7 @@ export const ChecklistsPersistence = {
 
         const res = await ChecklistAPI.delete(checklistId);
         if (res && (res.ok || res.status === 404)) {
-          if (userId) {
+          if (userId && !queueError) {
             try {
               const pendingOps = await getPendingOperations(userId);
               const match = pendingOps.find(op => op.checklistId === checklistId && op.type === 'DELETE');
@@ -925,6 +955,9 @@ export const ChecklistsPersistence = {
           }
         } else {
           console.warn(`Qavora: Error deleting checklist ${checklistId} on server:`, res?.error);
+          if (queueError) {
+            this.notifyPersistenceFailure(checklistId, 'delete', queueError);
+          }
         }
         return res;
       } catch (err) {

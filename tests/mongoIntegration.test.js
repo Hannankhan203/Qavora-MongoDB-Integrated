@@ -1070,3 +1070,317 @@ test('QAV-AUDIT-003: Prevent Unauthenticated CSRF Token Issuance & enforce sessi
   assert.equal(anonUsers.length, 0, 'No anonymous users or sessions should exist in MongoDB');
 });
 
+test('QAV-AUDIT-003: Exact Token-Version Matching and Atomic Session Invalidation', async () => {
+  const email = 'audit003_user@example.com';
+  const password = 'InitialPassword123!';
+  const authData = await registerAndLogin('Audit003 User', email, password, '10.0.10.1');
+  const decoded = jwt.decode(authData.authToken);
+  const userId = decoded.userId;
+  assert.ok(userId, 'Registered user must have a valid userId in JWT');
+
+  // Verify initial registration tokenVersion is 1 in both DB and JWT
+  const initialDbUser = await directDb.collection('users').findOne({ userId });
+  assert.equal(initialDbUser.tokenVersion, 1, 'Initial database tokenVersion must be 1');
+  assert.equal(decoded.tokenVersion, 1, 'Initial JWT tokenVersion must be 1');
+
+  // --------------------------------------------------------------------------
+  // 1. Exact Token-Version Matching Requirements
+  // --------------------------------------------------------------------------
+
+  // Test Case: JWT version 1, database version 2 -> 401
+  await directDb.collection('users').updateOne({ userId }, { $set: { tokenVersion: 2 } });
+  const jwtV1Token = jwt.sign(
+    { userId, email, name: 'Audit003 User', role: 'QA Tester', tokenVersion: 1 },
+    process.env.JWT_SECRET
+  );
+  const v1Db2Res = await fetch(`${baseUrl}/api/auth/csrf`, {
+    headers: { Cookie: `qavora_auth_token=${jwtV1Token}` }
+  });
+  assert.equal(v1Db2Res.status, 401, 'JWT version 1 with DB version 2 must return 401');
+  assert.equal(extractCookies(v1Db2Res).qavora_csrf_token, undefined, 'No CSRF cookie on 401');
+
+  // Test Case: JWT version 2, database version 1 -> 401 (rejection of future/higher versions)
+  await directDb.collection('users').updateOne({ userId }, { $set: { tokenVersion: 1 } });
+  const jwtV2Token = jwt.sign(
+    { userId, email, name: 'Audit003 User', role: 'QA Tester', tokenVersion: 2 },
+    process.env.JWT_SECRET
+  );
+  const v2Db1Res = await fetch(`${baseUrl}/api/auth/csrf`, {
+    headers: { Cookie: `qavora_auth_token=${jwtV2Token}` }
+  });
+  assert.equal(v2Db1Res.status, 401, 'JWT version 2 with DB version 1 must return 401 (prevent higher tokenVersion bypass)');
+  assert.equal(extractCookies(v2Db1Res).qavora_csrf_token, undefined, 'No CSRF cookie on 401');
+
+  // Test Case: Matching versions -> authenticated
+  // Subcase A: JWT version 1, DB version 1 -> authenticated (200)
+  const v1Db1Res = await fetch(`${baseUrl}/api/auth/csrf`, {
+    headers: { Cookie: `qavora_auth_token=${jwtV1Token}` }
+  });
+  assert.equal(v1Db1Res.status, 200, 'Matching version 1 must authenticate successfully');
+  const v1Cookies = extractCookies(v1Db1Res);
+  assert.ok(v1Cookies.qavora_csrf_token, 'CSRF cookie issued for matching session');
+
+  // Subcase B: JWT version 3, DB version 3 -> authenticated (200)
+  await directDb.collection('users').updateOne({ userId }, { $set: { tokenVersion: 3 } });
+  const jwtV3Token = jwt.sign(
+    { userId, email, name: 'Audit003 User', role: 'QA Tester', tokenVersion: 3 },
+    process.env.JWT_SECRET
+  );
+  const v3Db3Res = await fetch(`${baseUrl}/api/auth/csrf`, {
+    headers: { Cookie: `qavora_auth_token=${jwtV3Token}` }
+  });
+  assert.equal(v3Db3Res.status, 200, 'Matching version 3 must authenticate successfully');
+  assert.ok(extractCookies(v3Db3Res).qavora_csrf_token, 'CSRF cookie issued for matching version 3');
+
+  // Test Case: Legacy token without version, database version 1 -> authenticated
+  await directDb.collection('users').updateOne({ userId }, { $set: { tokenVersion: 1 } });
+  const legacyToken = jwt.sign(
+    { userId, email, name: 'Audit003 User', role: 'QA Tester' },
+    process.env.JWT_SECRET
+  );
+  const legacyDb1Res = await fetch(`${baseUrl}/api/auth/csrf`, {
+    headers: { Cookie: `qavora_auth_token=${legacyToken}` }
+  });
+  assert.equal(legacyDb1Res.status, 200, 'Legacy token without tokenVersion with DB version 1 must authenticate');
+  assert.ok(extractCookies(legacyDb1Res).qavora_csrf_token, 'CSRF cookie issued for valid legacy session');
+
+  // Legacy user record without tokenVersion in DB ($unset) with DB version effectively 1
+  await directDb.collection('users').updateOne({ userId }, { $unset: { tokenVersion: '' } });
+  const legacyDbUnsetRes = await fetch(`${baseUrl}/api/auth/csrf`, {
+    headers: { Cookie: `qavora_auth_token=${legacyToken}` }
+  });
+  assert.equal(legacyDbUnsetRes.status, 200, 'Legacy user without DB tokenVersion must authenticate legacy token');
+
+  // Test Case: Legacy token without version, database version 2 -> 401
+  await directDb.collection('users').updateOne({ userId }, { $set: { tokenVersion: 2 } });
+  const legacyDb2Res = await fetch(`${baseUrl}/api/auth/csrf`, {
+    headers: { Cookie: `qavora_auth_token=${legacyToken}` }
+  });
+  assert.equal(legacyDb2Res.status, 401, 'Legacy token without tokenVersion with DB version 2 must return 401');
+  assert.equal(extractCookies(legacyDb2Res).qavora_csrf_token, undefined, 'No CSRF cookie on 401');
+
+  // Test Case: Reject malformed or invalid database values rather than silently treating as version 1
+  for (const badDbVal of ['invalid', '99', -1, 0, 1.5, null, {}]) {
+    await directDb.collection('users').updateOne({ userId }, { $set: { tokenVersion: badDbVal } });
+    const malformedDbRes = await fetch(`${baseUrl}/api/auth/csrf`, {
+      headers: { Cookie: `qavora_auth_token=${jwtV1Token}` }
+    });
+    assert.equal(
+      malformedDbRes.status,
+      401,
+      `Malformed database tokenVersion (${JSON.stringify(badDbVal)}) must not fall back to 1 and must return 401`
+    );
+    assert.equal(extractCookies(malformedDbRes).qavora_csrf_token, undefined, 'No CSRF cookie on 401');
+  }
+
+  // Test Case: Reject missing, null, string, fractional, negative, zero, and non-finite JWT token versions
+  await directDb.collection('users').updateOne({ userId }, { $set: { tokenVersion: 1 } });
+  for (const badJwtVal of [null, '1', 'invalid', -1, 0, 1.5, Infinity]) {
+    const badJwtToken = jwt.sign(
+      { userId, email, name: 'Audit003 User', role: 'QA Tester', tokenVersion: badJwtVal },
+      process.env.JWT_SECRET
+    );
+    const badJwtRes = await fetch(`${baseUrl}/api/auth/csrf`, {
+      headers: { Cookie: `qavora_auth_token=${badJwtToken}` }
+    });
+    assert.equal(
+      badJwtRes.status,
+      401,
+      `Invalid JWT tokenVersion (${JSON.stringify(badJwtVal)}) must be rejected with 401`
+    );
+    assert.equal(extractCookies(badJwtRes).qavora_csrf_token, undefined, 'No CSRF cookie on 401');
+  }
+
+  // --------------------------------------------------------------------------
+  // 2. Atomic Session Invalidation Requirements
+  // --------------------------------------------------------------------------
+
+  // 2a. Invalidation handles missing legacy tokenVersion safely
+  const legacyInvalEmail = 'legacy_inval@example.com';
+  const legacyInvalUser = await registerAndLogin('Legacy Inval', legacyInvalEmail, 'Pass12345!', '10.0.10.2');
+  const legacyInvalUserId = jwt.decode(legacyInvalUser.authToken).userId;
+  // Remove tokenVersion to simulate legacy user
+  await directDb.collection('users').updateOne({ userId: legacyInvalUserId }, { $unset: { tokenVersion: '' } });
+
+  // Logout on legacy user atomically sets version to 2
+  const legacyLogoutRes = await fetch(`${baseUrl}/api/auth/logout`, {
+    method: 'POST',
+    headers: {
+      Origin: baseUrl,
+      Cookie: legacyInvalUser.cookieHeader,
+      'X-CSRF-Token': legacyInvalUser.csrfToken
+    }
+  });
+  assert.equal(legacyLogoutRes.status, 200, 'Legacy user logout must succeed');
+  const postLegacyLogoutUser = await directDb.collection('users').findOne({ userId: legacyInvalUserId });
+  assert.equal(postLegacyLogoutUser.tokenVersion, 2, 'Legacy user logout must atomically advance tokenVersion from unset to 2');
+
+  // Verify previous session token is now rejected
+  const postLogoutMeRes = await fetch(`${baseUrl}/api/auth/me`, {
+    headers: { Cookie: `qavora_auth_token=${legacyInvalUser.authToken}` }
+  });
+  assert.equal(postLogoutMeRes.status, 401, 'Previously issued token must be rejected after logout');
+
+  // 2b. Concurrent logout requests advance tokenVersion atomically without lost updates
+  const concLogoutEmail = 'conc_logout@example.com';
+  const concLogoutUser = await registerAndLogin('Conc Logout', concLogoutEmail, 'Pass12345!', '10.0.10.3');
+  const concLogoutUserId = jwt.decode(concLogoutUser.authToken).userId;
+  const initialConcVersion = (await directDb.collection('users').findOne({ userId: concLogoutUserId })).tokenVersion;
+  assert.equal(initialConcVersion, 1, 'Initial tokenVersion must be 1');
+
+  // Fire 10 concurrent logout requests with the same token
+  const concurrentLogoutPromises = Array.from({ length: 10 }, () =>
+    fetch(`${baseUrl}/api/auth/logout`, {
+      method: 'POST',
+      headers: {
+        Origin: baseUrl,
+        Cookie: concLogoutUser.cookieHeader,
+        'X-CSRF-Token': concLogoutUser.csrfToken
+      }
+    })
+  );
+  const logoutResponses = await Promise.all(concurrentLogoutPromises);
+  for (const resp of logoutResponses) {
+    assert.equal(resp.status, 200, 'Every concurrent logout response must return 200');
+  }
+
+  // Database must show tokenVersion advanced by exactly 10 (1 + 10 = 11) with no lost updates
+  const finalConcUser = await directDb.collection('users').findOne({ userId: concLogoutUserId });
+  assert.equal(
+    finalConcUser.tokenVersion,
+    initialConcVersion + 10,
+    `Concurrent logouts must atomically advance tokenVersion from ${initialConcVersion} to ${initialConcVersion + 10}`
+  );
+
+  // 2c. Password-change handler invalidates sessions atomically
+  const pwdChangeEmail = 'pwd_change@example.com';
+  const pwdUser = await registerAndLogin('Pwd User', pwdChangeEmail, 'CurrentPassword123!', '10.0.10.4');
+  const pwdUserId = jwt.decode(pwdUser.authToken).userId;
+  const prePwdVersion = (await directDb.collection('users').findOne({ userId: pwdUserId })).tokenVersion;
+
+  // Change password
+  const newPassword = 'BrandNewPassword123!';
+  const pwdChangeRes = await fetch(`${baseUrl}/api/auth/change-password`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Origin: baseUrl,
+      Cookie: pwdUser.cookieHeader,
+      'X-CSRF-Token': pwdUser.csrfToken
+    },
+    body: JSON.stringify({
+      currentPassword: 'CurrentPassword123!',
+      newPassword
+    })
+  });
+  assert.equal(pwdChangeRes.status, 200, 'Password change must succeed with 200');
+  const pwdChangeBody = await pwdChangeRes.json();
+  assert.equal(pwdChangeBody.success, true);
+
+  // Database must verify tokenVersion advanced
+  const postPwdUser = await directDb.collection('users').findOne({ userId: pwdUserId });
+  assert.equal(
+    postPwdUser.tokenVersion,
+    prePwdVersion + 1,
+    'Password change must atomically advance tokenVersion by 1'
+  );
+
+  // Verify previous token is immediately rejected after password change
+  const postPwdMeRes = await fetch(`${baseUrl}/api/auth/me`, {
+    headers: { Cookie: `qavora_auth_token=${pwdUser.authToken}` }
+  });
+  assert.equal(postPwdMeRes.status, 401, 'Previously issued token must be rejected immediately after password change');
+
+  // Verify previous token cannot obtain CSRF token
+  const postPwdCsrfRes = await fetch(`${baseUrl}/api/auth/csrf`, {
+    headers: { Cookie: `qavora_auth_token=${pwdUser.authToken}` }
+  });
+  assert.equal(postPwdCsrfRes.status, 401, 'Previously issued token cannot obtain CSRF token after password change');
+  assert.equal(extractCookies(postPwdCsrfRes).qavora_csrf_token, undefined, 'No CSRF cookie on 401');
+
+  // 2c-ii. Concurrent password-change invalidation
+  const concPwdEmail = 'conc_pwd@example.com';
+  const concPwdUser = await registerAndLogin('Conc Pwd User', concPwdEmail, 'CurrentPwd123!', '10.0.10.5');
+  const concPwdUserId = jwt.decode(concPwdUser.authToken).userId;
+  const preConcPwdVersion = (await directDb.collection('users').findOne({ userId: concPwdUserId })).tokenVersion;
+
+  // Fire 3 concurrent password change requests with valid credentials
+  const concPwdReqs = Array.from({ length: 3 }, (_, i) =>
+    fetch(`${baseUrl}/api/auth/change-password`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: baseUrl,
+        Cookie: concPwdUser.cookieHeader,
+        'X-CSRF-Token': concPwdUser.csrfToken
+      },
+      body: JSON.stringify({
+        currentPassword: 'CurrentPwd123!',
+        newPassword: `NewConcurrentPwd${i + 1}!`
+      })
+    })
+  );
+  const concPwdResponses = await Promise.all(concPwdReqs);
+  const successfulChanges = (await Promise.all(concPwdResponses.map(async r => ({ status: r.status, body: await r.json() }))))
+    .filter(r => r.status === 200);
+  assert.ok(successfulChanges.length >= 1, 'At least one concurrent password change request must succeed');
+
+  const postConcPwdUser = await directDb.collection('users').findOne({ userId: concPwdUserId });
+  assert.ok(
+    postConcPwdUser.tokenVersion >= preConcPwdVersion + successfulChanges.length,
+    'Each successful concurrent password change must advance tokenVersion atomically'
+  );
+
+  // The original token must be rejected immediately
+  const postConcPwdMeRes = await fetch(`${baseUrl}/api/auth/me`, {
+    headers: { Cookie: `qavora_auth_token=${concPwdUser.authToken}` }
+  });
+  assert.equal(postConcPwdMeRes.status, 401, 'Original session token rejected after concurrent password change');
+
+  // 2d. Legitimate re-authentication and CSRF refresh still work with new credentials
+  const newLoginRes = await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Origin: baseUrl,
+      'X-Forwarded-For': '10.0.10.4'
+    },
+    body: JSON.stringify({ email: pwdChangeEmail, password: newPassword })
+  });
+  assert.equal(newLoginRes.status, 200, 'Login with new password must succeed');
+  const newLoginCookies = extractCookies(newLoginRes);
+  assert.ok(newLoginCookies.qavora_auth_token, 'Login issues new auth token');
+  assert.ok(newLoginCookies.qavora_csrf_token, 'Login issues new CSRF token');
+
+  // Verify newly issued token matches database tokenVersion
+  const newDecoded = jwt.decode(newLoginCookies.qavora_auth_token);
+  assert.equal(newDecoded.tokenVersion, postPwdUser.tokenVersion, 'New JWT tokenVersion must match advanced DB tokenVersion');
+
+  // Authenticated endpoints work with new session
+  const newMeRes = await fetch(`${baseUrl}/api/auth/me`, {
+    headers: { Cookie: `qavora_auth_token=${newLoginCookies.qavora_auth_token}` }
+  });
+  assert.equal(newMeRes.status, 200, 'New session can access /api/auth/me');
+
+  // CSRF token refresh works with new session
+  const newCsrfRefreshRes = await fetch(`${baseUrl}/api/auth/csrf`, {
+    headers: { Cookie: `qavora_auth_token=${newLoginCookies.qavora_auth_token}` }
+  });
+  assert.equal(newCsrfRefreshRes.status, 200, 'New session can refresh CSRF token');
+  const refreshedCsrf = extractCookies(newCsrfRefreshRes).qavora_csrf_token;
+  assert.ok(refreshedCsrf, 'Refreshed CSRF token issued');
+
+  // State-changing request succeeds with new session and refreshed CSRF token
+  const createChecklistRes = await fetch(`${baseUrl}/api/checklists`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Origin: baseUrl,
+      Cookie: `qavora_auth_token=${newLoginCookies.qavora_auth_token}; qavora_csrf_token=${refreshedCsrf}`,
+      'X-CSRF-Token': refreshedCsrf
+    },
+    body: JSON.stringify({ title: 'Post-Password Change Verified Checklist' })
+  });
+  assert.equal(createChecklistRes.status, 201, 'State-changing request succeeds with refreshed session');
+});
+

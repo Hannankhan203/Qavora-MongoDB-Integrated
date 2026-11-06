@@ -28,6 +28,8 @@ export const STORE_SYNC_LOCKS = 'sync_locks';
 let dbInstance = null;
 let dbOpenPromise = null;
 let globalSeqCounter = Date.now();
+let lastStorageError = null;
+let storageDegradedMode = false;
 
 function getNextSeq() {
   globalSeqCounter += 1;
@@ -51,10 +53,97 @@ const memoryOperations = new Map();
 const memoryChecklistsCache = new Map();
 const memorySyncLocks = new Map();
 
-function hasNativeIndexedDB() {
+export function hasNativeIndexedDB() {
   return typeof globalThis !== 'undefined' &&
     typeof globalThis.indexedDB !== 'undefined' &&
     globalThis.indexedDB !== null;
+}
+
+/**
+ * Expose storage status to browser callers
+ */
+export function getStorageStatus() {
+  const isBrowser = hasNativeIndexedDB();
+  if (!isBrowser) {
+    return {
+      status: 'memory_fallback',
+      driver: 'memory',
+      isDurable: false,
+      isDegraded: false,
+      error: null
+    };
+  }
+
+  if (storageDegradedMode) {
+    return {
+      status: 'degraded',
+      driver: 'memory',
+      isDurable: false,
+      isDegraded: true,
+      error: lastStorageError ? (lastStorageError.message || String(lastStorageError)) : 'Operating in degraded in-memory mode'
+    };
+  }
+
+  if (lastStorageError) {
+    return {
+      status: 'unavailable',
+      driver: dbInstance && !dbInstance.__isMemoryFallback ? 'indexeddb' : 'none',
+      isDurable: false,
+      isDegraded: true,
+      error: lastStorageError.message || String(lastStorageError)
+    };
+  }
+
+  if (!dbInstance) {
+    return {
+      status: 'uninitialized',
+      driver: 'indexeddb',
+      isDurable: true,
+      isDegraded: false,
+      error: null
+    };
+  }
+
+  if (dbInstance.__isMemoryFallback) {
+    return {
+      status: 'degraded',
+      driver: 'memory',
+      isDurable: false,
+      isDegraded: true,
+      error: 'Operating in degraded in-memory fallback'
+    };
+  }
+
+  return {
+    status: 'ready',
+    driver: 'indexeddb',
+    isDurable: true,
+    isDegraded: false,
+    error: null
+  };
+}
+
+export function setDegradedMemoryFallback(enabled) {
+  storageDegradedMode = Boolean(enabled);
+}
+
+export function closeOfflineDatabase() {
+  if (dbInstance && typeof dbInstance.close === 'function') {
+    try {
+      dbInstance.close();
+    } catch (_) {}
+  }
+  dbInstance = null;
+  dbOpenPromise = null;
+}
+
+export function resetStorageState() {
+  closeOfflineDatabase();
+  lastStorageError = null;
+  storageDegradedMode = false;
+  memoryOperations.clear();
+  memoryChecklistsCache.clear();
+  memorySyncLocks.clear();
 }
 
 /**
@@ -80,6 +169,20 @@ export async function openOfflineDatabase() {
   }
 
   dbOpenPromise = new Promise((resolve, reject) => {
+    let settled = false;
+    const safeResolve = (val) => {
+      if (!settled) {
+        settled = true;
+        resolve(val);
+      }
+    };
+    const safeReject = (err) => {
+      if (!settled) {
+        settled = true;
+        reject(err);
+      }
+    };
+
     try {
       const request = globalThis.indexedDB.open(DB_NAME, DB_VERSION);
 
@@ -111,20 +214,30 @@ export async function openOfflineDatabase() {
       request.onsuccess = (event) => {
         dbInstance = event.target.result;
         dbOpenPromise = null;
+        lastStorageError = null;
 
         dbInstance.onversionchange = () => {
-          dbInstance.close();
+          try {
+            dbInstance.close();
+          } catch (_) {}
           dbInstance = null;
         };
 
-        resolve(dbInstance);
+        safeResolve(dbInstance);
       };
 
       request.onerror = (event) => {
-        console.warn('Qavora Offline DB open failed, falling back to in-memory queue:', event.target.error);
+        const error = event.target.error || new Error('Failed to open IndexedDB database');
+        console.warn('Qavora Offline DB open failed:', error);
         dbOpenPromise = null;
-        dbInstance = { __isMemoryFallback: true, close() { dbInstance = null; } };
-        resolve(dbInstance);
+        lastStorageError = error;
+        if (storageDegradedMode) {
+          dbInstance = { __isMemoryFallback: true, close() { dbInstance = null; } };
+          safeResolve(dbInstance);
+        } else {
+          // In real browser, never silently mask failure with volatile memory
+          safeReject(error);
+        }
       };
 
       request.onblocked = () => {
@@ -133,8 +246,13 @@ export async function openOfflineDatabase() {
     } catch (err) {
       console.warn('Qavora Offline DB initialization exception:', err);
       dbOpenPromise = null;
-      dbInstance = { __isMemoryFallback: true, close() { dbInstance = null; } };
-      resolve(dbInstance);
+      lastStorageError = err;
+      if (storageDegradedMode) {
+        dbInstance = { __isMemoryFallback: true, close() { dbInstance = null; } };
+        safeResolve(dbInstance);
+      } else {
+        safeReject(err);
+      }
     }
   });
 
@@ -148,20 +266,31 @@ export async function openOfflineDatabase() {
 async function idbGet(storeName, key) {
   const db = await openOfflineDatabase();
   if (db.__isMemoryFallback) {
+    if (hasNativeIndexedDB() && !storageDegradedMode) {
+      throw new Error('Durable offline storage unavailable: operating in browser without persistent IndexedDB');
+    }
     const store = storeName === STORE_OPERATIONS ? memoryOperations : memoryChecklistsCache;
     const item = store.get(String(key));
     return item ? JSON.parse(JSON.stringify(item)) : null;
   }
 
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let result = null;
+    const safeResolve = (val) => { if (!settled) { settled = true; resolve(val); } };
+    const safeReject = (err) => { if (!settled) { settled = true; reject(err); } };
+
     try {
       const tx = db.transaction([storeName], 'readonly');
       const store = tx.objectStore(storeName);
       const req = store.get(key);
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = () => reject(req.error);
+      req.onsuccess = () => { result = req.result || null; };
+      req.onerror = () => safeReject(req.error || new Error('IndexedDB get request failed'));
+      tx.oncomplete = () => safeResolve(result);
+      tx.onerror = () => safeReject(tx.error || req.error || new Error('IndexedDB transaction failed'));
+      tx.onabort = () => safeReject(tx.error || new Error('IndexedDB transaction aborted'));
     } catch (err) {
-      reject(err);
+      safeReject(err);
     }
   });
 }
@@ -169,20 +298,31 @@ async function idbGet(storeName, key) {
 async function idbPut(storeName, value) {
   const db = await openOfflineDatabase();
   if (db.__isMemoryFallback) {
+    if (hasNativeIndexedDB() && !storageDegradedMode) {
+      throw new Error('Durable offline storage unavailable: operating in browser without persistent IndexedDB');
+    }
     const store = storeName === STORE_OPERATIONS ? memoryOperations : memoryChecklistsCache;
     store.set(String(value.id), JSON.parse(JSON.stringify(value)));
     return value.id;
   }
 
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let result = value?.id;
+    const safeResolve = (val) => { if (!settled) { settled = true; resolve(val); } };
+    const safeReject = (err) => { if (!settled) { settled = true; reject(err); } };
+
     try {
       const tx = db.transaction([storeName], 'readwrite');
       const store = tx.objectStore(storeName);
       const req = store.put(value);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
+      req.onsuccess = () => { result = req.result; };
+      req.onerror = () => safeReject(req.error || new Error('IndexedDB put request failed'));
+      tx.oncomplete = () => safeResolve(result);
+      tx.onerror = () => safeReject(tx.error || req.error || new Error('IndexedDB transaction failed'));
+      tx.onabort = () => safeReject(tx.error || new Error('IndexedDB transaction aborted'));
     } catch (err) {
-      reject(err);
+      safeReject(err);
     }
   });
 }
@@ -190,20 +330,29 @@ async function idbPut(storeName, value) {
 async function idbDelete(storeName, key) {
   const db = await openOfflineDatabase();
   if (db.__isMemoryFallback) {
+    if (hasNativeIndexedDB() && !storageDegradedMode) {
+      throw new Error('Durable offline storage unavailable: operating in browser without persistent IndexedDB');
+    }
     const store = storeName === STORE_OPERATIONS ? memoryOperations : memoryChecklistsCache;
     store.delete(String(key));
     return true;
   }
 
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const safeResolve = (val) => { if (!settled) { settled = true; resolve(val); } };
+    const safeReject = (err) => { if (!settled) { settled = true; reject(err); } };
+
     try {
       const tx = db.transaction([storeName], 'readwrite');
       const store = tx.objectStore(storeName);
       const req = store.delete(key);
-      req.onsuccess = () => resolve(true);
-      req.onerror = () => reject(req.error);
+      req.onerror = () => safeReject(req.error || new Error('IndexedDB delete request failed'));
+      tx.oncomplete = () => safeResolve(true);
+      tx.onerror = () => safeReject(tx.error || req.error || new Error('IndexedDB transaction failed'));
+      tx.onabort = () => safeReject(tx.error || new Error('IndexedDB transaction aborted'));
     } catch (err) {
-      reject(err);
+      safeReject(err);
     }
   });
 }
@@ -211,19 +360,30 @@ async function idbDelete(storeName, key) {
 async function idbGetAll(storeName) {
   const db = await openOfflineDatabase();
   if (db.__isMemoryFallback) {
+    if (hasNativeIndexedDB() && !storageDegradedMode) {
+      throw new Error('Durable offline storage unavailable: operating in browser without persistent IndexedDB');
+    }
     const store = storeName === STORE_OPERATIONS ? memoryOperations : memoryChecklistsCache;
     return Array.from(store.values()).map(v => JSON.parse(JSON.stringify(v)));
   }
 
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let result = [];
+    const safeResolve = (val) => { if (!settled) { settled = true; resolve(val); } };
+    const safeReject = (err) => { if (!settled) { settled = true; reject(err); } };
+
     try {
       const tx = db.transaction([storeName], 'readonly');
       const store = tx.objectStore(storeName);
       const req = store.getAll();
-      req.onsuccess = () => resolve(req.result || []);
-      req.onerror = () => reject(req.error);
+      req.onsuccess = () => { result = req.result || []; };
+      req.onerror = () => safeReject(req.error || new Error('IndexedDB getAll request failed'));
+      tx.oncomplete = () => safeResolve(result);
+      tx.onerror = () => safeReject(tx.error || req.error || new Error('IndexedDB transaction failed'));
+      tx.onabort = () => safeReject(tx.error || new Error('IndexedDB transaction aborted'));
     } catch (err) {
-      reject(err);
+      safeReject(err);
     }
   });
 }
@@ -231,20 +391,29 @@ async function idbGetAll(storeName) {
 async function idbClear(storeName) {
   const db = await openOfflineDatabase();
   if (db.__isMemoryFallback) {
+    if (hasNativeIndexedDB() && !storageDegradedMode) {
+      throw new Error('Durable offline storage unavailable: operating in browser without persistent IndexedDB');
+    }
     const store = storeName === STORE_OPERATIONS ? memoryOperations : memoryChecklistsCache;
     store.clear();
     return true;
   }
 
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const safeResolve = (val) => { if (!settled) { settled = true; resolve(val); } };
+    const safeReject = (err) => { if (!settled) { settled = true; reject(err); } };
+
     try {
       const tx = db.transaction([storeName], 'readwrite');
       const store = tx.objectStore(storeName);
       const req = store.clear();
-      req.onsuccess = () => resolve(true);
-      req.onerror = () => reject(req.error);
+      req.onerror = () => safeReject(req.error || new Error('IndexedDB clear request failed'));
+      tx.oncomplete = () => safeResolve(true);
+      tx.onerror = () => safeReject(tx.error || req.error || new Error('IndexedDB transaction failed'));
+      tx.onabort = () => safeReject(tx.error || new Error('IndexedDB transaction aborted'));
     } catch (err) {
-      reject(err);
+      safeReject(err);
     }
   });
 }
@@ -719,6 +888,10 @@ export async function dequeueOperationIfLockValid(
   }
 
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const safeResolve = (val) => { if (!settled) { settled = true; resolve(val); } };
+    const safeReject = (err) => { if (!settled) { settled = true; reject(err); } };
+
     const tx = db.transaction([STORE_SYNC_LOCKS, STORE_OPERATIONS], 'readwrite');
     const lockStore = tx.objectStore(STORE_SYNC_LOCKS);
     const opStore = tx.objectStore(STORE_OPERATIONS);
@@ -739,10 +912,10 @@ export async function dequeueOperationIfLockValid(
       opStore.delete(opId);
       deleted = true;
     };
-    getReq.onerror = () => reject(getReq.error);
-    tx.oncomplete = () => resolve(deleted);
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => resolve(false);
+    getReq.onerror = () => safeReject(getReq.error);
+    tx.oncomplete = () => safeResolve(deleted);
+    tx.onerror = () => safeReject(tx.error);
+    tx.onabort = () => safeResolve(false);
   });
 }
 

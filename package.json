@@ -14,7 +14,9 @@
     "start": "node dist/server.mjs",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "test": "tsx --test tests/**/*.test.js"
+    "test": "tsx --test tests/**/*.test.js",
+    "test:unit": "tsx --test tests/apiClient.test.js tests/checklistStore.test.js tests/offlineSync.test.js tests/reportGenerator.test.js tests/serverApi.test.js tests/mongoIntegration.test.js",
+    "test:browser": "tsx --test tests/browserConcurrency.test.js"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",

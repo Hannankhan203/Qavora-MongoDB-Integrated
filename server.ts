@@ -986,6 +986,57 @@ function toSafeUser(user: any): SafeUserProfile {
   };
 }
 
+/**
+ * Atomic MongoDB update pipeline stage to safely advance a user's tokenVersion.
+ * - If tokenVersion is a valid positive integer, increments by 1.
+ * - If tokenVersion is missing/null (legacy user), defaults base to 1 and advances to 2.
+ * - If tokenVersion is malformed (string, fractional, negative, zero, non-finite), defaults base to 1 and advances to 2.
+ * - Prevents lost updates under concurrent logout / password-change requests.
+ */
+function buildTokenVersionIncrementPipeline(extraFields: Record<string, any> = {}) {
+  const literalFields: Record<string, any> = {};
+  for (const [key, val] of Object.entries(extraFields)) {
+    // In aggregation pipeline $set, literal string values (especially bcrypt hashes starting with $)
+    // must be wrapped in { $literal: val } to prevent MongoDB from treating them as field path expressions.
+    if (typeof val === 'string') {
+      literalFields[key] = { $literal: val };
+    } else {
+      literalFields[key] = val;
+    }
+  }
+
+  return [
+    {
+      $set: {
+        tokenVersion: {
+          $add: [
+            {
+              $ifNull: [
+                {
+                  $cond: {
+                    if: {
+                      $and: [
+                        { $isNumber: "$tokenVersion" },
+                        { $gte: ["$tokenVersion", 1] },
+                        { $eq: ["$tokenVersion", { $floor: "$tokenVersion" }] }
+                      ]
+                    },
+                    then: "$tokenVersion",
+                    else: null
+                  }
+                },
+                1
+              ]
+            },
+            1
+          ]
+        },
+        ...literalFields
+      }
+    }
+  ];
+}
+
 // ============================================================================
 // Authentication Middleware (Route Guard & Identity Verification)
 // ============================================================================
@@ -1060,32 +1111,51 @@ async function requireAuth(req: Request, res: Response, next: NextFunction) {
       });
     }
 
-    // Safe normalization of database tokenVersion (must be integer >= 1, defaults to 1)
-    let expectedTokenVersion = 1;
-    if (typeof user.tokenVersion === 'number' && Number.isInteger(user.tokenVersion) && user.tokenVersion >= 1) {
+    // Safe normalization and strict validation of database tokenVersion.
+    // - Positive integer >= 1 is accepted as expectedTokenVersion.
+    // - Missing/undefined legacy user records default to version 1.
+    // - Malformed or invalid database values (e.g. null, string, fractional, negative, zero, non-finite)
+    //   are strictly rejected rather than silently falling back to version 1.
+    let expectedTokenVersion: number | null = null;
+    let dbTokenVersionValid = true;
+
+    if (user.tokenVersion === undefined) {
+      expectedTokenVersion = 1;
+    } else if (
+      typeof user.tokenVersion === 'number' &&
+      Number.isInteger(user.tokenVersion) &&
+      Number.isFinite(user.tokenVersion) &&
+      user.tokenVersion >= 1
+    ) {
       expectedTokenVersion = user.tokenVersion;
-    } else if (typeof user.tokenVersion === 'string' && /^\d+$/.test(user.tokenVersion)) {
-      const parsed = parseInt(user.tokenVersion, 10);
-      if (parsed >= 1) expectedTokenVersion = parsed;
+    } else {
+      dbTokenVersionValid = false;
     }
 
-    // Safe normalization and strict validation of decoded tokenVersion
-    let tokenVersionValid = true;
-    if (decoded.tokenVersion !== undefined) {
-      if (
-        typeof decoded.tokenVersion !== 'number' ||
-        !Number.isInteger(decoded.tokenVersion) ||
-        !Number.isFinite(decoded.tokenVersion) ||
-        decoded.tokenVersion < 1 ||
-        decoded.tokenVersion < expectedTokenVersion
+    // Safe normalization and strict validation of decoded JWT tokenVersion.
+    // - For versioned tokens: require decoded.tokenVersion === expectedTokenVersion.
+    // - Reject missing, null, string, fractional, negative, zero, and non-finite JWT token versions.
+    // - Legacy tokens without tokenVersion (decoded.tokenVersion === undefined) are only valid when expectedTokenVersion === 1.
+    let tokenVersionValid = false;
+
+    if (dbTokenVersionValid && expectedTokenVersion !== null) {
+      if (decoded.tokenVersion === undefined) {
+        // Legacy token without version: strictly permitted only if database version is exactly 1
+        if (expectedTokenVersion === 1) {
+          tokenVersionValid = true;
+        }
+      } else if (
+        typeof decoded.tokenVersion === 'number' &&
+        Number.isInteger(decoded.tokenVersion) &&
+        Number.isFinite(decoded.tokenVersion) &&
+        decoded.tokenVersion >= 1
       ) {
-        tokenVersionValid = false;
+        // Versioned token: must match database version exactly
+        if (decoded.tokenVersion === expectedTokenVersion) {
+          tokenVersionValid = true;
+        }
       }
-    } else {
-      // Legacy session without tokenVersion: only valid if user has never incremented version beyond 1
-      if (expectedTokenVersion > 1) {
-        tokenVersionValid = false;
-      }
+      // Any other value (null, string, fractional, negative, zero, NaN, Infinity) remains tokenVersionValid = false
     }
 
     const isRevoked =
@@ -1402,10 +1472,15 @@ app.post("/api/auth/login", loginRateLimiter, async (req: Request, res: Response
     }
 
     const now = new Date().toISOString();
+    const userTokenVersion = (typeof user.tokenVersion === 'number' && Number.isInteger(user.tokenVersion) && Number.isFinite(user.tokenVersion) && user.tokenVersion >= 1)
+      ? user.tokenVersion
+      : 1;
+
     await db.collection("users").updateOne(
       { userId: user.userId },
-      { $set: { lastLoginAt: now, updatedAt: now } }
+      { $set: { lastLoginAt: now, updatedAt: now, tokenVersion: userTokenVersion } }
     );
+    user.tokenVersion = userTokenVersion;
     user.lastLoginAt = now;
     user.updatedAt = now;
 
@@ -1416,7 +1491,7 @@ app.post("/api/auth/login", loginRateLimiter, async (req: Request, res: Response
         email: user.email,
         name: user.name,
         role: user.role || 'QA Tester',
-        tokenVersion: user.tokenVersion || 1
+        tokenVersion: userTokenVersion
       },
       jwtSecret,
       { expiresIn: tokenExpiry }
@@ -1439,7 +1514,7 @@ app.post("/api/auth/login", loginRateLimiter, async (req: Request, res: Response
   }
 });
 
-// 2b. POST /api/auth/logout - Clear authentication and CSRF cookies & invalidate session
+// 2b. POST /api/auth/logout - Clear authentication and CSRF cookies & atomically invalidate session
 app.post("/api/auth/logout", async (req: Request, res: Response) => {
   try {
     const { cookies } = parseCookies(req.headers.cookie);
@@ -1453,20 +1528,14 @@ app.post("/api/auth/logout", async (req: Request, res: Response) => {
     if (token && db) {
       try {
         const decoded: any = jwt.decode(token);
-        if (decoded && typeof decoded === 'object' && typeof decoded.userId === 'string') {
-          const existingUser = await db.collection("users").findOne({ userId: decoded.userId });
-          const currentVersion = (typeof existingUser?.tokenVersion === 'number' && Number.isInteger(existingUser.tokenVersion) && existingUser.tokenVersion >= 1)
-            ? existingUser.tokenVersion
-            : 1;
-          await db.collection("users").updateOne(
-            { userId: decoded.userId },
-            {
-              $set: {
-                tokenVersion: currentVersion + 1,
-                updatedAt: new Date().toISOString()
-              }
-            }
+        if (decoded && typeof decoded === 'object' && typeof decoded.userId === 'string' && decoded.userId.trim()) {
+          const updateResult = await db.collection("users").updateOne(
+            { userId: decoded.userId.trim() },
+            buildTokenVersionIncrementPipeline({ updatedAt: new Date().toISOString() })
           );
+          if (!updateResult.acknowledged) {
+            console.warn('[Qavora Server] Logout tokenVersion increment not acknowledged.');
+          }
         }
       } catch {
         // Ignore decode error during logout cleanup
@@ -1619,10 +1688,17 @@ app.post("/api/auth/change-password", requireAuth, async (req: Request, res: Res
     const passwordHash = await bcrypt.hash(newPassword, saltRounds);
     const now = new Date().toISOString();
 
-    await db.collection("users").updateOne(
+    const updateResult = await db.collection("users").updateOne(
       { userId },
-      { $set: { passwordHash, updatedAt: now } }
+      buildTokenVersionIncrementPipeline({
+        passwordHash,
+        updatedAt: now
+      })
     );
+
+    if (!updateResult.acknowledged || updateResult.matchedCount === 0) {
+      return res.status(404).json({ error: "User account not found." });
+    }
 
     return res.json({
       success: true,

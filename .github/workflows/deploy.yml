@@ -53,8 +53,13 @@ jobs:
       - name: TypeScript Lint & Typecheck
         run: npm run lint
 
-      - name: Run automated tests
-        run: npm test
+      - name: Run Node.js unit & integration tests
+        run: npm run test:unit
+
+      - name: Run browser IndexedDB concurrency tests
+        run: npm run test:browser
+        env:
+          CI: 'true'
 
       - name: Build production bundle
         run: npm run build
