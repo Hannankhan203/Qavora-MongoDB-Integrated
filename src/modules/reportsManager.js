@@ -11,18 +11,76 @@ import { navigateTo } from './uiRenderer.js';
 
 let _reportsListenersBound = false;
 
-// Helpers to get all unique test cases in a project or all projects
+// Helpers to get all unique test cases in a project or all projects using actual schema
+// (project.testSuites[] and suite.cases[]) with legacy backward compatibility (phases[].suites[].testCases[])
 function getProjectTestCases(project) {
   if (!project) return [];
   const cases = [];
-  const phases = project.phases || [];
-  for (const ph of phases) {
-    for (const su of (ph.suites || [])) {
-      for (const tc of (su.testCases || [])) {
-        cases.push({ ...tc, suiteTitle: su.title, phaseName: ph.name, projectId: project.id, projectName: project.name });
+  const seenCaseIds = new Set();
+
+  const getPhaseName = (phaseId) => {
+    if (!phaseId) return 'General';
+    const phases = project.testPlan?.phases || project.phases || [];
+    const ph = phases.find(p => p.id === phaseId);
+    return ph ? (ph.name || ph.title || 'General') : 'General';
+  };
+
+  // 1. Primary: actual schema project.testSuites[] and suite.cases[]
+  if (Array.isArray(project.testSuites)) {
+    for (const su of project.testSuites) {
+      if (!su) continue;
+      const suiteTitle = su.title || su.name || 'Untitled Suite';
+      const phaseName = su.phaseName || getPhaseName(su.phaseId);
+      const suiteCases = Array.isArray(su.cases) ? su.cases : (Array.isArray(su.testCases) ? su.testCases : []);
+      for (const tc of suiteCases) {
+        if (!tc) continue;
+        const caseId = tc.id || `tc_${cases.length}`;
+        if (caseId && seenCaseIds.has(caseId)) continue;
+        if (caseId) seenCaseIds.add(caseId);
+        cases.push({
+          ...tc,
+          id: tc.id || caseId,
+          title: tc.title || tc.name || 'Untitled Case',
+          suiteId: su.id,
+          suiteTitle,
+          phaseName,
+          phaseId: su.phaseId,
+          projectId: project.id,
+          projectName: project.name || 'Untitled Project'
+        });
       }
     }
   }
+
+  // 2. Backward compatibility: legacy phases[].suites[].testCases[]
+  const phases = project.phases || project.testPlan?.phases || [];
+  for (const ph of phases) {
+    if (!ph || !Array.isArray(ph.suites)) continue;
+    const phaseName = ph.name || ph.title || 'General';
+    for (const su of ph.suites) {
+      if (!su) continue;
+      const suiteTitle = su.title || su.name || 'Untitled Suite';
+      const suiteCases = Array.isArray(su.cases) ? su.cases : (Array.isArray(su.testCases) ? su.testCases : []);
+      for (const tc of suiteCases) {
+        if (!tc) continue;
+        const caseId = tc.id;
+        if (caseId && seenCaseIds.has(caseId)) continue;
+        if (caseId) seenCaseIds.add(caseId);
+        cases.push({
+          ...tc,
+          id: tc.id || caseId,
+          title: tc.title || tc.name || 'Untitled Case',
+          suiteId: su.id,
+          suiteTitle,
+          phaseName,
+          phaseId: ph.id,
+          projectId: project.id,
+          projectName: project.name || 'Untitled Project'
+        });
+      }
+    }
+  }
+
   return cases;
 }
 
@@ -39,11 +97,60 @@ function getProjectDefects(project) {
 function getProjectSuites(project) {
   if (!project) return [];
   const suites = [];
-  for (const ph of (project.phases || [])) {
-    for (const su of (ph.suites || [])) {
-      suites.push({ ...su, phaseName: ph.name, projectId: project.id, projectName: project.name });
+  const seenSuiteIds = new Set();
+
+  const getPhaseName = (phaseId) => {
+    if (!phaseId) return 'General';
+    const phases = project.testPlan?.phases || project.phases || [];
+    const ph = phases.find(p => p.id === phaseId);
+    return ph ? (ph.name || ph.title || 'General') : 'General';
+  };
+
+  // 1. Primary: actual schema project.testSuites[]
+  if (Array.isArray(project.testSuites)) {
+    for (const su of project.testSuites) {
+      if (!su) continue;
+      const suiteId = su.id || `ts_${suites.length}`;
+      if (suiteId && seenSuiteIds.has(suiteId)) continue;
+      if (suiteId) seenSuiteIds.add(suiteId);
+      const suiteCases = Array.isArray(su.cases) ? su.cases : (Array.isArray(su.testCases) ? su.testCases : []);
+      suites.push({
+        ...su,
+        id: suiteId,
+        title: su.title || su.name || 'Untitled Suite',
+        phaseName: su.phaseName || getPhaseName(su.phaseId),
+        cases: suiteCases,
+        testCases: suiteCases,
+        projectId: project.id,
+        projectName: project.name || 'Untitled Project'
+      });
     }
   }
+
+  // 2. Backward compatibility: legacy phases[].suites[]
+  const phases = project.phases || project.testPlan?.phases || [];
+  for (const ph of phases) {
+    if (!ph || !Array.isArray(ph.suites)) continue;
+    const phaseName = ph.name || ph.title || 'General';
+    for (const su of ph.suites) {
+      if (!su) continue;
+      const suiteId = su.id;
+      if (suiteId && seenSuiteIds.has(suiteId)) continue;
+      if (suiteId) seenSuiteIds.add(suiteId);
+      const suiteCases = Array.isArray(su.cases) ? su.cases : (Array.isArray(su.testCases) ? su.testCases : []);
+      suites.push({
+        ...su,
+        id: suiteId,
+        title: su.title || su.name || 'Untitled Suite',
+        phaseName,
+        cases: suiteCases,
+        testCases: suiteCases,
+        projectId: project.id,
+        projectName: project.name || 'Untitled Project'
+      });
+    }
+  }
+
   return suites;
 }
 
@@ -559,19 +666,31 @@ function renderPhaseCoverageTable(projects) {
 
   const phaseMap = new Map();
   for (const proj of projects) {
-    for (const ph of (proj.phases || [])) {
-      const name = ph.name || 'General';
+    const phases = proj.testPlan?.phases || proj.phases || [];
+    const projSuites = getProjectSuites(proj);
+
+    // Initialize phases defined in project
+    for (const ph of phases) {
+      const name = ph.name || ph.title || 'General';
+      if (!phaseMap.has(name)) {
+        phaseMap.set(name, { suiteCount: 0, caseCount: 0, executedCount: 0 });
+      }
+    }
+
+    // Populate counts from suites and cases
+    for (const su of projSuites) {
+      const name = su.phaseName || 'General';
       if (!phaseMap.has(name)) {
         phaseMap.set(name, { suiteCount: 0, caseCount: 0, executedCount: 0 });
       }
       const entry = phaseMap.get(name);
-      entry.suiteCount += (ph.suites || []).length;
-      for (const su of (ph.suites || [])) {
-        entry.caseCount += (su.testCases || []).length;
-        for (const tc of (su.testCases || [])) {
-          if (tc.status && tc.status !== 'NOT_RUN' && tc.status !== 'DRAFT') {
-            entry.executedCount++;
-          }
+      entry.suiteCount += 1;
+      const suiteCases = su.cases || su.testCases || [];
+      entry.caseCount += suiteCases.length;
+      for (const tc of suiteCases) {
+        const st = String(tc.status || '').toUpperCase();
+        if (st && st !== 'NOT_RUN' && st !== 'NOT RUN' && st !== 'DRAFT') {
+          entry.executedCount++;
         }
       }
     }
@@ -686,7 +805,7 @@ function renderSuitesQualityTable(suites, executions, defects) {
 
   let rows = '';
   for (const su of suites) {
-    const cases = su.testCases || [];
+    const cases = su.cases || su.testCases || [];
     const caseIds = new Set(cases.map(c => c.id));
     const suiteExecs = executions.filter(e => caseIds.has(e.testCaseId));
     const passed = suiteExecs.filter(e => String(e.status || '').toUpperCase() === 'PASSED').length;

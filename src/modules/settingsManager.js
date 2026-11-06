@@ -10,6 +10,7 @@ import { apiFetch, apiJson } from './apiClient.js';
 import { getProjects } from './state.js';
 import { showToast, navigateTo } from './uiRenderer.js';
 import { escapeHtml } from './utils.js';
+import { extractProjectCases } from './dataManager.js';
 
 let _settingsListenersBound = false;
 
@@ -85,11 +86,7 @@ export async function computeStorageHealth() {
   const projects = getProjects() || [];
   let totalCases = 0;
   for (const p of projects) {
-    for (const ph of (p.phases || [])) {
-      for (const su of (ph.suites || [])) {
-        totalCases += (su.testCases || []).length;
-      }
-    }
+    totalCases += extractProjectCases(p).length;
   }
 
   if (countProjEl) countProjEl.textContent = String(projects.length);

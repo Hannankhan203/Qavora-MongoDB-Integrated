@@ -147,3 +147,196 @@ test('CSP: Per-response nonces are cryptographically unique and unpredictable ac
   });
 });
 
+test('ISSUE-01: CSRF middleware supports __Host-qavora_csrf_token in addition to qavora_csrf_token', async () => {
+  const crypto = await import('node:crypto');
+  const jwt = (await import('jsonwebtoken')).default;
+  const jwtSecret = 'test-jwt-secret-key-for-automated-tests-2026';
+  const fakeAuthToken = jwt.sign({ userId: 'u_test_123', email: 'test@example.com' }, jwtSecret);
+  const sessionKey = crypto.createHash('sha256').update(fakeAuthToken).digest('hex');
+  const nonce = crypto.randomBytes(24).toString('hex');
+  const sig = crypto.createHmac('sha256', jwtSecret).update(`${sessionKey}.${nonce}`).digest('hex');
+  const validCsrfToken = `${nonce}.${sig}`;
+
+  await withTestServer(async (baseUrl) => {
+    // 1. Valid Host-prefixed CSRF token passes CSRF check (fails at DB offline check 503, NOT 403)
+    const validHostRes = await fetch(`${baseUrl}/api/checklists`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': `qavora_auth_token=${fakeAuthToken}; __Host-qavora_csrf_token=${validCsrfToken}`,
+        'X-CSRF-Token': validCsrfToken
+      },
+      body: JSON.stringify({ title: 'Test' })
+    });
+    assert.equal(validHostRes.status, 503, 'Should pass CSRF and reach offline database check');
+
+    // 2. Valid standard qavora_csrf_token passes CSRF check
+    const validStandardRes = await fetch(`${baseUrl}/api/checklists`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': `qavora_auth_token=${fakeAuthToken}; qavora_csrf_token=${validCsrfToken}`,
+        'X-CSRF-Token': validCsrfToken
+      },
+      body: JSON.stringify({ title: 'Test' })
+    });
+    assert.equal(validStandardRes.status, 503, 'Standard CSRF cookie should pass CSRF and reach offline database check');
+
+    // 3. Mismatched Host-prefixed CSRF token is rejected with 403
+    const mismatchHostRes = await fetch(`${baseUrl}/api/checklists`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': `qavora_auth_token=${fakeAuthToken}; __Host-qavora_csrf_token=${validCsrfToken}`,
+        'X-CSRF-Token': 'wrong_token'
+      },
+      body: JSON.stringify({ title: 'Test' })
+    });
+    assert.equal(mismatchHostRes.status, 403);
+
+    // 4. Duplicate tokens across prefixes rejected (preventing cookie tossing)
+    const duplicateRes = await fetch(`${baseUrl}/api/checklists`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': `qavora_auth_token=${fakeAuthToken}; __Host-qavora_csrf_token=${validCsrfToken}; qavora_csrf_token=${validCsrfToken}`,
+        'X-CSRF-Token': validCsrfToken
+      },
+      body: JSON.stringify({ title: 'Test' })
+    });
+    assert.equal(duplicateRes.status, 403);
+  });
+});
+
+test('ISSUE-01: authController.getCsrfTokenFromCookie supports both qavora_csrf_token and __Host-qavora_csrf_token', async () => {
+  const { default: authCtrl, getCsrfTokenFromCookie, HOST_CSRF_COOKIE_NAME, CSRF_COOKIE_NAME } = await import('../authController.js');
+  assert.equal(HOST_CSRF_COOKIE_NAME, '__Host-qavora_csrf_token');
+  assert.equal(CSRF_COOKIE_NAME, 'qavora_csrf_token');
+
+  const tokenDev = getCsrfTokenFromCookie('qavora_csrf_token=token_dev_123; other=abc');
+  assert.equal(tokenDev, 'token_dev_123');
+
+  const tokenProd = getCsrfTokenFromCookie('__Host-qavora_csrf_token=token_prod_456; other=abc');
+  assert.equal(tokenProd, 'token_prod_456');
+
+  const tokenBoth = authCtrl.getCsrfTokenFromCookie('other=xyz; __Host-qavora_csrf_token=token_host_789');
+  assert.equal(tokenBoth, 'token_host_789');
+});
+
+test('ISSUE-02: extractProjectCases and extractProjectSuites support actual schema and legacy fallback', async () => {
+  const { extractProjectCases, extractProjectSuites } = await import('../src/modules/dataManager.js');
+
+  // Actual schema: project.testSuites[].cases[]
+  const modernProject = {
+    id: 'proj_modern',
+    name: 'Modern Project',
+    testPlan: { phases: [{ id: 'ph_1', name: 'Phase 1' }] },
+    testSuites: [
+      {
+        id: 'ts_1',
+        name: 'Suite 1',
+        phaseId: 'ph_1',
+        cases: [
+          { id: 'c_1', title: 'Case 1', status: 'Passed', priority: 'High' },
+          { id: 'c_2', title: 'Case 2', status: 'Failed', priority: 'Low' }
+        ]
+      }
+    ]
+  };
+
+  const modernSuites = extractProjectSuites(modernProject);
+  assert.equal(modernSuites.length, 1);
+  assert.equal(modernSuites[0].name, 'Suite 1');
+
+  const modernCases = extractProjectCases(modernProject);
+  assert.equal(modernCases.length, 2);
+  assert.equal(modernCases[0].title, 'Case 1');
+  assert.equal(modernCases[1].title, 'Case 2');
+
+  // Legacy schema: project.phases[].suites[].testCases[]
+  const legacyProject = {
+    id: 'proj_legacy',
+    name: 'Legacy Project',
+    phases: [
+      {
+        id: 'ph_leg_1',
+        name: 'Phase Legacy',
+        suites: [
+          {
+            id: 'su_leg_1',
+            title: 'Legacy Suite',
+            testCases: [
+              { id: 'tc_leg_1', title: 'Legacy Case 1', status: 'Active' }
+            ]
+          }
+        ]
+      }
+    ]
+  };
+
+  const legacySuites = extractProjectSuites(legacyProject);
+  assert.equal(legacySuites.length, 1);
+  assert.equal(legacySuites[0].title, 'Legacy Suite');
+
+  const legacyCases = extractProjectCases(legacyProject);
+  assert.equal(legacyCases.length, 1);
+  assert.equal(legacyCases[0].title, 'Legacy Case 1');
+});
+
+test('ISSUE-03: promoteChecklistToProject creates persisted project with testSuites and testPlan', async () => {
+  const { promoteChecklistToProject } = await import('../qaChecklistStore.js');
+
+  const sampleChecklist = {
+    id: 'chk_promo_test_1',
+    title: 'Test Checklist For Promotion',
+    phases: [
+      {
+        id: 'phase_alpha',
+        name: 'Alpha Phase',
+        sections: [
+          {
+            id: 'cat_login',
+            type: 'category',
+            name: 'Authentication',
+            tests: [
+              { id: 't_1', title: 'User Login', priority: 'High', steps: ['Enter email', 'Enter password'] },
+              { id: 't_2', title: 'Password Reset', priority: 'Medium', steps: ['Click forgot password'] }
+            ]
+          }
+        ]
+      }
+    ]
+  };
+
+  let createdProjectPayload = null;
+  const mockCreateProject = async (payload) => {
+    createdProjectPayload = payload;
+    return { ok: true, project: { ...payload, id: 'proj_persisted_123' } };
+  };
+
+  let savedProjectState = null;
+  const mockOnProjectSaved = (proj) => {
+    savedProjectState = proj;
+  };
+
+  const res = await promoteChecklistToProject(sampleChecklist, {
+    projectName: 'Promoted QA Workspace',
+    projectType: 'Web Application',
+    createProject: mockCreateProject,
+    onProjectSaved: mockOnProjectSaved
+  });
+
+  assert.equal(res.ok, true);
+  assert.ok(createdProjectPayload, 'createProject must have been called with payload');
+  assert.equal(createdProjectPayload.name, 'Promoted QA Workspace');
+  assert.equal(createdProjectPayload.type, 'Web Application');
+  assert.ok(Array.isArray(createdProjectPayload.testSuites));
+  assert.equal(createdProjectPayload.testSuites.length, 1);
+  assert.equal(createdProjectPayload.testSuites[0].name, 'Authentication');
+  assert.equal(createdProjectPayload.testSuites[0].cases.length, 2);
+  assert.equal(createdProjectPayload.testSuites[0].cases[0].title, 'User Login');
+  assert.equal(createdProjectPayload.testSuites[0].cases[0].status, 'Not Run');
+  assert.equal(savedProjectState?.id, 'proj_persisted_123');
+});
+
+

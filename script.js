@@ -32,6 +32,7 @@ import {
 import {
   loadProjectsFromBackend,
   createProject,
+  addPromotedProjectToState,
   updateProjectMetadata,
   saveProjectData,
   deleteProjectById,
@@ -152,7 +153,23 @@ async function init() {
       if (typeof initQARunnerAndChecklists === 'function') {
         initQARunnerAndChecklists({
           navigateTo,
-          notify: showToast
+          notify: showToast,
+          onChecklistPromoted: (res) => {
+            if (res && res.project) {
+              addPromotedProjectToState(res.project);
+              showToast(
+                `Promoted "${res.checklist?.title || 'Checklist'}" to project "${res.project?.name || 'Project'}" (${res.summary?.phasesCount || 0} phases, ${res.summary?.suitesCount || 0} suites, ${res.summary?.casesCount || 0} test cases).`,
+                'success'
+              );
+              navigateTo(`/project-details?id=${encodeURIComponent(res.project.id)}`);
+            }
+          },
+          onOpenPromotedProject: (projectId) => {
+            if (projectId) {
+              setActiveProjectId(projectId);
+              navigateTo(`/project-details?id=${encodeURIComponent(projectId)}`);
+            }
+          }
         });
       }
     },
@@ -184,6 +201,9 @@ async function init() {
 }
 
 if (typeof window !== 'undefined') {
+  globalThis.__qavoraGetActiveProjects = () => getProjects();
+  globalThis.__qavoraOnProjectPromoted = (project) => addPromotedProjectToState(project);
+
   window.QavoraApp = {
     authController,
     apiFetch,
@@ -201,6 +221,7 @@ if (typeof window !== 'undefined') {
     updateUserProfileUI,
     loadProjectsFromBackend,
     createProject,
+    addPromotedProjectToState,
     updateProjectMetadata,
     saveProjectData,
     deleteProjectById,

@@ -6,21 +6,37 @@
  * Manages JWT tokens, authenticated user state, and auth lifecycle.
  */
 
+import { apiFetch } from './src/modules/apiClient.js';
+
 // ============================================================================
 // Storage & Constants
 // ============================================================================
 export const CSRF_COOKIE_NAME = 'qavora_csrf_token';
+export const HOST_CSRF_COOKIE_NAME = '__Host-qavora_csrf_token';
+export const CSRF_COOKIE_NAMES = ['__Host-qavora_csrf_token', 'qavora_csrf_token'];
 
-function getCsrfTokenFromCookie() {
+export function getCsrfTokenFromCookie(customCookie) {
   try {
-    if (typeof document !== 'undefined' && typeof document.cookie === 'string') {
-      const pairs = document.cookie.split(';');
+    const raw = typeof customCookie === 'string'
+      ? customCookie
+      : (typeof document !== 'undefined' && typeof document.cookie === 'string' ? document.cookie : '');
+    if (raw) {
+      const pairs = raw.split(';');
+      let hostToken = null;
+      let standardToken = null;
       for (const pair of pairs) {
         const idx = pair.indexOf('=');
-        if (idx > 0 && pair.slice(0, idx).trim() === CSRF_COOKIE_NAME) {
-          return decodeURIComponent(pair.slice(idx + 1).trim());
+        if (idx > 0) {
+          const key = pair.slice(0, idx).trim();
+          const val = pair.slice(idx + 1).trim();
+          if (key === HOST_CSRF_COOKIE_NAME) {
+            hostToken = decodeURIComponent(val);
+          } else if (key === CSRF_COOKIE_NAME) {
+            standardToken = decodeURIComponent(val);
+          }
         }
       }
+      return hostToken || standardToken || null;
     }
   } catch (err) {
     // Ignore cookie access errors
@@ -402,14 +418,8 @@ export const authController = {
    */
   async logout() {
     try {
-      const csrf = getCsrfTokenFromCookie();
-      await fetch('/api/auth/logout', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Accept': 'application/json',
-          ...(csrf ? { 'X-CSRF-Token': csrf } : {})
-        }
+      await apiFetch('/api/auth/logout', {
+        method: 'POST'
       });
     } catch (err) {
       // Ignore network errors during logout
@@ -435,36 +445,15 @@ export const authController = {
   },
 
   /**
-   * Reusable authenticated fetch wrapper that sends HttpOnly cookies, injects CSRF token, and intercepts 401
+   * Consolidated authenticated fetch wrapper that routes through centralized apiClient (apiFetch)
+   * sending HttpOnly cookies, injecting CSRF tokens, and intercepting 401.
    */
   async authenticatedFetch(url, options = {}) {
-    const headers = {
-      ...(options.headers || {})
-    };
+    return apiFetch(url, options);
+  },
 
-    const method = (options.method || 'GET').toUpperCase();
-    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
-      const csrf = getCsrfTokenFromCookie();
-      if (csrf && !headers['X-CSRF-Token'] && !headers['x-csrf-token']) {
-        headers['X-CSRF-Token'] = csrf;
-      }
-    }
-
-    try {
-      const response = await fetch(url, {
-        credentials: 'include',
-        ...options,
-        headers
-      });
-
-      if (response.status === 401) {
-        this.handleUnauthorized();
-      }
-
-      return response;
-    } catch (err) {
-      throw err;
-    }
+  getCsrfTokenFromCookie(customCookie) {
+    return getCsrfTokenFromCookie(customCookie);
   }
 };
 

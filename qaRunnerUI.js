@@ -906,7 +906,7 @@ export function initQARunnerAndChecklists({
     }
   }
 
-  function confirmPromoteChecklist() {
+  async function confirmPromoteChecklist() {
     const targetId = UIState.pendingPromoteChecklistId;
     if (!targetId) return;
 
@@ -929,7 +929,7 @@ export function initQARunnerAndChecklists({
     }
 
     try {
-      const res = promoteChecklistToProject(targetId, {
+      const res = await promoteChecklistToProject(targetId, {
         projectName,
         projectType
       });

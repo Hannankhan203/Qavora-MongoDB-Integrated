@@ -26,6 +26,137 @@ function sanitizeCsvCell(value) {
   return `"${str.replace(/"/g, '""')}"`;
 }
 
+// Helpers to extract test suites and test cases using actual schema (project.testSuites[] & suite.cases[])
+// with backward compatibility for legacy phases[].suites[].testCases[]
+export function extractProjectCases(project) {
+  if (!project) return [];
+  const cases = [];
+  const seenCaseIds = new Set();
+
+  const getPhaseName = (phaseId) => {
+    if (!phaseId) return 'General';
+    const phases = project.testPlan?.phases || project.phases || [];
+    const ph = phases.find(p => p.id === phaseId);
+    return ph ? (ph.name || ph.title || 'General') : 'General';
+  };
+
+  // 1. Primary: actual schema project.testSuites[] and suite.cases[]
+  if (Array.isArray(project.testSuites)) {
+    for (const su of project.testSuites) {
+      if (!su) continue;
+      const suiteTitle = su.title || su.name || 'Untitled Suite';
+      const phaseName = su.phaseName || getPhaseName(su.phaseId);
+      const suiteCases = Array.isArray(su.cases) ? su.cases : (Array.isArray(su.testCases) ? su.testCases : []);
+      for (const tc of suiteCases) {
+        if (!tc) continue;
+        const caseId = tc.id || `tc_${cases.length}`;
+        if (caseId && seenCaseIds.has(caseId)) continue;
+        if (caseId) seenCaseIds.add(caseId);
+        cases.push({
+          ...tc,
+          id: tc.id || caseId,
+          title: tc.title || tc.name || 'Untitled Case',
+          suiteId: su.id,
+          suiteTitle,
+          phaseName,
+          projectId: project.id,
+          projectName: project.name || 'Untitled Project'
+        });
+      }
+    }
+  }
+
+  // 2. Backward compatibility: legacy phases[].suites[].testCases[]
+  const phases = project.phases || project.testPlan?.phases || [];
+  for (const ph of phases) {
+    if (!ph || !Array.isArray(ph.suites)) continue;
+    const phaseName = ph.name || ph.title || 'General';
+    for (const su of ph.suites) {
+      if (!su) continue;
+      const suiteTitle = su.title || su.name || 'Untitled Suite';
+      const suiteCases = Array.isArray(su.cases) ? su.cases : (Array.isArray(su.testCases) ? su.testCases : []);
+      for (const tc of suiteCases) {
+        if (!tc) continue;
+        const caseId = tc.id;
+        if (caseId && seenCaseIds.has(caseId)) continue;
+        if (caseId) seenCaseIds.add(caseId);
+        cases.push({
+          ...tc,
+          id: tc.id || caseId,
+          title: tc.title || tc.name || 'Untitled Case',
+          suiteId: su.id,
+          suiteTitle,
+          phaseName,
+          projectId: project.id,
+          projectName: project.name || 'Untitled Project'
+        });
+      }
+    }
+  }
+
+  return cases;
+}
+
+export function extractProjectSuites(project) {
+  if (!project) return [];
+  const suites = [];
+  const seenSuiteIds = new Set();
+
+  const getPhaseName = (phaseId) => {
+    if (!phaseId) return 'General';
+    const phases = project.testPlan?.phases || project.phases || [];
+    const ph = phases.find(p => p.id === phaseId);
+    return ph ? (ph.name || ph.title || 'General') : 'General';
+  };
+
+  // 1. Primary: actual schema project.testSuites[]
+  if (Array.isArray(project.testSuites)) {
+    for (const su of project.testSuites) {
+      if (!su) continue;
+      const suiteId = su.id || `ts_${suites.length}`;
+      if (suiteId && seenSuiteIds.has(suiteId)) continue;
+      if (suiteId) seenSuiteIds.add(suiteId);
+      const suiteCases = Array.isArray(su.cases) ? su.cases : (Array.isArray(su.testCases) ? su.testCases : []);
+      suites.push({
+        ...su,
+        id: suiteId,
+        title: su.title || su.name || 'Untitled Suite',
+        phaseName: su.phaseName || getPhaseName(su.phaseId),
+        cases: suiteCases,
+        testCases: suiteCases,
+        projectId: project.id,
+        projectName: project.name || 'Untitled Project'
+      });
+    }
+  }
+
+  // 2. Backward compatibility: legacy phases[].suites[]
+  const phases = project.phases || project.testPlan?.phases || [];
+  for (const ph of phases) {
+    if (!ph || !Array.isArray(ph.suites)) continue;
+    const phaseName = ph.name || ph.title || 'General';
+    for (const su of ph.suites) {
+      if (!su) continue;
+      const suiteId = su.id;
+      if (suiteId && seenSuiteIds.has(suiteId)) continue;
+      if (suiteId) seenSuiteIds.add(suiteId);
+      const suiteCases = Array.isArray(su.cases) ? su.cases : (Array.isArray(su.testCases) ? su.testCases : []);
+      suites.push({
+        ...su,
+        id: suiteId,
+        title: su.title || su.name || 'Untitled Suite',
+        phaseName,
+        cases: suiteCases,
+        testCases: suiteCases,
+        projectId: project.id,
+        projectName: project.name || 'Untitled Project'
+      });
+    }
+  }
+
+  return suites;
+}
+
 function exportCsvFile(filename, headers, rows) {
   const bom = '\uFEFF';
   const csvContent = [
@@ -222,13 +353,11 @@ export function renderDataManagementWorkspace() {
   let totalDefects = 0;
 
   for (const p of projects) {
-    if (p.phases && p.phases.length > 0) totalPlans++;
-    for (const ph of (p.phases || [])) {
-      totalSuites += (ph.suites || []).length;
-      for (const su of (ph.suites || [])) {
-        totalCases += (su.testCases || []).length;
-      }
-    }
+    if ((p.phases && p.phases.length > 0) || (p.testPlan?.phases && p.testPlan.phases.length > 0) || (p.testSuites && p.testSuites.length > 0)) totalPlans++;
+    const suites = extractProjectSuites(p);
+    totalSuites += suites.length;
+    const cases = extractProjectCases(p);
+    totalCases += cases.length;
     totalExecs += (p.executions || []).length;
     totalDefects += (p.defects || []).length;
   }
@@ -358,23 +487,20 @@ function exportTestCasesCsv() {
   const rows = [];
 
   for (const p of scoped) {
-    for (const ph of (p.phases || [])) {
-      for (const su of (ph.suites || [])) {
-        for (const tc of (su.testCases || [])) {
-          rows.push([
-            p.name || '',
-            ph.name || '',
-            su.title || '',
-            tc.id || '',
-            tc.title || '',
-            tc.priority || 'Medium',
-            tc.status || 'NOT_RUN',
-            tc.preconditions || '',
-            tc.expectedResult || '',
-            (tc.steps || []).length
-          ]);
-        }
-      }
+    const cases = extractProjectCases(p);
+    for (const tc of cases) {
+      rows.push([
+        p.name || '',
+        tc.phaseName || '',
+        tc.suiteTitle || '',
+        tc.testCaseId || tc.id || '',
+        tc.title || '',
+        tc.priority || 'Medium',
+        tc.status || 'NOT_RUN',
+        tc.preconditions || '',
+        tc.expectedResult || '',
+        Array.isArray(tc.steps) ? tc.steps.length : 0
+      ]);
     }
   }
 
@@ -494,11 +620,8 @@ function generatePrintableReport() {
   let openDefectsCount = 0;
 
   for (const p of scoped) {
-    for (const ph of (p.phases || [])) {
-      for (const su of (ph.suites || [])) {
-        casesCount += (su.testCases || []).length;
-      }
-    }
+    const cases = extractProjectCases(p);
+    casesCount += cases.length;
     for (const ex of (p.executions || [])) {
       execsCount++;
       const st = String(ex.status || '').toUpperCase();
@@ -577,16 +700,19 @@ function generatePrintableReport() {
           </tr>
         </thead>
         <tbody>
-          ${scoped.map(p => `
+          ${scoped.map(p => {
+            const phCount = (p.phases || p.testPlan?.phases || []).length;
+            const suCount = extractProjectSuites(p).length;
+            return `
             <tr>
               <td><strong>${escapeHtml(p.name || 'Untitled')}</strong></td>
               <td>${escapeHtml(p.projectType || 'Standard')}</td>
-              <td>${(p.phases || []).length}</td>
-              <td>${(p.phases || []).reduce((acc, ph) => acc + (ph.suites || []).length, 0)}</td>
+              <td>${phCount}</td>
+              <td>${suCount}</td>
               <td>${(p.executions || []).length}</td>
               <td>${(p.defects || []).length}</td>
             </tr>
-          `).join('')}
+          `;}).join('')}
         </tbody>
       </table>
     </body>
@@ -766,13 +892,11 @@ function openImportPreviewModal(importData) {
   let defects = 0;
 
   for (const p of importData.projects) {
-    if ((p.phases || []).length > 0) plans++;
-    for (const ph of (p.phases || [])) {
-      suites += (ph.suites || []).length;
-      for (const su of (ph.suites || [])) {
-        cases += (su.testCases || su.cases || []).length;
-      }
-    }
+    if ((p.phases || []).length > 0 || (p.testPlan?.phases || []).length > 0 || (p.testSuites || []).length > 0) plans++;
+    const pSuites = extractProjectSuites(p);
+    suites += pSuites.length;
+    const pCases = extractProjectCases(p);
+    cases += pCases.length;
     execs += (p.executions || []).length;
     defects += (p.defects || []).length;
   }

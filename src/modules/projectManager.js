@@ -88,6 +88,25 @@ export async function createProject(payload) {
   return { ok: false, status: res.status, error: res.data?.error || 'Failed to create project.' };
 }
 
+export function addPromotedProjectToState(project) {
+  if (!project || !project.id) return;
+  const current = getProjects();
+  const exists = current.some((p) => p.id === project.id);
+  const updated = exists
+    ? current.map((p) => (p.id === project.id ? { ...p, ...project } : p))
+    : [project, ...current];
+  setProjects(updated);
+  setActiveProjectId(project.id);
+  updateSidebarProjectCounters();
+  renderProjectsGrid();
+  populateProjectsDropdown();
+  renderDashboard();
+  renderProjectDetails(project.id);
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('qavora:storage-invalidate'));
+  }
+}
+
 export async function updateProjectMetadata(projectId, payload) {
   const res = await apiJson(`/api/projects/${encodeURIComponent(projectId)}`, {
     method: 'PATCH',
@@ -103,10 +122,14 @@ export async function updateProjectMetadata(projectId, payload) {
   return { ok: false, status: res.status, error: res.data?.error || 'Failed to update project.' };
 }
 
-export async function saveProjectData(projectId, dataPayload) {
+export async function saveProjectData(projectId, dataPayload, expectedUpdatedAt) {
+  const payload = { ...dataPayload };
+  if (expectedUpdatedAt !== undefined && payload.expectedUpdatedAt === undefined) {
+    payload.expectedUpdatedAt = expectedUpdatedAt;
+  }
   const res = await apiJson(`/api/projects/${encodeURIComponent(projectId)}/data`, {
     method: 'PATCH',
-    body: JSON.stringify(dataPayload)
+    body: JSON.stringify(payload)
   });
   if (res.ok && res.data) {
     const updated = getProjects().map((p) => (p.id === projectId ? res.data : p));
@@ -118,7 +141,7 @@ export async function saveProjectData(projectId, dataPayload) {
     }
     return { ok: true, project: res.data };
   }
-  return { ok: false, status: res.status, error: res.data?.error || 'Failed to save project data.' };
+  return { ok: false, status: res.status, error: res.data?.error || 'Failed to save project data.', data: res.data };
 }
 
 export async function deleteProjectById(projectId) {

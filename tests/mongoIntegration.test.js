@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import jwt from 'jsonwebtoken';
 import { MongoClient } from 'mongodb';
-import { MongoMemoryServer } from 'mongodb-memory-server';
 
 // Safeguard: never allow integration tests to use production MONGODB_URI
 if (process.env.MONGODB_TEST_URI && process.env.MONGODB_URI && process.env.MONGODB_TEST_URI === process.env.MONGODB_URI) {
@@ -14,8 +13,16 @@ let mongod = null;
 let testUri = process.env.MONGODB_TEST_URI?.trim();
 
 if (!testUri) {
-  mongod = await MongoMemoryServer.create();
-  testUri = mongod.getUri();
+  try {
+    const memMod = await import('mongodb-memory-server');
+    const MMS = memMod?.MongoMemoryServer || memMod?.default?.MongoMemoryServer;
+    if (MMS) {
+      mongod = await MMS.create();
+      testUri = mongod.getUri();
+    }
+  } catch {
+    // mongodb-memory-server is optional and not strictly required
+  }
 }
 
 process.env.VERCEL = '1';
@@ -87,6 +94,17 @@ test('MongoDB Integration: /api/health reports connected', async () => {
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.database, 'connected');
+});
+
+test('ISSUE-04: project_artifacts has compound index { projectId: 1, userId: 1 }', async () => {
+  const { connectToDatabase, ensureDatabaseIndexes } = await import('../server.ts');
+  const db = await connectToDatabase();
+  await ensureDatabaseIndexes(db);
+  const indexes = await db.collection('project_artifacts').indexes();
+  const hasCompoundIndex = indexes.some((idx) => {
+    return idx.key && idx.key.projectId === 1 && idx.key.userId === 1;
+  });
+  assert.equal(hasCompoundIndex, true, 'project_artifacts must have compound index on { projectId: 1, userId: 1 }');
 });
 
 test('Authentication: registration, duplicate rejection, login, invalid credentials, and unauthenticated/malformed token rejection', async () => {
@@ -710,6 +728,116 @@ test('QAV-AUDIT-002: Optimistic concurrency control on PATCH /api/checklists/:id
   assert.equal(backwardCompatRes.status, 200);
   const finalChecklist = await backwardCompatRes.json();
   assert.equal(finalChecklist.title, 'Backward Compatible Update');
+});
+
+test('ISSUE-05: Optimistic concurrency control on PATCH /api/projects/:id/data with expectedUpdatedAt', async () => {
+  const { cookieHeader, csrfToken } = await registerAndLogin(
+    'OCC Project User',
+    'occ_project@example.com',
+    'Password123!',
+    '10.0.8.1'
+  );
+  const headers = {
+    'Cookie': cookieHeader,
+    'x-csrf-token': csrfToken,
+    'Content-Type': 'application/json'
+  };
+
+  // 1. Create initial project
+  const createRes = await fetch(`${baseUrl}/api/projects`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      name: 'OCC Project Test',
+      type: 'Web Application',
+      description: 'Testing optimistic concurrency control'
+    })
+  });
+  assert.equal(createRes.status, 201);
+  const createdProject = await createRes.json();
+  const v1UpdatedAt = createdProject.updatedAt;
+  assert.ok(v1UpdatedAt, 'Created project must have updatedAt');
+
+  // 2. Successful update with matching expectedUpdatedAt
+  const update1Res = await fetch(`${baseUrl}/api/projects/${createdProject.id}/data`, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({
+      name: 'OCC Project Test Version 2',
+      expectedUpdatedAt: v1UpdatedAt,
+      testSuites: [
+        {
+          id: 'suite_1',
+          name: 'Smoke Tests',
+          cases: [{ id: 'case_1', title: 'Login Test', status: 'Passed' }]
+        }
+      ]
+    })
+  });
+  assert.equal(update1Res.status, 200);
+  const v2Project = await update1Res.json();
+  const v2UpdatedAt = v2Project.updatedAt;
+  assert.equal(v2Project.name, 'OCC Project Test Version 2');
+  assert.notEqual(v2UpdatedAt, v1UpdatedAt, 'updatedAt must advance');
+  assert.equal(v2Project.testSuites.length, 1);
+
+  // 3. Stale update with old expectedUpdatedAt (v1) returns HTTP 409 Conflict
+  const staleRes = await fetch(`${baseUrl}/api/projects/${createdProject.id}/data`, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({
+      name: 'Stale Overwrite Attempt',
+      expectedUpdatedAt: v1UpdatedAt,
+      testSuites: []
+    })
+  });
+  assert.equal(staleRes.status, 409, 'Stale expectedUpdatedAt must return HTTP 409 Conflict');
+  const staleBody = await staleRes.json();
+  assert.ok(staleBody.error.includes('Conflict'));
+  assert.equal(staleBody.currentUpdatedAt, v2UpdatedAt);
+  assert.equal(staleBody.expectedUpdatedAt, v1UpdatedAt);
+
+  // 4. Verify that the stale update did NOT overwrite newer data
+  const getRes = await fetch(`${baseUrl}/api/projects/${createdProject.id}`, { headers });
+  assert.equal(getRes.status, 200);
+  const currentProject = await getRes.json();
+  assert.equal(currentProject.name, 'OCC Project Test Version 2', 'Project name must not be overwritten by stale update');
+  assert.equal(currentProject.updatedAt, v2UpdatedAt);
+  assert.equal(currentProject.testSuites?.length, 1);
+
+  // 5. Concurrent updates race condition: exactly one succeeds, other gets 409
+  const [resA, resB] = await Promise.all([
+    fetch(`${baseUrl}/api/projects/${createdProject.id}/data`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({
+        name: 'Concurrent Update A',
+        expectedUpdatedAt: v2UpdatedAt
+      })
+    }),
+    fetch(`${baseUrl}/api/projects/${createdProject.id}/data`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({
+        name: 'Concurrent Update B',
+        expectedUpdatedAt: v2UpdatedAt
+      })
+    })
+  ]);
+  const statuses = [resA.status, resB.status].sort();
+  assert.deepEqual(statuses, [200, 409], 'Exactly one concurrent update succeeds and one gets 409');
+
+  // 6. Backward compatibility: update without expectedUpdatedAt succeeds
+  const compatRes = await fetch(`${baseUrl}/api/projects/${createdProject.id}/data`, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({
+      name: 'Backward Compatible Name Update'
+    })
+  });
+  assert.equal(compatRes.status, 200, 'Update without expectedUpdatedAt succeeds');
+  const compatProject = await compatRes.json();
+  assert.equal(compatProject.name, 'Backward Compatible Name Update');
 });
 
 test('QAV-AUDIT-003: Prevent Unauthenticated CSRF Token Issuance & enforce session-bound token refresh', async () => {

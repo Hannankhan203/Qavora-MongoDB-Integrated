@@ -325,7 +325,17 @@ app.use('/api', (req: Request, res: Response, next: NextFunction) => {
   }
 
   const { cookies, duplicates } = parseCookies(req.headers.cookie);
-  if (duplicates.has(CSRF_COOKIE_NAME) || duplicates.has(AUTH_COOKIE_NAME)) {
+  const activeCsrfCookieName = cookies[CSRF_COOKIE_NAME]
+    ? CSRF_COOKIE_NAME
+    : (cookies['__Host-qavora_csrf_token'] ? '__Host-qavora_csrf_token' : (cookies['qavora_csrf_token'] ? 'qavora_csrf_token' : CSRF_COOKIE_NAME));
+
+  if (
+    duplicates.has(CSRF_COOKIE_NAME) ||
+    duplicates.has('__Host-qavora_csrf_token') ||
+    duplicates.has('qavora_csrf_token') ||
+    duplicates.has(AUTH_COOKIE_NAME) ||
+    (Boolean(cookies['__Host-qavora_csrf_token']) && Boolean(cookies['qavora_csrf_token']))
+  ) {
     return res.status(403).json({ error: 'Invalid or duplicate security cookies.' });
   }
 
@@ -334,7 +344,7 @@ app.use('/api', (req: Request, res: Response, next: NextFunction) => {
     return res.status(403).json({ error: 'Invalid or missing CSRF token.' });
   }
 
-  const cookieCsrf = cookies[CSRF_COOKIE_NAME];
+  const cookieCsrf = cookies[activeCsrfCookieName];
   const headerCsrf = req.headers['x-csrf-token'];
 
   if (
@@ -773,6 +783,59 @@ async function ensureMultiTenantUniqueIndex(col: any, collectionName: string): P
   }
 }
 
+async function ensureDatabaseIndexes(database: any = db): Promise<void> {
+  if (!database) return;
+
+  // Ensure multi-tenant compound unique index on projects collection ({ userId: 1, id: 1 })
+  await ensureMultiTenantUniqueIndex(database.collection("projects"), "projects");
+  try {
+    await database.collection("projects").createIndex({ userId: 1, status: 1 });
+    await database.collection("projects").createIndex({ userId: 1 });
+    console.log(`[Qavora Server] Ensured tenant-isolation auxiliary indexes on projects collection (userId, status).`);
+  } catch (idxErr: any) {
+    console.warn(`[Qavora Server] Warning creating auxiliary indexes on projects: ${sanitizeDiagnosticText(idxErr?.message)}`);
+  }
+
+  try {
+    await database.collection("tests").createIndex({ userId: 1 });
+  } catch (idxErr: any) {
+    console.warn(`[Qavora Server] Warning creating index on tests: ${sanitizeDiagnosticText(idxErr?.message)}`);
+  }
+
+  try {
+    await database.collection("users").createIndex({ email: 1 }, { unique: true });
+    await database.collection("users").createIndex({ userId: 1 }, { unique: true });
+    console.log(`[Qavora Server] Ensured unique indexes on users collection (email, userId).`);
+  } catch (idxErr: any) {
+    console.warn(`[Qavora Server] Warning creating unique index on users: ${sanitizeDiagnosticText(idxErr?.message)}`);
+  }
+
+  // Ensure multi-tenant compound unique index on checklists collection ({ userId: 1, id: 1 })
+  await ensureMultiTenantUniqueIndex(database.collection("checklists"), "checklists");
+  try {
+    await database.collection("checklists").createIndex({ userId: 1 });
+    console.log(`[Qavora Server] Ensured tenant-isolation auxiliary index on checklists collection (userId).`);
+  } catch (idxErr: any) {
+    console.warn(`[Qavora Server] Warning creating auxiliary index on checklists: ${sanitizeDiagnosticText(idxErr?.message)}`);
+  }
+
+  try {
+    await database.collection("recovery_snapshots").createIndex({ userId: 1, createdAt: -1 });
+    await database.collection("recovery_snapshots").createIndex({ userId: 1, snapshotId: 1 });
+    console.log(`[Qavora Server] Ensured tenant-isolation indexes on recovery_snapshots collection (userId, createdAt).`);
+  } catch (idxErr: any) {
+    console.warn(`[Qavora Server] Warning creating indexes on recovery_snapshots: ${sanitizeDiagnosticText(idxErr?.message)}`);
+  }
+
+  // Ensure compound index on project_artifacts collection ({ projectId: 1, userId: 1 }) (ISSUE-04)
+  try {
+    await database.collection("project_artifacts").createIndex({ projectId: 1, userId: 1 });
+    console.log(`[Qavora Server] Ensured compound index on project_artifacts collection ({ projectId: 1, userId: 1 }).`);
+  } catch (idxErr: any) {
+    console.warn(`[Qavora Server] Warning creating compound index on project_artifacts: ${sanitizeDiagnosticText(idxErr?.message)}`);
+  }
+}
+
 async function connectToDatabase(): Promise<any> {
   const currentUri = process.env.MONGODB_URI?.trim();
   const currentDbName = process.env.MONGODB_DB || 'qavora';
@@ -816,46 +879,7 @@ async function connectToDatabase(): Promise<any> {
       db = client.db(currentDbName);
       console.log(`[Qavora Server] Successfully connected to MongoDB Atlas (database: ${currentDbName}).`);
 
-      // Ensure multi-tenant compound unique index on projects collection ({ userId: 1, id: 1 })
-      await ensureMultiTenantUniqueIndex(db.collection("projects"), "projects");
-      try {
-        await db.collection("projects").createIndex({ userId: 1, status: 1 });
-        await db.collection("projects").createIndex({ userId: 1 });
-        console.log(`[Qavora Server] Ensured tenant-isolation auxiliary indexes on projects collection (userId, status).`);
-      } catch (idxErr: any) {
-        console.warn(`[Qavora Server] Warning creating auxiliary indexes on projects: ${sanitizeDiagnosticText(idxErr?.message)}`);
-      }
-
-      try {
-        await db.collection("tests").createIndex({ userId: 1 });
-      } catch (idxErr: any) {
-        console.warn(`[Qavora Server] Warning creating index on tests: ${sanitizeDiagnosticText(idxErr?.message)}`);
-      }
-
-      try {
-        await db.collection("users").createIndex({ email: 1 }, { unique: true });
-        await db.collection("users").createIndex({ userId: 1 }, { unique: true });
-        console.log(`[Qavora Server] Ensured unique indexes on users collection (email, userId).`);
-      } catch (idxErr: any) {
-        console.warn(`[Qavora Server] Warning creating unique index on users: ${sanitizeDiagnosticText(idxErr?.message)}`);
-      }
-
-      // Ensure multi-tenant compound unique index on checklists collection ({ userId: 1, id: 1 })
-      await ensureMultiTenantUniqueIndex(db.collection("checklists"), "checklists");
-      try {
-        await db.collection("checklists").createIndex({ userId: 1 });
-        console.log(`[Qavora Server] Ensured tenant-isolation auxiliary index on checklists collection (userId).`);
-      } catch (idxErr: any) {
-        console.warn(`[Qavora Server] Warning creating auxiliary index on checklists: ${sanitizeDiagnosticText(idxErr?.message)}`);
-      }
-
-      try {
-        await db.collection("recovery_snapshots").createIndex({ userId: 1, createdAt: -1 });
-        await db.collection("recovery_snapshots").createIndex({ userId: 1, snapshotId: 1 });
-        console.log(`[Qavora Server] Ensured tenant-isolation indexes on recovery_snapshots collection (userId, createdAt).`);
-      } catch (idxErr: any) {
-        console.warn(`[Qavora Server] Warning creating indexes on recovery_snapshots: ${sanitizeDiagnosticText(idxErr?.message)}`);
-      }
+      await ensureDatabaseIndexes(db);
 
       return db;
     } catch (error: any) {
@@ -2914,7 +2938,13 @@ app.patch("/api/projects/:id/data", requireAuth, async (req: Request, res: Respo
     }
 
     // Strip immutable primary identity keys & ownership fields: never allow body to modify '_id', 'id', or 'userId'
-    const { _id, id, userId: _ignoredUserId, ...allowedData } = req.body;
+    const { _id, id, userId: _ignoredUserId, expectedUpdatedAt, ...allowedData } = req.body;
+
+    if (expectedUpdatedAt !== undefined) {
+      if (typeof expectedUpdatedAt !== 'string' || expectedUpdatedAt.trim() === '') {
+        return res.status(400).json({ error: "Field 'expectedUpdatedAt' must be a non-empty string when provided." });
+      }
+    }
 
     if (Object.keys(allowedData).length === 0) {
       return res.status(400).json({ error: "Request body must contain at least one field to update." });
@@ -2952,9 +2982,11 @@ app.patch("/api/projects/:id/data", requireAuth, async (req: Request, res: Respo
       return res.status(400).json({ error: "Field 'defects' must be an array." });
     }
 
-    // Ensure updatedAt timestamp reflects current modification
-    const now = new Date().toISOString();
-    allowedData.updatedAt = now;
+    // Ensure updatedAt timestamp reflects current modification and advances
+    const nowIso = new Date().toISOString();
+    allowedData.updatedAt = (expectedUpdatedAt && nowIso === expectedUpdatedAt)
+      ? new Date(Date.now() + 1).toISOString()
+      : nowIso;
 
     if (!db) {
       return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
@@ -2982,7 +3014,26 @@ app.patch("/api/projects/:id/data", requireAuth, async (req: Request, res: Respo
       });
     }
 
-    const query = buildUserProjectQuery(cleanId, userId);
+    const baseQuery = buildUserProjectQuery(cleanId, userId);
+    let query: any;
+    if (expectedUpdatedAt) {
+      if (baseQuery.$or) {
+        query = {
+          $and: [
+            baseQuery,
+            { updatedAt: expectedUpdatedAt }
+          ]
+        };
+      } else {
+        query = {
+          ...baseQuery,
+          updatedAt: expectedUpdatedAt
+        };
+      }
+    } else {
+      query = baseQuery;
+    }
+
     const updateOp: any = { $set: allowedData };
     if (Object.keys(unsetFields).length > 0) {
       updateOp.$unset = unsetFields;
@@ -2995,6 +3046,17 @@ app.patch("/api/projects/:id/data", requireAuth, async (req: Request, res: Respo
     );
 
     if (!result) {
+      if (expectedUpdatedAt) {
+        // Project may exist for this user but its updatedAt did not match expectedUpdatedAt (concurrent modification)
+        const existingDoc = await db.collection("projects").findOne(baseQuery);
+        if (existingDoc) {
+          return res.status(409).json({
+            error: "Conflict: The project has been modified by another operation.",
+            currentUpdatedAt: existingDoc.updatedAt || null,
+            expectedUpdatedAt
+          });
+        }
+      }
       return res.status(404).json({ error: "Project not found." });
     }
 
@@ -3008,7 +3070,7 @@ app.patch("/api/projects/:id/data", requireAuth, async (req: Request, res: Respo
             userId,
             kind,
             items,
-            updatedAt: now
+            updatedAt: allowedData.updatedAt
           }
         },
         { upsert: true }
@@ -3712,5 +3774,5 @@ async function closeDatabase(): Promise<void> {
   connectionPromise = null;
 }
 
-export { connectToDatabase, closeDatabase, loginRateLimiter, registerRateLimiter, ensureMultiTenantUniqueIndex };
+export { connectToDatabase, closeDatabase, loginRateLimiter, registerRateLimiter, ensureMultiTenantUniqueIndex, ensureDatabaseIndexes };
 export default app;

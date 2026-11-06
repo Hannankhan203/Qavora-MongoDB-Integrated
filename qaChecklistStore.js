@@ -7,6 +7,7 @@
  */
 
 import { authController } from './authController.js';
+import { apiFetch } from './src/modules/apiClient.js';
 import {
   queueChecklistCreate,
   queueChecklistUpdate,
@@ -154,9 +155,10 @@ export function safeStorageRemove(key) {
 
 function normalizeTestRecord(rawTest) {
   if (!rawTest || typeof rawTest !== 'object') return null;
-  const text = typeof rawTest.text === 'string'
-    ? rawTest.text.trim()
-    : (rawTest.text !== undefined && rawTest.text !== null ? String(rawTest.text).trim() : '');
+  const rawTextVal = rawTest.text !== undefined && rawTest.text !== null ? rawTest.text : rawTest.title;
+  const text = typeof rawTextVal === 'string'
+    ? rawTextVal.trim()
+    : (rawTextVal !== undefined && rawTextVal !== null ? String(rawTextVal).trim() : '');
   const testId = typeof rawTest.testId === 'string'
     ? rawTest.testId.trim()
     : (rawTest.testId !== undefined && rawTest.testId !== null ? String(rawTest.testId).trim() : '');
@@ -671,11 +673,7 @@ export const ChecklistAPI = {
     };
 
     try {
-      const fetchFn = (typeof authController !== 'undefined' && typeof authController.authenticatedFetch === 'function')
-        ? authController.authenticatedFetch.bind(authController)
-        : fetch;
-
-      const res = await fetchFn(url, {
+      const res = await apiFetch(url, {
         ...options,
         headers,
         cache: 'no-store'
@@ -2010,12 +2008,15 @@ export function buildProjectFromChecklist(checklist, options = {}) {
 
     sectionsToConvert.forEach((sec, sIdx) => {
       const suiteId = 'ts_' + generateStableId('s');
-      const isDirect = sec.type === 'direct' || !sec.name || !String(sec.name).trim();
+      const rawSecName = typeof sec.name === 'string' && sec.name.trim()
+        ? sec.name.trim()
+        : (typeof sec.title === 'string' && sec.title.trim() ? sec.title.trim() : '');
+      const isDirect = sec.type === 'direct' || !rawSecName;
       const suiteName = isDirect
         ? sectionsToConvert.length === 1
           ? `${phaseName} — General Suite`
           : `${phaseName} — General Suite ${sIdx + 1}`
-        : String(sec.name).trim();
+        : rawSecName;
       const suiteCategory = isDirect ? 'Functional' : inferFormalSuiteCategory(suiteName);
       const secNotesText = Array.isArray(sec.notes)
         ? sec.notes.map(n => n.text).filter(Boolean).join('\n')
@@ -2067,10 +2068,12 @@ export function buildProjectFromChecklist(checklist, options = {}) {
       formalSuites.push({
         id: suiteId,
         phaseId: formalPhaseId,
+        title: suiteName,
         name: suiteName,
         category: suiteCategory,
         tags: !isDirect ? [suiteName] : [],
         description: secNotesText || `Test suite converted from "${suiteName}" in ${phaseName}.`,
+        cases: formalCases,
         testCases: formalCases,
         sourceChecklistSectionId: sec.id || null,
         createdAt: nowIso,
@@ -2125,7 +2128,8 @@ export function buildProjectFromChecklist(checklist, options = {}) {
   };
 }
 
-export function promoteChecklistToProject(checklistId, options = {}) {
+export async function promoteChecklistToProject(checklistOrId, options = {}) {
+  const checklistId = typeof checklistOrId === 'string' ? checklistOrId : checklistOrId?.id;
   if (!checklistId || typeof checklistId !== 'string') {
     return {
       ok: false,
@@ -2156,15 +2160,18 @@ export function promoteChecklistToProject(checklistId, options = {}) {
 
   try {
     const { checklists } = loadAllChecklists();
-    const targetIdx = checklists.findIndex(c => c.id === checklistId);
-    if (targetIdx === -1) {
+    let targetIdx = checklists.findIndex(c => c.id === checklistId);
+    let targetChecklist = targetIdx !== -1 ? checklists[targetIdx] : null;
+    if (!targetChecklist && typeof checklistOrId === 'object' && checklistOrId !== null) {
+      targetChecklist = checklistOrId;
+    }
+
+    if (!targetChecklist) {
       return {
         ok: false,
         error: 'The selected QA checklist could not be found in storage.'
       };
     }
-
-    const targetChecklist = checklists[targetIdx];
     if (!Array.isArray(targetChecklist.phases) || targetChecklist.phases.length === 0) {
       return {
         ok: false,
@@ -2224,8 +2231,39 @@ export function promoteChecklistToProject(checklistId, options = {}) {
       options.beforeProjectWrite(newProject);
     }
 
-    // Step 1: Persist formal project to qavora_projects_v1
-    const updatedProjects = [newProject, ...existingProjects];
+    // Step 1: Persist formal project to MongoDB Atlas via existing POST /api/projects API
+    let persistedProject = newProject;
+    try {
+      if (typeof options.createProject === 'function') {
+        const createRes = await options.createProject(newProject);
+        if (createRes && createRes.ok && createRes.project) {
+          persistedProject = createRes.project;
+        }
+      } else if (typeof authController !== 'undefined' && authController.isAuthenticated()) {
+        const apiRes = await apiFetch('/api/projects', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: JSON.stringify(newProject)
+        });
+        if (apiRes.ok) {
+          const data = await apiRes.json().catch(() => null);
+          if (data && data.id) {
+            persistedProject = data;
+          }
+        } else {
+          const errData = await apiRes.json().catch(() => ({}));
+          console.warn('[Qavora] POST /api/projects notice during promotion:', errData?.error);
+        }
+      }
+    } catch (apiErr) {
+      console.warn('[Qavora] Error persisting promoted project to MongoDB:', apiErr);
+    }
+
+    // Persist formal project to local cache for offline availability
+    const updatedProjects = [persistedProject, ...existingProjects.filter(p => p.id !== persistedProject.id)];
     const writeProjRes = safeStorageWrite(
       PROJECTS_STORAGE_KEY,
       JSON.stringify(updatedProjects),
@@ -2241,17 +2279,21 @@ export function promoteChecklistToProject(checklistId, options = {}) {
     }
 
     if (typeof options.afterProjectWriteBeforeChecklistLink === 'function') {
-      options.afterProjectWriteBeforeChecklistLink(newProject);
+      options.afterProjectWriteBeforeChecklistLink(persistedProject);
     }
 
     // Step 2: Record promotedProjectId & promotedAt on the checklist WITHOUT modifying title, phases, tests, or completion states
     const updatedChecklist = {
       ...targetChecklist,
-      promotedProjectId: newProject.id,
-      promotedAt: newProject.promotedAt
+      promotedProjectId: persistedProject.id,
+      promotedAt: persistedProject.promotedAt || newProject.promotedAt
     };
     const nextChecklists = [...checklists];
-    nextChecklists[targetIdx] = updatedChecklist;
+    if (targetIdx !== -1) {
+      nextChecklists[targetIdx] = updatedChecklist;
+    } else {
+      nextChecklists.push(updatedChecklist);
+    }
 
     const writeChkRes = saveAllChecklists(nextChecklists);
     if (!writeChkRes.ok) {
@@ -2263,14 +2305,22 @@ export function promoteChecklistToProject(checklistId, options = {}) {
       };
     }
 
-    // Notify persistence hook to ensure promoted project is saved to MongoDB Atlas
+    // Synchronize checklist promotion metadata with MongoDB Atlas
+    if (typeof ChecklistsPersistence !== 'undefined' && typeof ChecklistsPersistence.syncChecklist === 'function') {
+      try {
+        ChecklistsPersistence.syncChecklist(updatedChecklist);
+      } catch (_syncErr) {}
+    }
+
+    // Notify persistence and workspace state hooks to ensure promoted project immediately appears in Projects workspace
     if (typeof options.onProjectSaved === 'function') {
       try {
-        options.onProjectSaved(newProject);
+        await options.onProjectSaved(persistedProject);
       } catch (_hookErr) {}
-    } else if (typeof globalThis !== 'undefined' && typeof globalThis.__qavoraOnProjectPromoted === 'function') {
+    }
+    if (typeof globalThis !== 'undefined' && typeof globalThis.__qavoraOnProjectPromoted === 'function') {
       try {
-        globalThis.__qavoraOnProjectPromoted(newProject);
+        await globalThis.__qavoraOnProjectPromoted(persistedProject);
       } catch (_hookErr) {}
     }
 
@@ -2278,7 +2328,7 @@ export function promoteChecklistToProject(checklistId, options = {}) {
 
     return {
       ok: true,
-      project: newProject,
+      project: persistedProject,
       checklist: updatedChecklist,
       summary: {
         phasesCount: preview.phasesCount,

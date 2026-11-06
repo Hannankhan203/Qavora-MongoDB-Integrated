@@ -6,7 +6,7 @@
  * Handles HttpOnly cookie credentials, CSRF token injection, and 401 interception.
  */
 
-import authController from '../../authController.js';
+import authController, { getCsrfTokenFromCookie } from '../../authController.js';
 
 export async function apiFetch(url, options = {}) {
   const headers = {
@@ -18,11 +18,15 @@ export async function apiFetch(url, options = {}) {
   if (
     reqMethod !== 'GET' &&
     reqMethod !== 'HEAD' &&
-    reqMethod !== 'OPTIONS' &&
-    typeof authController !== 'undefined' &&
-    typeof authController.getCsrfToken === 'function'
+    reqMethod !== 'OPTIONS'
   ) {
-    const csrf = authController.getCsrfToken();
+    let csrf = null;
+    if (typeof authController !== 'undefined' && typeof authController.getCsrfToken === 'function') {
+      csrf = authController.getCsrfToken();
+    }
+    if (!csrf && typeof getCsrfTokenFromCookie === 'function') {
+      csrf = getCsrfTokenFromCookie();
+    }
     if (csrf && !headers['X-CSRF-Token'] && !headers['x-csrf-token']) {
       headers['X-CSRF-Token'] = csrf;
     }
