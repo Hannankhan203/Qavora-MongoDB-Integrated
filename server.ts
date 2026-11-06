@@ -2932,6 +2932,102 @@ app.get("/api/checklists/:id", requireAuth, async (req: Request, res: Response) 
   }
 });
 
+// ============================================================================
+// NoSQL Operator & Prototype-Pollution Security Validation (QAV-AUDIT-001)
+// ============================================================================
+
+/**
+ * Returns true if a key represents a NoSQL operator, dotted path, or prototype pollution vector.
+ */
+function isProhibitedKey(key: string): boolean {
+  if (typeof key !== 'string') return true;
+  if (key.startsWith('$')) return true;
+  if (key.includes('.')) return true;
+  if (key === '__proto__' || key === 'constructor' || key === 'prototype') return true;
+  return false;
+}
+
+/**
+ * Recursively inspects every object, nested object, and array element.
+ * Returns true if any prohibited key is detected at any depth.
+ */
+function containsProhibitedKeys(value: unknown, seen = new WeakSet()): boolean {
+  if (value === null || typeof value !== 'object') {
+    return false;
+  }
+
+  if (seen.has(value)) {
+    return false;
+  }
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      if (containsProhibitedKeys(value[i], seen)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Check own enumerable property names
+  const ownKeys = Object.keys(value);
+  for (const k of ownKeys) {
+    if (isProhibitedKey(k)) {
+      return true;
+    }
+    if (containsProhibitedKeys((value as any)[k], seen)) {
+      return true;
+    }
+  }
+
+  // Also check non-enumerable own properties via getOwnPropertyNames
+  const ownNames = Object.getOwnPropertyNames(value);
+  for (const k of ownNames) {
+    if (isProhibitedKey(k)) {
+      return true;
+    }
+  }
+
+  // Explicit prototype pollution checks
+  if (
+    Object.prototype.hasOwnProperty.call(value, '__proto__') ||
+    Object.prototype.hasOwnProperty.call(value, 'constructor') ||
+    Object.prototype.hasOwnProperty.call(value, 'prototype')
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+const CHECKLIST_POST_ALLOWED_FIELDS = new Set([
+  'id',
+  'schemaVersion',
+  'title',
+  'documentNotes',
+  'phases',
+  'promotedProjectId',
+  'promotedAt',
+  'completedAt',
+  'completedBy',
+  'originalPrompt',
+  'createdAt',
+  'updatedAt'
+]);
+
+const CHECKLIST_PATCH_ALLOWED_FIELDS = new Set([
+  'title',
+  'schemaVersion',
+  'documentNotes',
+  'phases',
+  'promotedProjectId',
+  'promotedAt',
+  'completedAt',
+  'completedBy',
+  'originalPrompt'
+]);
+
 // 3. POST /api/checklists - Create and persist a new checklist for the authenticated user
 app.post("/api/checklists", requireAuth, async (req: Request, res: Response) => {
   try {
@@ -2941,7 +3037,28 @@ app.post("/api/checklists", requireAuth, async (req: Request, res: Response) => 
     const authReq = req as AuthenticatedRequest;
     const userId = authReq.user!.userId;
 
-    // Never accept userId or _id from request body; always derive userId from authenticated JWT
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+      return res.status(400).json({ error: "Request body must be a valid JSON object." });
+    }
+
+    // 1. Recursive prohibited key detection (NoSQL operators, dotted paths, prototype pollution)
+    if (containsProhibitedKeys(req.body)) {
+      return res.status(400).json({ error: "Invalid request: Request body contains unsafe or prohibited property keys." });
+    }
+
+    // 2. Reject attempts to supply server-controlled fields
+    if ('_id' in req.body || 'userId' in req.body) {
+      return res.status(400).json({ error: "Cannot set server-controlled fields (_id, userId)." });
+    }
+
+    // 3. Top-level field allowlisting
+    const bodyKeys = Object.keys(req.body);
+    for (const key of bodyKeys) {
+      if (!CHECKLIST_POST_ALLOWED_FIELDS.has(key)) {
+        return res.status(400).json({ error: `Invalid or unrecognized field: '${key}'.` });
+      }
+    }
+
     const {
       title,
       id,
@@ -2950,13 +3067,30 @@ app.post("/api/checklists", requireAuth, async (req: Request, res: Response) => 
       phases,
       promotedProjectId,
       promotedAt,
-      userId: _ignoredUserId,
-      _id: _ignoredId,
-      ...extraData
-    } = req.body || {};
+      completedAt,
+      completedBy,
+      originalPrompt,
+      createdAt
+    } = req.body;
 
     if (title !== undefined && (typeof title !== 'string' || title.trim() === '')) {
       return res.status(400).json({ error: "Field 'title' must be a non-empty string if provided." });
+    }
+
+    if (id !== undefined && (typeof id !== 'string' || id.trim() === '')) {
+      return res.status(400).json({ error: "Field 'id' must be a non-empty string if provided." });
+    }
+
+    if (phases !== undefined && !Array.isArray(phases)) {
+      return res.status(400).json({ error: "Field 'phases' must be an array if provided." });
+    }
+
+    if (documentNotes !== undefined && !Array.isArray(documentNotes)) {
+      return res.status(400).json({ error: "Field 'documentNotes' must be an array if provided." });
+    }
+
+    if (schemaVersion !== undefined && (typeof schemaVersion !== 'number' || !Number.isFinite(schemaVersion))) {
+      return res.status(400).json({ error: "Field 'schemaVersion' must be a number if provided." });
     }
 
     const trimmedTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Untitled QA Checklist';
@@ -2966,23 +3100,21 @@ app.post("/api/checklists", requireAuth, async (req: Request, res: Response) => 
 
     const now = new Date().toISOString();
 
-    const newChecklist: any = {
+    const newChecklist = {
       id: checklistId,
       userId,
       schemaVersion: typeof schemaVersion === 'number' ? schemaVersion : 1,
       title: trimmedTitle,
-      createdAt: extraData.createdAt || now,
+      createdAt: typeof createdAt === 'string' && createdAt.trim() ? createdAt.trim() : now,
       updatedAt: now,
       documentNotes: Array.isArray(documentNotes) ? documentNotes : [],
       phases: Array.isArray(phases) ? phases : [],
       promotedProjectId: typeof promotedProjectId === 'string' && promotedProjectId.trim() ? promotedProjectId.trim() : null,
       promotedAt: typeof promotedAt === 'string' && promotedAt.trim() ? promotedAt.trim() : null,
-      ...extraData
+      completedAt: typeof completedAt === 'string' && completedAt.trim() ? completedAt.trim() : null,
+      completedBy: completedBy !== undefined ? completedBy : null,
+      originalPrompt: typeof originalPrompt === 'string' ? originalPrompt : ''
     };
-
-    delete newChecklist._id;
-    newChecklist.id = checklistId;
-    newChecklist.userId = userId;
 
     const result = await db.collection("checklists").insertOne(newChecklist);
 
@@ -3013,37 +3145,104 @@ app.patch("/api/checklists/:id", requireAuth, async (req: Request, res: Response
     const userId = authReq.user!.userId;
     const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
 
-    if (!req.body || typeof req.body !== 'object') {
-      return res.status(400).json({ error: "Request body must be an object." });
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+      return res.status(400).json({ error: "Request body must be a valid JSON object." });
     }
 
-    const allowedData: any = { ...req.body };
-    // Strictly strip protected fields so clients cannot overwrite them
-    delete allowedData._id;
-    delete allowedData.userId;
-    delete allowedData.id;
+    // 1. Recursive prohibited key detection (NoSQL operators, dotted paths, prototype pollution)
+    if (containsProhibitedKeys(req.body)) {
+      return res.status(400).json({ error: "Invalid request: Request body contains unsafe or prohibited property keys." });
+    }
 
-    if (allowedData.title !== undefined) {
-      if (typeof allowedData.title !== 'string' || allowedData.title.trim() === '') {
+    // 2. Reject attempts to modify server-controlled or immutable fields
+    if ('_id' in req.body || 'userId' in req.body || 'id' in req.body) {
+      return res.status(400).json({ error: "Cannot modify server-controlled or immutable fields (_id, userId, id)." });
+    }
+
+    // 3. Top-level field allowlisting
+    const bodyKeys = Object.keys(req.body);
+    if (bodyKeys.length === 0) {
+      return res.status(400).json({ error: "Request body cannot be empty." });
+    }
+
+    for (const key of bodyKeys) {
+      if (!CHECKLIST_PATCH_ALLOWED_FIELDS.has(key)) {
+        return res.status(400).json({ error: `Invalid or unrecognized field: '${key}'.` });
+      }
+    }
+
+    const updateDoc: Record<string, any> = {};
+
+    if (req.body.title !== undefined) {
+      if (typeof req.body.title !== 'string' || req.body.title.trim() === '') {
         return res.status(400).json({ error: "Field 'title' must be a non-empty string." });
       }
-      allowedData.title = allowedData.title.trim();
+      updateDoc.title = req.body.title.trim();
     }
 
-    if (allowedData.phases !== undefined && !Array.isArray(allowedData.phases)) {
-      return res.status(400).json({ error: "Field 'phases' must be an array." });
+    if (req.body.schemaVersion !== undefined) {
+      if (typeof req.body.schemaVersion !== 'number' || !Number.isFinite(req.body.schemaVersion)) {
+        return res.status(400).json({ error: "Field 'schemaVersion' must be a number." });
+      }
+      updateDoc.schemaVersion = req.body.schemaVersion;
     }
 
-    if (allowedData.documentNotes !== undefined && !Array.isArray(allowedData.documentNotes)) {
-      return res.status(400).json({ error: "Field 'documentNotes' must be an array." });
+    if (req.body.phases !== undefined) {
+      if (!Array.isArray(req.body.phases)) {
+        return res.status(400).json({ error: "Field 'phases' must be an array." });
+      }
+      updateDoc.phases = req.body.phases;
     }
 
-    allowedData.updatedAt = new Date().toISOString();
+    if (req.body.documentNotes !== undefined) {
+      if (!Array.isArray(req.body.documentNotes)) {
+        return res.status(400).json({ error: "Field 'documentNotes' must be an array." });
+      }
+      updateDoc.documentNotes = req.body.documentNotes;
+    }
+
+    if (req.body.promotedProjectId !== undefined) {
+      if (req.body.promotedProjectId !== null && typeof req.body.promotedProjectId !== 'string') {
+        return res.status(400).json({ error: "Field 'promotedProjectId' must be a string or null." });
+      }
+      updateDoc.promotedProjectId = typeof req.body.promotedProjectId === 'string' ? req.body.promotedProjectId.trim() : null;
+    }
+
+    if (req.body.promotedAt !== undefined) {
+      if (req.body.promotedAt !== null && typeof req.body.promotedAt !== 'string') {
+        return res.status(400).json({ error: "Field 'promotedAt' must be a string or null." });
+      }
+      updateDoc.promotedAt = typeof req.body.promotedAt === 'string' ? req.body.promotedAt.trim() : null;
+    }
+
+    if (req.body.completedAt !== undefined) {
+      if (req.body.completedAt !== null && typeof req.body.completedAt !== 'string') {
+        return res.status(400).json({ error: "Field 'completedAt' must be a string or null." });
+      }
+      updateDoc.completedAt = typeof req.body.completedAt === 'string' ? req.body.completedAt.trim() : null;
+    }
+
+    if (req.body.completedBy !== undefined) {
+      updateDoc.completedBy = req.body.completedBy;
+    }
+
+    if (req.body.originalPrompt !== undefined) {
+      if (typeof req.body.originalPrompt !== 'string') {
+        return res.status(400).json({ error: "Field 'originalPrompt' must be a string." });
+      }
+      updateDoc.originalPrompt = req.body.originalPrompt;
+    }
+
+    if (Object.keys(updateDoc).length === 0) {
+      return res.status(400).json({ error: "No valid fields provided for update." });
+    }
+
+    updateDoc.updatedAt = new Date().toISOString();
 
     const query = buildUserChecklistQuery(idParam, userId);
     const result = await db.collection("checklists").findOneAndUpdate(
       query,
-      { $set: allowedData },
+      { $set: updateDoc },
       { returnDocument: 'after' }
     );
 

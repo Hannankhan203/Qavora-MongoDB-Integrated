@@ -343,3 +343,198 @@ test('CSRF Session Binding: rejects cross-session token reuse, tampered tokens, 
   assert.match(logoutSetCookies, /qavora_auth_token=;/);
   assert.match(logoutSetCookies, /qavora_csrf_token=;/);
 });
+
+test('QAV-AUDIT-001: NoSQL operator injection and prototype pollution protection on POST and PATCH /api/checklists', async () => {
+  const user1 = await registerAndLogin('Audit User 1', 'audit1@example.com', 'Password123!', '10.0.6.1');
+  const user2 = await registerAndLogin('Audit User 2', 'audit2@example.com', 'Password123!', '10.0.6.2');
+
+  const headers1 = {
+    'Content-Type': 'application/json',
+    Cookie: user1.cookieHeader,
+    'X-CSRF-Token': user1.csrfToken
+  };
+
+  const headers2 = {
+    'Content-Type': 'application/json',
+    Cookie: user2.cookieHeader,
+    'X-CSRF-Token': user2.csrfToken
+  };
+
+  // 1. Create a legitimate baseline checklist for User 1
+  const baselineRes = await fetch(`${baseUrl}/api/checklists`, {
+    method: 'POST',
+    headers: headers1,
+    body: JSON.stringify({
+      title: 'Original Baseline Checklist',
+      phases: [{ id: 'p1', name: 'Initial Phase' }]
+    })
+  });
+  assert.equal(baselineRes.status, 201);
+  const baseline = await baselineRes.json();
+  const checklistId = baseline.id;
+  assert.ok(checklistId);
+
+  // Helper to assert database mutation did not happen to baseline
+  const assertBaselineUnchanged = async () => {
+    const checkRes = await fetch(`${baseUrl}/api/checklists/${checklistId}`, {
+      headers: { Cookie: user1.cookieHeader }
+    });
+    assert.equal(checkRes.status, 200);
+    const data = await checkRes.json();
+    assert.equal(data.title, 'Original Baseline Checklist');
+    assert.ok(data.userId);
+    assert.equal(data.id, checklistId);
+  };
+
+  // Helper to get total checklists count for User 1
+  const getUser1ChecklistCount = async () => {
+    const listRes = await fetch(`${baseUrl}/api/checklists`, {
+      headers: { Cookie: user1.cookieHeader }
+    });
+    assert.equal(listRes.status, 200);
+    const list = await listRes.json();
+    return list.length;
+  };
+
+  // 2. POST /api/checklists — Attack payloads must return HTTP 400 and create NO document
+  const maliciousPostPayloads = [
+    // $rename and $set operator keys
+    JSON.stringify({ '$rename': { title: 'hacked_title' } }),
+    JSON.stringify({ '$set': { admin: true } }),
+    // $where key
+    JSON.stringify({ '$where': 'sleep(5000)' }),
+    // Dotted-path injection
+    JSON.stringify({ 'phases.0.items.0.status': 'passed' }),
+    // Nested MongoDB operator keys inside object/array
+    JSON.stringify({ title: 'Bad', phases: [{ '$rename': { name: 'hacked' } }] }),
+    JSON.stringify({ title: 'Bad', phases: [{ sections: [{ '$set': { status: 'passed' } }] }] }),
+    JSON.stringify({ title: 'Bad', documentNotes: [{ '$where': '1 == 1' }] }),
+    // Prototype pollution keys (transmitted as raw JSON)
+    '{"title": "Proto", "__proto__": {"polluted": true}}',
+    '{"title": "Proto", "constructor": {"prototype": {"polluted": true}}}',
+    '{"title": "Proto", "prototype": {"polluted": true}}',
+    // Dangerous keys inside arrays and deeply nested structures
+    '{"title": "Deep", "phases": [{"sections": [{"tests": [{"__proto__": {"admin": true}}]}]}]}',
+    '{"title": "Deep", "phases": [{"sections": [{"tests": [{"deep": {"$where": "sleep"}}]}]}]}',
+    '{"title": "Deep", "phases": [{"sections": [{"tests": [{"deep": {"phases.0.bad": true}}]}]}]}',
+    // Attempts to control or set server-controlled fields
+    JSON.stringify({ title: 'Owned', userId: 'victim_user_id' }),
+    JSON.stringify({ title: 'Owned', _id: '60b8d295f1d2b834b8e8f8a1' }),
+    // Unrecognized / disallowed top-level fields
+    JSON.stringify({ title: 'Extra', maliciousProperty: 'payload' })
+  ];
+
+  for (const rawPayload of maliciousPostPayloads) {
+    const countBefore = await getUser1ChecklistCount();
+    const res = await fetch(`${baseUrl}/api/checklists`, {
+      method: 'POST',
+      headers: headers1,
+      body: rawPayload
+    });
+    assert.equal(res.status, 400, `POST should reject malicious payload with 400: ${rawPayload.substring(0, 60)}`);
+    const body = await res.json();
+    assert.ok(body.error, 'Should return error message');
+    const countAfter = await getUser1ChecklistCount();
+    assert.equal(countAfter, countBefore, 'Malicious POST must not insert document into database');
+  }
+
+  // 3. PATCH /api/checklists/:id — Attack payloads must return HTTP 400 and cause NO mutation
+  const maliciousPatchPayloads = [
+    // $rename and $set operator keys
+    JSON.stringify({ '$rename': { title: 'hacked' } }),
+    JSON.stringify({ '$set': { title: 'hacked' } }),
+    // $where key
+    JSON.stringify({ '$where': 'sleep(5000)' }),
+    // Dotted-path injection
+    JSON.stringify({ 'phases.0.items.0.status': 'hacked' }),
+    // Nested operator keys
+    JSON.stringify({ phases: [{ '$set': { status: 'hacked' } }] }),
+    JSON.stringify({ documentNotes: [{ '$rename': { text: 'bad' } }] }),
+    // Prototype pollution keys
+    '{"__proto__": {"polluted": true}}',
+    '{"constructor": {"prototype": {"polluted": true}}}',
+    '{"prototype": {"polluted": true}}',
+    // Deeply nested prohibited keys
+    '{"phases": [{"sections": [{"__proto__": {"admin": true}}]}]}',
+    '{"phases": [{"sections": [{"$set": { "admin": true }}]}]}',
+    '{"phases": [{"sections": [{"tests": [{"sub.prop": 1}]}]}]}',
+    // Attempts to modify server-controlled or immutable fields
+    JSON.stringify({ userId: 'attacker_user_id' }),
+    JSON.stringify({ _id: '60b8d295f1d2b834b8e8f8a1' }),
+    JSON.stringify({ id: 'new_id_attempt' }),
+    // Empty body or unrecognized fields
+    JSON.stringify({}),
+    JSON.stringify({ unapprovedField: 'value' })
+  ];
+
+  for (const rawPayload of maliciousPatchPayloads) {
+    const res = await fetch(`${baseUrl}/api/checklists/${checklistId}`, {
+      method: 'PATCH',
+      headers: headers1,
+      body: rawPayload
+    });
+    assert.equal(res.status, 400, `PATCH should reject malicious payload with 400: ${rawPayload.substring(0, 60)}`);
+    const body = await res.json();
+    assert.ok(body.error, 'Should return error message');
+    await assertBaselineUnchanged();
+  }
+
+  // 4. Verify tenant isolation: User 2 cannot access or mutate User 1's checklist
+  const u2Patch = await fetch(`${baseUrl}/api/checklists/${checklistId}`, {
+    method: 'PATCH',
+    headers: headers2,
+    body: JSON.stringify({ title: 'Hacked by User 2' })
+  });
+  assert.equal(u2Patch.status, 404, 'User 2 should not be able to find or update User 1 checklist');
+  await assertBaselineUnchanged();
+
+  // 5. Verify legitimate operations with strings containing '$', '.', 'constructor', 'prototype'
+  const legitPostRes = await fetch(`${baseUrl}/api/checklists`, {
+    method: 'POST',
+    headers: headers1,
+    body: JSON.stringify({
+      title: 'Valid Checklist: Cost is $100.00. Call constructor.prototype in text.',
+      documentNotes: [{ text: 'Release v1.2 note: Price $25.50.' }],
+      phases: [
+        {
+          name: 'Phase 1.0 — Smoke Testing',
+          sections: [
+            {
+              type: 'category',
+              name: 'Section 1.1',
+              tests: [
+                {
+                  text: 'Verify pricing display shows $10.00 correctly.',
+                  priority: 'High'
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    })
+  });
+  assert.equal(legitPostRes.status, 201, 'Legitimate checklist creation should succeed');
+  const legitCreated = await legitPostRes.json();
+  assert.ok(legitCreated.id);
+  assert.equal(legitCreated.title, 'Valid Checklist: Cost is $100.00. Call constructor.prototype in text.');
+
+  // Legitimate update on the newly created checklist
+  const legitPatchRes = await fetch(`${baseUrl}/api/checklists/${legitCreated.id}`, {
+    method: 'PATCH',
+    headers: headers1,
+    body: JSON.stringify({
+      title: 'Updated Title: Price is now $150.00 (v2.0 constructor text).',
+      phases: [
+        {
+          name: 'Updated Phase 2.0',
+          sections: []
+        }
+      ]
+    })
+  });
+  assert.equal(legitPatchRes.status, 200, 'Legitimate checklist update should succeed');
+  const legitUpdated = await legitPatchRes.json();
+  assert.equal(legitUpdated.title, 'Updated Title: Price is now $150.00 (v2.0 constructor text).');
+  assert.equal(legitUpdated.phases.length, 1);
+});
