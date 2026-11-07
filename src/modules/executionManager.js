@@ -54,7 +54,18 @@ export async function startExecutionRun({ name, environment, buildVersion, notes
     status: 'In Progress'
   };
 
-  return saveProjectData(currentProject.id, { activeRun });
+  const res = await saveProjectData(
+    currentProject.id,
+    { activeRun },
+    undefined,
+    {
+      entityType: 'executionRun',
+      entityId: activeRun.id,
+      operationType: 'CREATE',
+      delta: { activeRun }
+    }
+  );
+  return { ...res, activeRun };
 }
 
 /**
@@ -112,10 +123,21 @@ export async function completeExecutionRun(projectId = null) {
     ? [completedRun, ...currentProject.executionRuns]
     : [completedRun];
 
-  return saveProjectData(currentProject.id, {
-    activeRun: null,
-    executionRuns
-  });
+  const res = await saveProjectData(
+    currentProject.id,
+    {
+      activeRun: null,
+      executionRuns
+    },
+    undefined,
+    {
+      entityType: 'executionRun',
+      entityId: completedRun.id,
+      operationType: 'STATUS_CHANGE',
+      delta: { activeRun: null, executionRun: completedRun }
+    }
+  );
+  return { ...res, executionRun: completedRun };
 }
 
 /**
@@ -128,7 +150,18 @@ export async function discardActiveRun(projectId = null) {
 
   if (!currentProject) return { ok: false, error: 'No active project selected.' };
 
-  return saveProjectData(currentProject.id, { activeRun: null });
+  const discardedId = currentProject.activeRun?.id || currentProject.id;
+  return saveProjectData(
+    currentProject.id,
+    { activeRun: null },
+    undefined,
+    {
+      entityType: 'executionRun',
+      entityId: discardedId,
+      operationType: 'UPDATE',
+      delta: { activeRun: null }
+    }
+  );
 }
 
 export function openStartRunModal() {
@@ -283,10 +316,21 @@ export async function saveExecutionResult(executionData, projectId = null) {
     });
   }
 
-  return saveProjectData(project.id, {
-    executions,
-    testSuites: updatedSuites
-  });
+  const res = await saveProjectData(
+    project.id,
+    {
+      executions,
+      testSuites: updatedSuites
+    },
+    undefined,
+    {
+      entityType: 'execution',
+      entityId: record.id,
+      operationType: idx >= 0 ? 'UPDATE' : 'CREATE',
+      delta: { execution: record }
+    }
+  );
+  return { ...res, execution: record };
 }
 
 /**
@@ -1459,6 +1503,7 @@ export function initExecutionEventListeners() {
       const logDefectToggle = document.getElementById('exec-log-defect-toggle');
       let defects = Array.isArray(curProject.defects) ? [...curProject.defects] : [];
 
+      let createdDefect = null;
       if (statusVal === 'Fail' && logDefectToggle?.checked) {
         const defTitle = document.getElementById('exec-defect-title')?.value?.trim();
         const defSeverity = document.getElementById('exec-defect-severity')?.value || 'High';
@@ -1469,7 +1514,7 @@ export function initExecutionEventListeners() {
         const defectCount = defects.length + 1;
         const defectDisplayId = `DEF-${String(defectCount).padStart(3, '0')}`;
 
-        const newDefect = {
+        createdDefect = {
           id: generateStableId('def'),
           defectId: defectDisplayId,
           title: defTitle || `[${displayId}] ${_activeExecutingCase.title} - Verification Failed`,
@@ -1486,7 +1531,7 @@ export function initExecutionEventListeners() {
           updatedAt: new Date().toISOString()
         };
 
-        defects = [newDefect, ...defects];
+        defects = [createdDefect, ...defects];
       }
 
       // Update executions array
@@ -1515,11 +1560,24 @@ export function initExecutionEventListeners() {
           })
         : [];
 
-      const saveRes = await saveProjectData(curProject.id, {
-        executions,
-        defects,
-        testSuites: updatedSuites
-      });
+      const saveRes = await saveProjectData(
+        curProject.id,
+        {
+          executions,
+          defects,
+          testSuites: updatedSuites
+        },
+        undefined,
+        {
+          entityType: 'execution',
+          entityId: execRecord.id,
+          operationType: 'CREATE',
+          delta: {
+            execution: execRecord,
+            ...(createdDefect ? { defect: createdDefect } : {})
+          }
+        }
+      );
 
       if (saveRes.ok) {
         updateSidebarProjectCounters();

@@ -706,7 +706,7 @@ function generatePrintableReport() {
             return `
             <tr>
               <td><strong>${escapeHtml(p.name || 'Untitled')}</strong></td>
-              <td>${escapeHtml(p.projectType || 'Standard')}</td>
+              <td>${escapeHtml(p.type || p.projectType || 'Standard')}</td>
               <td>${phCount}</td>
               <td>${suCount}</td>
               <td>${(p.executions || []).length}</td>
@@ -835,11 +835,19 @@ function parseAndValidateImportPayload(fileText, fileName, fileSize) {
       phases = testPlan.phases.map(ph => ({ ...ph }));
     }
 
+    const resolvedType = (typeof p.type === 'string' && p.type.trim())
+      ? p.type.trim()
+      : ((typeof p.projectType === 'string' && p.projectType.trim())
+          ? p.projectType.trim()
+          : 'Web Application');
+
     return {
       id: projId,
       name: projName,
       description: p.description || '',
-      projectType: p.projectType || 'Web Application',
+      type: resolvedType,
+      projectType: resolvedType,
+      version: p.version || '',
       status: p.status || 'Active',
       testPlan,
       testSuites,

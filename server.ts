@@ -1988,6 +1988,80 @@ app.delete("/api/data/recovery-snapshot", requireAuth, async (req: Request, res:
   }
 });
 
+const MAX_BSON_DOC_BYTES = 14 * 1024 * 1024; // 14 MB safe threshold below MongoDB 16 MB limit
+const ARTIFACT_FIELDS = ['testSuites', 'executions', 'defects'] as const;
+
+function getApproxBsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value ?? null), 'utf8');
+}
+
+// Helper to query project documents by string business 'id' or BSON '_id' scoped by authenticated userId
+function buildUserProjectQuery(idParam: string | string[], userId: string) {
+  const cleanId = Array.isArray(idParam) ? idParam[0] : idParam;
+  if (ObjectId.isValid(cleanId) && cleanId.length === 24) {
+    return {
+      $or: [
+        { id: cleanId, userId },
+        { _id: new ObjectId(cleanId), userId }
+      ]
+    };
+  }
+  return { id: cleanId, userId };
+}
+
+async function hydrateProjectWithArtifacts(project: any, userId: string): Promise<any> {
+  if (!project || !db) return project;
+  const hydrated = { ...project };
+  const candidateIds = Array.from(
+    new Set(
+      [
+        project.id ? String(project.id) : null,
+        project._id ? String(project._id) : null
+      ].filter((v): v is string => Boolean(v))
+    )
+  );
+  if (candidateIds.length === 0) return hydrated;
+
+  const projectIdFilter = candidateIds.length === 1 ? candidateIds[0] : { $in: candidateIds };
+  const artifacts = await db
+    .collection("project_artifacts")
+    .find({ projectId: projectIdFilter, userId })
+    .toArray();
+
+  for (const art of artifacts) {
+    if (art && typeof art.kind === 'string' && Array.isArray(art.items)) {
+      hydrated[art.kind] = art.items;
+    }
+  }
+  return hydrated;
+}
+
+function extractArtifactsFromProjects(projects: any[], userId: string): any[] {
+  if (!Array.isArray(projects)) return [];
+  const artifactDocs: any[] = [];
+  const nowIso = new Date().toISOString();
+
+  for (const proj of projects) {
+    if (!proj || typeof proj !== 'object') continue;
+    const projectId = String(proj.id || proj._id || '');
+    if (!projectId) continue;
+    const updatedAt = typeof proj.updatedAt === 'string' && proj.updatedAt ? proj.updatedAt : nowIso;
+
+    for (const field of ARTIFACT_FIELDS) {
+      if (Array.isArray(proj[field])) {
+        artifactDocs.push({
+          projectId,
+          userId,
+          kind: field,
+          items: proj[field],
+          updatedAt
+        });
+      }
+    }
+  }
+  return artifactDocs;
+}
+
 // 10. POST /api/data/rollback - Restore workspace state from durable recovery snapshot
 app.post("/api/data/rollback", requireAuth, async (req: Request, res: Response) => {
   try {
@@ -2008,8 +2082,21 @@ app.post("/api/data/rollback", requireAuth, async (req: Request, res: Response) 
     }
 
     const targetSnapshot = snapshots[0];
-    const restoredProjects = Array.isArray(targetSnapshot.projects) ? targetSnapshot.projects : [];
-    const restoredChecklists = Array.isArray(targetSnapshot.checklists) ? targetSnapshot.checklists : [];
+    const restoredProjects = Array.isArray(targetSnapshot.projects)
+      ? targetSnapshot.projects.map((p: any) => {
+          const copy = { ...p, userId };
+          delete copy._id;
+          return copy;
+        })
+      : [];
+    const restoredChecklists = Array.isArray(targetSnapshot.checklists)
+      ? targetSnapshot.checklists.map((c: any) => {
+          const copy = { ...c, userId };
+          delete copy._id;
+          return copy;
+        })
+      : [];
+    const restoredArtifacts = extractArtifactsFromProjects(restoredProjects, userId);
 
     let txSuccess = false;
     if (mongoClientInstance && typeof mongoClientInstance.startSession === 'function') {
@@ -2018,14 +2105,16 @@ app.post("/api/data/rollback", requireAuth, async (req: Request, res: Response) 
         session = mongoClientInstance.startSession();
         await session.withTransaction(async () => {
           await db.collection("projects").deleteMany({ userId }, { session });
+          await db.collection("project_artifacts").deleteMany({ userId }, { session });
           await db.collection("checklists").deleteMany({ userId }, { session });
           if (restoredProjects.length > 0) {
-            const projs = restoredProjects.map((p: any) => ({ ...p, userId }));
-            await db.collection("projects").insertMany(projs, { session });
+            await db.collection("projects").insertMany(restoredProjects, { session });
+          }
+          if (restoredArtifacts.length > 0) {
+            await db.collection("project_artifacts").insertMany(restoredArtifacts, { session });
           }
           if (restoredChecklists.length > 0) {
-            const chks = restoredChecklists.map((c: any) => ({ ...c, userId }));
-            await db.collection("checklists").insertMany(chks, { session });
+            await db.collection("checklists").insertMany(restoredChecklists, { session });
           }
           await db.collection("recovery_snapshots").deleteOne({ _id: targetSnapshot._id }, { session });
         });
@@ -2039,27 +2128,34 @@ app.post("/api/data/rollback", requireAuth, async (req: Request, res: Response) 
 
     if (!txSuccess) {
       const currentProjects = await db.collection("projects").find({ userId }).toArray();
+      const currentArtifacts = await db.collection("project_artifacts").find({ userId }).toArray();
       const currentChecklists = await db.collection("checklists").find({ userId }).toArray();
 
       try {
         await db.collection("projects").deleteMany({ userId });
+        await db.collection("project_artifacts").deleteMany({ userId });
         await db.collection("checklists").deleteMany({ userId });
         if (restoredProjects.length > 0) {
-          const projs = restoredProjects.map((p: any) => ({ ...p, userId }));
-          await db.collection("projects").insertMany(projs);
+          await db.collection("projects").insertMany(restoredProjects);
+        }
+        if (restoredArtifacts.length > 0) {
+          await db.collection("project_artifacts").insertMany(restoredArtifacts);
         }
         if (restoredChecklists.length > 0) {
-          const chks = restoredChecklists.map((c: any) => ({ ...c, userId }));
-          await db.collection("checklists").insertMany(chks);
+          await db.collection("checklists").insertMany(restoredChecklists);
         }
         await db.collection("recovery_snapshots").deleteOne({ _id: targetSnapshot._id });
       } catch (opErr: any) {
         console.error(`[Qavora Server] Rollback failed midway; restoring pre-rollback state...`);
         try {
           await db.collection("projects").deleteMany({ userId });
+          await db.collection("project_artifacts").deleteMany({ userId });
           await db.collection("checklists").deleteMany({ userId });
           if (currentProjects.length > 0) {
             await db.collection("projects").insertMany(currentProjects);
+          }
+          if (currentArtifacts.length > 0) {
+            await db.collection("project_artifacts").insertMany(currentArtifacts);
           }
           if (currentChecklists.length > 0) {
             await db.collection("checklists").insertMany(currentChecklists);
@@ -2215,6 +2311,7 @@ app.post("/api/data/import", requireAuth, async (req: Request, res: Response) =>
           id: su?.id || `su_${projId}_${sIdx}`,
           phaseId: su?.phaseId || (testPlan.phases[0]?.id || `ph_${projId}_0`),
           title: su?.title || su?.name || `Suite ${sIdx + 1}`,
+          name: su?.name || su?.title || `Suite ${sIdx + 1}`,
           description: su?.description || '',
           cases: normalizedCases,
           tags: Array.isArray(su?.tags) ? su.tags : [],
@@ -2227,12 +2324,20 @@ app.post("/api/data/import", requireAuth, async (req: Request, res: Response) =>
       const executions = Array.isArray(p.executions) ? p.executions : [];
       const defects = Array.isArray(p.defects) ? p.defects : [];
 
+      // QAV-FINAL-002: Normalize canonical 'type' property while supporting legacy 'projectType'
+      const resolvedType = (typeof p.type === 'string' && p.type.trim())
+        ? p.type.trim()
+        : ((typeof p.projectType === 'string' && p.projectType.trim())
+            ? p.projectType.trim()
+            : 'Web Application');
+
       const cleanProj: any = {
         id: projId,
         userId,
         name: projName,
         description: typeof p.description === 'string' ? p.description : '',
-        projectType: typeof p.projectType === 'string' ? p.projectType : 'Web Application',
+        type: resolvedType,
+        version: typeof p.version === 'string' ? p.version.trim() : (typeof p.version === 'number' ? String(p.version) : ''),
         status: typeof p.status === 'string' ? p.status : 'Active',
         testPlan,
         testSuites,
@@ -2245,6 +2350,11 @@ app.post("/api/data/import", requireAuth, async (req: Request, res: Response) =>
       if (p.sourceChecklistId) cleanProj.sourceChecklistId = p.sourceChecklistId;
       if (p.promotedFromChecklistTitle) cleanProj.promotedFromChecklistTitle = p.promotedFromChecklistTitle;
       if (p.promotedAt) cleanProj.promotedAt = p.promotedAt;
+      if (typeof p.environment === 'string') cleanProj.environment = p.environment;
+      if (typeof p.baseUrl === 'string') cleanProj.baseUrl = p.baseUrl;
+      if (Array.isArray(p.tags)) cleanProj.tags = p.tags;
+      if (Array.isArray(p.executionRuns)) cleanProj.executionRuns = p.executionRuns;
+      if (p.activeRun !== undefined) cleanProj.activeRun = p.activeRun;
 
       delete cleanProj._id;
       normalizedProjects.push(cleanProj);
@@ -2282,8 +2392,12 @@ app.post("/api/data/import", requireAuth, async (req: Request, res: Response) =>
     }
 
     if (mode === 'replace') {
-      // 1. Fetch current user data and persist durable pre-replacement snapshot
-      const existingProjects = await db.collection("projects").find({ userId }).toArray();
+      // 1. Fetch current user data and hydrate projects with their artifacts before creating recovery snapshot
+      const rawExistingProjects = await db.collection("projects").find({ userId }).toArray();
+      const existingProjects = await Promise.all(
+        rawExistingProjects.map((p: any) => hydrateProjectWithArtifacts(p, userId))
+      );
+      const existingArtifacts = await db.collection("project_artifacts").find({ userId }).toArray();
       const existingChecklists = await db.collection("checklists").find({ userId }).toArray();
 
       const snapshotDoc = {
@@ -2303,6 +2417,8 @@ app.post("/api/data/import", requireAuth, async (req: Request, res: Response) =>
 
       await db.collection("recovery_snapshots").insertOne(snapshotDoc);
 
+      const newArtifactDocs = extractArtifactsFromProjects(normalizedProjects, userId);
+
       // 2. Perform replace atomically with MongoDB transaction if available
       let txSuccess = false;
       if (mongoClientInstance && typeof mongoClientInstance.startSession === 'function') {
@@ -2311,9 +2427,13 @@ app.post("/api/data/import", requireAuth, async (req: Request, res: Response) =>
           session = mongoClientInstance.startSession();
           await session.withTransaction(async () => {
             await db.collection("projects").deleteMany({ userId }, { session });
+            await db.collection("project_artifacts").deleteMany({ userId }, { session });
             await db.collection("checklists").deleteMany({ userId }, { session });
             if (normalizedProjects.length > 0) {
               await db.collection("projects").insertMany(normalizedProjects, { session });
+            }
+            if (newArtifactDocs.length > 0) {
+              await db.collection("project_artifacts").insertMany(newArtifactDocs, { session });
             }
             if (normalizedChecklists.length > 0) {
               await db.collection("checklists").insertMany(normalizedChecklists, { session });
@@ -2328,14 +2448,21 @@ app.post("/api/data/import", requireAuth, async (req: Request, res: Response) =>
       }
 
       if (!txSuccess) {
-        // Safe non-transactional replace with snapshot rollback recovery if anything fails:
+        // Safe non-transactional replace with snapshot & artifact rollback recovery if anything fails:
         try {
           await db.collection("projects").deleteMany({ userId });
+          await db.collection("project_artifacts").deleteMany({ userId });
           await db.collection("checklists").deleteMany({ userId });
           if (normalizedProjects.length > 0) {
             const resP = await db.collection("projects").insertMany(normalizedProjects);
             if (resP.insertedCount !== normalizedProjects.length) {
               throw new Error(`Incomplete project insertion: expected ${normalizedProjects.length}, inserted ${resP.insertedCount}`);
+            }
+          }
+          if (newArtifactDocs.length > 0) {
+            const resA = await db.collection("project_artifacts").insertMany(newArtifactDocs);
+            if (resA.insertedCount !== newArtifactDocs.length) {
+              throw new Error(`Incomplete artifact insertion: expected ${newArtifactDocs.length}, inserted ${resA.insertedCount}`);
             }
           }
           if (normalizedChecklists.length > 0) {
@@ -2348,13 +2475,18 @@ app.post("/api/data/import", requireAuth, async (req: Request, res: Response) =>
           console.error(`[Qavora Server] Replace import failed midway; restoring from snapshot...`);
           try {
             await db.collection("projects").deleteMany({ userId });
+            await db.collection("project_artifacts").deleteMany({ userId });
             await db.collection("checklists").deleteMany({ userId });
-            if (snapshotDoc.projects.length > 0) {
-              await db.collection("projects").insertMany(snapshotDoc.projects.map((p: any) => ({ ...p, userId })));
+            if (rawExistingProjects.length > 0) {
+              await db.collection("projects").insertMany(rawExistingProjects.map((p: any) => ({ ...p, userId })));
             }
-            if (snapshotDoc.checklists.length > 0) {
-              await db.collection("checklists").insertMany(snapshotDoc.checklists.map((c: any) => ({ ...c, userId })));
+            if (existingArtifacts.length > 0) {
+              await db.collection("project_artifacts").insertMany(existingArtifacts.map((a: any) => ({ ...a, userId })));
             }
+            if (existingChecklists.length > 0) {
+              await db.collection("checklists").insertMany(existingChecklists.map((c: any) => ({ ...c, userId })));
+            }
+            await db.collection("recovery_snapshots").deleteOne({ snapshotId: snapshotDoc.snapshotId, userId });
           } catch (rescueErr: any) {
             console.error(`[Qavora Server FATAL] Auto-recovery failed: ${rescueErr?.message}`);
           }
@@ -2388,6 +2520,7 @@ app.post("/api/data/import", requireAuth, async (req: Request, res: Response) =>
           p.id = `proj_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
           p.name = `${p.name} (Imported)`;
         }
+        existingProjIds.add(p.id);
       }
 
       for (const c of normalizedChecklists) {
@@ -2395,13 +2528,58 @@ app.post("/api/data/import", requireAuth, async (req: Request, res: Response) =>
           c.id = `chk_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
           c.title = `${c.title} (Imported)`;
         }
+        existingChkIds.add(c.id);
       }
 
-      if (normalizedProjects.length > 0) {
-        await db.collection("projects").insertMany(normalizedProjects);
+      const mergeProjectIds = normalizedProjects.map((p: any) => p.id);
+      const mergeArtifactDocs = extractArtifactsFromProjects(normalizedProjects, userId);
+
+      let txSuccess = false;
+      if (mongoClientInstance && typeof mongoClientInstance.startSession === 'function') {
+        let session: any = null;
+        try {
+          session = mongoClientInstance.startSession();
+          await session.withTransaction(async () => {
+            if (mergeProjectIds.length > 0) {
+              await db.collection("project_artifacts").deleteMany(
+                { userId, projectId: { $in: mergeProjectIds } },
+                { session }
+              );
+            }
+            if (normalizedProjects.length > 0) {
+              await db.collection("projects").insertMany(normalizedProjects, { session });
+            }
+            if (mergeArtifactDocs.length > 0) {
+              await db.collection("project_artifacts").insertMany(mergeArtifactDocs, { session });
+            }
+            if (normalizedChecklists.length > 0) {
+              await db.collection("checklists").insertMany(normalizedChecklists, { session });
+            }
+          });
+          txSuccess = true;
+        } catch (txErr: any) {
+          console.warn(`[Qavora Server] Merge import transaction unsupported or failed: ${sanitizeDiagnosticText(txErr?.message)}`);
+        } finally {
+          if (session) await session.endSession().catch(() => {});
+        }
       }
-      if (normalizedChecklists.length > 0) {
-        await db.collection("checklists").insertMany(normalizedChecklists);
+
+      if (!txSuccess) {
+        if (mergeProjectIds.length > 0) {
+          await db.collection("project_artifacts").deleteMany({
+            userId,
+            projectId: { $in: mergeProjectIds }
+          });
+        }
+        if (normalizedProjects.length > 0) {
+          await db.collection("projects").insertMany(normalizedProjects);
+        }
+        if (mergeArtifactDocs.length > 0) {
+          await db.collection("project_artifacts").insertMany(mergeArtifactDocs);
+        }
+        if (normalizedChecklists.length > 0) {
+          await db.collection("checklists").insertMany(normalizedChecklists);
+        }
       }
 
       return res.json({
@@ -2485,20 +2663,6 @@ app.post("/api/tests", requireAuth, async (req: Request, res: Response) => {
   }
 });
 
-// Helper to query project documents by string business 'id' or BSON '_id' scoped by authenticated userId
-function buildUserProjectQuery(idParam: string | string[], userId: string) {
-  const cleanId = Array.isArray(idParam) ? idParam[0] : idParam;
-  if (ObjectId.isValid(cleanId) && cleanId.length === 24) {
-    return {
-      $or: [
-        { id: cleanId, userId },
-        { _id: new ObjectId(cleanId), userId }
-      ]
-    };
-  }
-  return { id: cleanId, userId };
-}
-
 // ============================================================================
 // Projects & Workspaces MongoDB API Endpoints
 // ============================================================================
@@ -2514,29 +2678,112 @@ function requireDatabase(req: Request, res: Response, next: NextFunction) {
 
 app.use('/api/projects', requireDatabase);
 
-const MAX_BSON_DOC_BYTES = 14 * 1024 * 1024; // 14 MB safe threshold below MongoDB 16 MB limit
-const ARTIFACT_FIELDS = ['testSuites', 'executions', 'defects'] as const;
+const ALLOWED_PROJECT_CREATE_FIELDS = new Set([
+  'id',
+  'name',
+  'type',
+  'projectType',
+  'version',
+  'description',
+  'status',
+  'environment',
+  'environments',
+  'baseUrl',
+  'tags',
+  'createdAt',
+  'updatedAt',
+  'testPlan',
+  'testSuites',
+  'phases',
+  'executions',
+  'executionRuns',
+  'activeRun',
+  'defects',
+  'team',
+  'automation',
+  'testData',
+  'sourceChecklistId',
+  'promotedFromChecklistTitle',
+  'promotedAt',
+  'testCaseCount',
+  'executedTests',
+  'passedTests',
+  'failedTests',
+  'blockedTests',
+  'skippedTests',
+  'notRunTests',
+  'passRate',
+  'totalDefects',
+  'openDefects',
+  'inProgressDefects',
+  'resolvedDefects',
+  'closedDefects',
+  'criticalDefects'
+]);
 
-function getApproxBsonBytes(value: unknown): number {
-  return Buffer.byteLength(JSON.stringify(value ?? null), 'utf8');
-}
+const ALLOWED_PROJECT_PUT_FIELDS = new Set([
+  'name',
+  'type',
+  'version',
+  'description',
+  'status',
+  'environment',
+  'baseUrl',
+  'tags'
+]);
 
-async function hydrateProjectWithArtifacts(project: any, userId: string): Promise<any> {
-  if (!project || !db) return project;
-  const hydrated = { ...project };
-  const projectId = String(project.id || project._id);
-  const artifacts = await db
-    .collection("project_artifacts")
-    .find({ projectId, userId })
-    .toArray();
+const ALLOWED_PROJECT_PATCH_FIELDS = new Set([
+  'name',
+  'type',
+  'version',
+  'description',
+  'status',
+  'environment',
+  'baseUrl',
+  'tags',
+  'expectedUpdatedAt'
+]);
 
-  for (const art of artifacts) {
-    if (art && typeof art.kind === 'string' && Array.isArray(art.items)) {
-      hydrated[art.kind] = art.items;
-    }
-  }
-  return hydrated;
-}
+const ALLOWED_PROJECT_DATA_PATCH_FIELDS = new Set([
+  'name',
+  'type',
+  'projectType',
+  'version',
+  'description',
+  'status',
+  'environment',
+  'environments',
+  'baseUrl',
+  'tags',
+  'testPlan',
+  'testSuites',
+  'phases',
+  'executions',
+  'executionRuns',
+  'activeRun',
+  'defects',
+  'team',
+  'automation',
+  'testData',
+  'sourceChecklistId',
+  'promotedFromChecklistTitle',
+  'promotedAt',
+  'testCaseCount',
+  'executedTests',
+  'passedTests',
+  'failedTests',
+  'blockedTests',
+  'skippedTests',
+  'notRunTests',
+  'passRate',
+  'totalDefects',
+  'openDefects',
+  'inProgressDefects',
+  'resolvedDefects',
+  'closedDefects',
+  'criticalDefects',
+  'expectedUpdatedAt'
+]);
 
 // 1. GET /api/projects - Fetch all projects for the authenticated user (with optional status filter)
 app.get("/api/projects", requireAuth, async (req: Request, res: Response) => {
@@ -2600,9 +2847,26 @@ app.post("/api/projects", requireAuth, async (req: Request, res: Response) => {
   try {
     const authReq = req as AuthenticatedRequest;
     const userId = authReq.user!.userId;
+    const body = req.body;
 
-    // Never accept userId from request body as authoritative; always derive from authenticated JWT identity
-    const { name, type, version, description, status, id, userId: _ignoredUserId, ...extraData } = req.body || {};
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return res.status(400).json({ error: "Request body must be a valid JSON object." });
+    }
+
+    if (containsProhibitedKeys(body)) {
+      return res.status(400).json({
+        error: "Request body contains prohibited keys (NoSQL operators, dotted paths, or prototype pollution keys are not allowed)."
+      });
+    }
+
+    const disallowedCreateKeys = Object.keys(body).filter((k) => !ALLOWED_PROJECT_CREATE_FIELDS.has(k));
+    if (disallowedCreateKeys.length > 0) {
+      return res.status(400).json({
+        error: `Disallowed field(s) in project payload: ${disallowedCreateKeys.join(', ')}.`
+      });
+    }
+
+    const { name, type, version, description, status, id, ...extraData } = body;
 
     if (typeof name !== 'string' || name.trim() === '') {
       return res.status(400).json({ error: "Field 'name' is required and must be a non-empty string." });
@@ -2618,12 +2882,27 @@ app.post("/api/projects", requireAuth, async (req: Request, res: Response) => {
       : `proj_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
     const now = new Date().toISOString();
+    const resolvedType = (typeof type === 'string' && type.trim())
+      ? type.trim()
+      : ((typeof extraData.projectType === 'string' && extraData.projectType.trim())
+          ? extraData.projectType.trim()
+          : 'Web Application');
+
+    // Enforce per-user project ID uniqueness (prevents duplicate offline submissions)
+    const existingForUser = await db.collection("projects").findOne({ id: projectId, userId });
+    if (existingForUser) {
+      return res.status(409).json({
+        error: "A project with this ID already exists.",
+        projectId,
+        currentUpdatedAt: existingForUser.updatedAt || null
+      });
+    }
 
     const newProject: any = {
       id: projectId,
       userId,
       name: trimmedName,
-      type: typeof type === 'string' && type.trim() ? type.trim() : 'Web Application',
+      type: resolvedType,
       status: ['Active', 'Completed', 'Archived'].includes(status) ? status : 'Active',
       version: typeof version === 'string' ? version.trim() : (typeof version === 'number' ? String(version) : ''),
       description: typeof description === 'string' ? description.trim() : '',
@@ -2645,6 +2924,12 @@ app.post("/api/projects", requireAuth, async (req: Request, res: Response) => {
       defects: Array.isArray(extraData.defects) ? extraData.defects : []
     };
 
+    if (Array.isArray(extraData.executionRuns)) newProject.executionRuns = extraData.executionRuns;
+    if (extraData.activeRun !== undefined) newProject.activeRun = extraData.activeRun;
+    if (typeof extraData.environment === 'string') newProject.environment = extraData.environment.trim();
+    if (Array.isArray(extraData.environments)) newProject.environments = extraData.environments;
+    if (typeof extraData.baseUrl === 'string') newProject.baseUrl = extraData.baseUrl.trim();
+    if (Array.isArray(extraData.tags)) newProject.tags = extraData.tags;
     if (extraData.sourceChecklistId) newProject.sourceChecklistId = extraData.sourceChecklistId;
     if (extraData.promotedFromChecklistTitle) newProject.promotedFromChecklistTitle = extraData.promotedFromChecklistTitle;
     if (extraData.promotedAt) newProject.promotedAt = extraData.promotedAt;
@@ -2673,7 +2958,31 @@ app.put("/api/projects/:id", requireAuth, async (req: Request, res: Response) =>
   try {
     const authReq = req as AuthenticatedRequest;
     const userId = authReq.user!.userId;
-    const { name, type, version, description, status } = req.body || {};
+    const body = req.body;
+
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return res.status(400).json({ error: "Request body must be a valid JSON object." });
+    }
+
+    if (containsProhibitedKeys(body)) {
+      return res.status(400).json({
+        error: "Request body contains prohibited keys (NoSQL operators, dotted paths, or prototype pollution keys are not allowed)."
+      });
+    }
+
+    const keys = Object.keys(body);
+    if (keys.length === 0) {
+      return res.status(400).json({ error: "Update payload cannot be empty." });
+    }
+
+    const disallowedPutKeys = keys.filter((k) => !ALLOWED_PROJECT_PUT_FIELDS.has(k));
+    if (disallowedPutKeys.length > 0) {
+      return res.status(400).json({
+        error: `Disallowed field(s) in update payload: ${disallowedPutKeys.join(', ')}.`
+      });
+    }
+
+    const { name, type, version, description, status, environment, baseUrl, tags } = body;
 
     const updateFields: any = {
       updatedAt: new Date().toISOString()
@@ -2708,6 +3017,27 @@ app.put("/api/projects/:id", requireAuth, async (req: Request, res: Response) =>
       updateFields.status = status;
     }
 
+    if (environment !== undefined) {
+      if (typeof environment !== 'string') {
+        return res.status(400).json({ error: "Field 'environment' must be a string." });
+      }
+      updateFields.environment = environment.trim();
+    }
+
+    if (baseUrl !== undefined) {
+      if (typeof baseUrl !== 'string') {
+        return res.status(400).json({ error: "Field 'baseUrl' must be a string." });
+      }
+      updateFields.baseUrl = baseUrl.trim();
+    }
+
+    if (tags !== undefined) {
+      if (!Array.isArray(tags) || !tags.every((t: unknown) => typeof t === 'string')) {
+        return res.status(400).json({ error: "Field 'tags' must be an array of strings." });
+      }
+      updateFields.tags = tags.map((t: string) => t.trim());
+    }
+
     const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
 
     if (!db) {
@@ -2725,7 +3055,8 @@ app.put("/api/projects/:id", requireAuth, async (req: Request, res: Response) =>
       return res.status(404).json({ error: "Project not found." });
     }
 
-    return res.json(result);
+    const hydrated = await hydrateProjectWithArtifacts(result, userId);
+    return res.json(hydrated);
   } catch (error: any) {
     const safeError = (error?.message || "Internal server error").replace(
       /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
@@ -2737,36 +3068,6 @@ app.put("/api/projects/:id", requireAuth, async (req: Request, res: Response) =>
 });
 
 // 4b. PATCH /api/projects/:id - Strictly whitelisted partial project update
-const ALLOWED_PROJECT_PATCH_FIELDS = new Set([
-  'name',
-  'type',
-  'version',
-  'description',
-  'status',
-  'environment',
-  'baseUrl',
-  'tags',
-  'expectedUpdatedAt'
-]);
-
-function hasMongoOperatorInjection(value: unknown): boolean {
-  if (value === null || typeof value !== 'object') {
-    return false;
-  }
-  if (Array.isArray(value)) {
-    return value.some((item) => hasMongoOperatorInjection(item));
-  }
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    if (k.startsWith('$') || k.includes('.')) {
-      return true;
-    }
-    if (hasMongoOperatorInjection(v)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 app.patch("/api/projects/:id", requireAuth, async (req: Request, res: Response) => {
   try {
     const authReq = req as AuthenticatedRequest;
@@ -2782,8 +3083,10 @@ app.patch("/api/projects/:id", requireAuth, async (req: Request, res: Response) 
       return res.status(400).json({ error: "Update payload cannot be empty." });
     }
 
-    if (hasMongoOperatorInjection(body)) {
-      return res.status(400).json({ error: "Invalid update payload: MongoDB operators are not permitted." });
+    if (containsProhibitedKeys(body)) {
+      return res.status(400).json({
+        error: "Invalid update payload: NoSQL operators, dotted paths, and prototype pollution keys are not permitted."
+      });
     }
 
     const disallowedKeys = keys.filter((k) => !ALLOWED_PROJECT_PATCH_FIELDS.has(k));
@@ -2913,7 +3216,8 @@ app.patch("/api/projects/:id", requireAuth, async (req: Request, res: Response) 
       return res.status(404).json({ error: "Project not found." });
     }
 
-    return res.json(result);
+    const hydrated = await hydrateProjectWithArtifacts(result, userId);
+    return res.json(hydrated);
   } catch (error: any) {
     const safeError = (error?.message || "Internal server error").replace(
       /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
@@ -2929,7 +3233,19 @@ app.patch("/api/projects/:id/status", requireAuth, async (req: Request, res: Res
   try {
     const authReq = req as AuthenticatedRequest;
     const userId = authReq.user!.userId;
-    const { status } = req.body || {};
+    const body = req.body;
+
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return res.status(400).json({ error: "Request body must be a valid JSON object." });
+    }
+
+    if (containsProhibitedKeys(body)) {
+      return res.status(400).json({
+        error: "Request body contains prohibited keys (NoSQL operators, dotted paths, or prototype pollution keys are not allowed)."
+      });
+    }
+
+    const { status } = body;
     if (!status || !['Active', 'Completed', 'Archived'].includes(status)) {
       return res.status(400).json({ error: "Invalid status. Must be 'Active', 'Completed', or 'Archived'." });
     }
@@ -2956,7 +3272,8 @@ app.patch("/api/projects/:id/status", requireAuth, async (req: Request, res: Res
       return res.status(404).json({ error: "Project not found." });
     }
 
-    return res.json(result);
+    const hydrated = await hydrateProjectWithArtifacts(result, userId);
+    return res.json(hydrated);
   } catch (error: any) {
     const safeError = (error?.message || "Internal server error").replace(
       /mongodb(?:\+srv)?:\/\/[^@\s]+@/gi,
@@ -2982,8 +3299,22 @@ app.patch("/api/projects/:id/data", requireAuth, async (req: Request, res: Respo
       return res.status(400).json({ error: "Request body must be a JSON object containing project update data." });
     }
 
-    // Strip immutable primary identity keys & ownership fields: never allow body to modify '_id', 'id', or 'userId'
-    const { _id, id, userId: _ignoredUserId, expectedUpdatedAt, ...allowedData } = req.body;
+    // QAV-FINAL-003: Reject MongoDB operators, dotted keys, and prototype pollution keys at any depth
+    if (containsProhibitedKeys(req.body)) {
+      return res.status(400).json({
+        error: "Request body contains prohibited keys (NoSQL operators, dotted paths, or prototype pollution keys are not allowed)."
+      });
+    }
+
+    const bodyKeys = Object.keys(req.body);
+    const disallowedDataKeys = bodyKeys.filter((k) => !ALLOWED_PROJECT_DATA_PATCH_FIELDS.has(k));
+    if (disallowedDataKeys.length > 0) {
+      return res.status(400).json({
+        error: `Disallowed field(s) in project data update payload: ${disallowedDataKeys.join(', ')}.`
+      });
+    }
+
+    const { expectedUpdatedAt, ...allowedData } = req.body;
 
     if (expectedUpdatedAt !== undefined) {
       if (typeof expectedUpdatedAt !== 'string' || expectedUpdatedAt.trim() === '') {
@@ -3001,6 +3332,23 @@ app.patch("/api/projects/:id/data", requireAuth, async (req: Request, res: Respo
         return res.status(400).json({ error: "Field 'name' must be a non-empty string." });
       }
       allowedData.name = allowedData.name.trim();
+    }
+
+    if (allowedData.type !== undefined) {
+      if (typeof allowedData.type !== 'string' || allowedData.type.trim() === '') {
+        return res.status(400).json({ error: "Field 'type' must be a non-empty string." });
+      }
+      allowedData.type = allowedData.type.trim();
+    }
+
+    if (allowedData.projectType !== undefined) {
+      if (typeof allowedData.projectType !== 'string' || allowedData.projectType.trim() === '') {
+        return res.status(400).json({ error: "Field 'projectType' must be a non-empty string." });
+      }
+      if (allowedData.type === undefined) {
+        allowedData.type = allowedData.projectType.trim();
+      }
+      delete allowedData.projectType;
     }
 
     if (allowedData.status !== undefined) {
@@ -3143,25 +3491,52 @@ app.patch("/api/projects/:id/data", requireAuth, async (req: Request, res: Respo
   }
 });
 
-// 6. DELETE /api/projects/:id - Delete a project document
+// 6. DELETE /api/projects/:id - Delete a project document and all associated artifacts
 app.delete("/api/projects/:id", requireAuth, async (req: Request, res: Response) => {
   try {
     const authReq = req as AuthenticatedRequest;
     const userId = authReq.user!.userId;
     const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const cleanId = typeof idParam === 'string' ? idParam.trim() : '';
+
+    if (!cleanId) {
+      return res.status(400).json({ error: "Project ID is required." });
+    }
 
     if (!db) {
       return res.status(503).json({ error: "Service temporarily unavailable (database offline)." });
     }
 
-    const query = buildUserProjectQuery(idParam, userId);
-    const result = await db.collection("projects").deleteOne(query);
+    const query = buildUserProjectQuery(cleanId, userId);
+    const existingProject = await db.collection("projects").findOne(query);
+
+    if (!existingProject) {
+      return res.status(404).json({ error: "Project not found." });
+    }
+
+    const deleteQuery = existingProject._id
+      ? { _id: existingProject._id, userId }
+      : query;
+    const result = await db.collection("projects").deleteOne(deleteQuery);
 
     if (result.deletedCount === 0) {
       return res.status(404).json({ error: "Project not found." });
     }
 
-    await db.collection("project_artifacts").deleteMany({ projectId: idParam, userId });
+    const candidateProjectIds = Array.from(
+      new Set(
+        [
+          cleanId,
+          existingProject.id ? String(existingProject.id) : null,
+          existingProject._id ? String(existingProject._id) : null
+        ].filter((val): val is string => Boolean(val))
+      )
+    );
+
+    await db.collection("project_artifacts").deleteMany({
+      userId,
+      projectId: candidateProjectIds.length === 1 ? candidateProjectIds[0] : { $in: candidateProjectIds }
+    });
 
     return res.json({ success: true, message: "Project deleted successfully." });
   } catch (error: any) {
@@ -3861,5 +4236,10 @@ async function closeDatabase(): Promise<void> {
   connectionPromise = null;
 }
 
-export { connectToDatabase, closeDatabase, loginRateLimiter, registerRateLimiter, ensureMultiTenantUniqueIndex, ensureDatabaseIndexes };
+function setDatabaseForTesting(testDb: any, testClient: any = null): void {
+  db = testDb;
+  mongoClientInstance = testClient;
+}
+
+export { connectToDatabase, closeDatabase, setDatabaseForTesting, loginRateLimiter, registerRateLimiter, ensureMultiTenantUniqueIndex, ensureDatabaseIndexes };
 export default app;

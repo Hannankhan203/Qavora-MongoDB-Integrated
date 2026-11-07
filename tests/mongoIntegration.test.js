@@ -1608,3 +1608,142 @@ test('QAV-AUDIT-003: Exact Token-Version Matching and Atomic Session Invalidatio
   assert.equal(createChecklistRes.status, 201, 'State-changing request succeeds with refreshed session');
 });
 
+test('QAV-FINAL-001 to QAV-FINAL-005: Workspace import/rollback artifact sync, project type normalization, PATCH payload validation, _id deletion cleanup, and hydrated responses', async () => {
+  const { cookieHeader, csrfToken } = await registerAndLogin(
+    'Final Audit User',
+    'final_audit@example.com',
+    'Password123!',
+    '10.0.11.1'
+  );
+  const headers = {
+    Cookie: cookieHeader,
+    'X-CSRF-Token': csrfToken,
+    'Content-Type': 'application/json',
+    Origin: baseUrl
+  };
+
+  // 1. Create project and store artifacts via PATCH /api/projects/:id/data
+  const createRes = await fetch(`${baseUrl}/api/projects`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      id: 'proj_final_1',
+      name: 'Final Audit Project',
+      type: 'Mobile Application',
+      version: 'v1.0'
+    })
+  });
+  assert.equal(createRes.status, 201);
+  const created = await createRes.json();
+
+  const dataRes = await fetch(`${baseUrl}/api/projects/${created.id}/data`, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({
+      expectedUpdatedAt: created.updatedAt,
+      testSuites: [{ id: 'su_1', title: 'Suite 1', cases: [{ id: 'tc_1', title: 'Case 1', status: 'Passed' }] }],
+      executions: [{ id: 'ex_1', caseId: 'tc_1', status: 'Passed' }],
+      defects: [{ id: 'def_1', title: 'Defect 1', status: 'Open' }]
+    })
+  });
+  assert.equal(dataRes.status, 200);
+
+  // 2. QAV-FINAL-003: Reject malicious payloads on PATCH /api/projects/:id/data
+  const badPatchRes = await fetch(`${baseUrl}/api/projects/${created.id}/data`, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ '$set': { name: 'Injected' } })
+  });
+  assert.equal(badPatchRes.status, 400);
+
+  const badFieldRes = await fetch(`${baseUrl}/api/projects/${created.id}/data`, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ unauthorizedField: 'bad' })
+  });
+  assert.equal(badFieldRes.status, 400);
+
+  // 3. QAV-FINAL-005: PUT / PATCH / status return hydrated artifacts
+  const putRes = await fetch(`${baseUrl}/api/projects/${created.id}`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ name: 'Final Audit Project Updated' })
+  });
+  assert.equal(putRes.status, 200);
+  const putProject = await putRes.json();
+  assert.equal(putProject.testSuites?.length, 1);
+  assert.equal(putProject.executions?.length, 1);
+  assert.equal(putProject.defects?.length, 1);
+
+  const patchRes = await fetch(`${baseUrl}/api/projects/${created.id}`, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ version: 'v2.0', expectedUpdatedAt: putProject.updatedAt })
+  });
+  assert.equal(patchRes.status, 200);
+  const patchProject = await patchRes.json();
+  assert.equal(patchProject.testSuites?.length, 1);
+
+  const statusRes = await fetch(`${baseUrl}/api/projects/${created.id}/status`, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ status: 'Completed' })
+  });
+  assert.equal(statusRes.status, 200);
+  const statusProject = await statusRes.json();
+  assert.equal(statusProject.testSuites?.length, 1);
+
+  // 4. QAV-FINAL-001 & QAV-FINAL-002: Replace import snapshots hydrated artifacts, clears stale artifacts, and normalizes projectType -> type
+  const replaceRes = await fetch(`${baseUrl}/api/data/import`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      mode: 'replace',
+      projects: [
+        {
+          id: 'proj_final_1',
+          name: 'Replaced Clean Project',
+          projectType: 'Desktop Software',
+          testSuites: [],
+          executions: [],
+          defects: []
+        }
+      ],
+      checklists: []
+    })
+  });
+  assert.equal(replaceRes.status, 200);
+
+  const afterReplaceRes = await fetch(`${baseUrl}/api/projects/${created.id}`, { headers });
+  const afterReplaceProj = await afterReplaceRes.json();
+  assert.equal(afterReplaceProj.type, 'Desktop Software');
+  assert.equal(afterReplaceProj.testSuites.length, 0);
+  assert.equal(afterReplaceProj.executions.length, 0);
+  assert.equal(afterReplaceProj.defects.length, 0);
+
+  // Rollback restores original hydrated project and artifacts
+  const rollbackRes = await fetch(`${baseUrl}/api/data/rollback`, {
+    method: 'POST',
+    headers
+  });
+  assert.equal(rollbackRes.status, 200);
+
+  const afterRollbackRes = await fetch(`${baseUrl}/api/projects/${created.id}`, { headers });
+  const afterRollbackProj = await afterRollbackRes.json();
+  assert.equal(afterRollbackProj.type, 'Mobile Application');
+  assert.equal(afterRollbackProj.testSuites.length, 1);
+  assert.equal(afterRollbackProj.executions.length, 1);
+  assert.equal(afterRollbackProj.defects.length, 1);
+
+  // 5. QAV-FINAL-004: Delete project by MongoDB _id cleans up project_artifacts keyed by custom id
+  const delByOidRes = await fetch(`${baseUrl}/api/projects/${String(afterRollbackProj._id)}`, {
+    method: 'DELETE',
+    headers
+  });
+  assert.equal(delByOidRes.status, 200);
+
+  const leftoverArtifacts = await directDb.collection('project_artifacts').find({ projectId: 'proj_final_1' }).toArray();
+  assert.equal(leftoverArtifacts.length, 0, 'All project_artifacts must be removed when project is deleted by _id');
+});
+
+

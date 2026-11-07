@@ -60,14 +60,31 @@ export async function saveDefect(defectData, projectId = null) {
     ...defectData
   };
 
+  let targetDefect = null;
+  let opType = 'CREATE';
+
   if (idx >= 0) {
-    defects[idx] = { ...defects[idx], ...record };
+    opType = 'UPDATE';
+    targetDefect = { ...defects[idx], ...record };
+    defects[idx] = targetDefect;
   } else {
     record.createdAt = record.createdAt || new Date().toISOString();
+    targetDefect = record;
     defects.unshift(record);
   }
 
-  return saveProjectData(project.id, { defects });
+  const res = await saveProjectData(
+    project.id,
+    { defects },
+    undefined,
+    {
+      entityType: 'defect',
+      entityId: targetDefect.id,
+      operationType: opType,
+      delta: { defect: targetDefect }
+    }
+  );
+  return { ...res, defect: targetDefect };
 }
 
 /**
@@ -101,13 +118,25 @@ export async function updateDefectQuickStatus(defectId, newStatus, projectId = n
   }
 
   const defects = [...targetProject.defects];
-  defects[targetDefectIdx] = {
+  const updatedDefect = {
     ...defects[targetDefectIdx],
     status: newStatus,
     updatedAt: new Date().toISOString()
   };
+  defects[targetDefectIdx] = updatedDefect;
 
-  return saveProjectData(targetProject.id, { defects });
+  const res = await saveProjectData(
+    targetProject.id,
+    { defects },
+    undefined,
+    {
+      entityType: 'defect',
+      entityId: defectId,
+      operationType: 'STATUS_CHANGE',
+      delta: { defect: updatedDefect }
+    }
+  );
+  return { ...res, defect: updatedDefect };
 }
 
 /**
@@ -121,7 +150,17 @@ export async function deleteDefectById(defectId, projectId) {
   }
 
   const defects = project.defects.filter((d) => d.id !== defectId);
-  return saveProjectData(project.id, { defects });
+  return saveProjectData(
+    project.id,
+    { defects },
+    undefined,
+    {
+      entityType: 'defect',
+      entityId: defectId,
+      operationType: 'DELETE',
+      delta: { id: defectId, defectId }
+    }
+  );
 }
 
 /**

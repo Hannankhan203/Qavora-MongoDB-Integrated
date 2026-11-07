@@ -70,8 +70,19 @@ import {
   getCurrentViewingCase,
   getCurrentViewingSuite
 } from './testPlanManager.js';
+import { escapeHtml, formatDate } from './utils.js';
+import {
+  getProjectSyncStatus,
+  onOfflineSyncStateChange,
+  syncAllOfflineQueues,
+  resolveProjectConflict,
+  retryProjectOperation,
+  retryFailedProjectOperations,
+  discardProjectOperation
+} from '../../qaChecklistSyncQueue.js';
 
 let _listenersBound = false;
+let _offlineSyncBound = false;
 
 export function showToast(message, type = 'info') {
   if (typeof document === 'undefined') return;
@@ -1564,7 +1575,7 @@ export function initUIEventListeners() {
     }
   });
 
-  viewCaseEditBtn?.addEventListener('click', () => {
+    viewCaseEditBtn?.addEventListener('click', () => {
     const currentCase = getCurrentViewingCase();
     const currentSuite = getCurrentViewingSuite();
     if (currentCase && currentSuite) {
@@ -1572,6 +1583,292 @@ export function initUIEventListeners() {
       openTestCaseModal(currentCase, currentSuite.id);
     }
   });
+
+  // 20. Offline Synchronization Status & Conflict Resolution UI
+  initOfflineSyncUI();
+}
+
+// ============================================================================
+// Offline Synchronization Status & Conflict Resolution UI Manager
+// ============================================================================
+export async function renderOfflineSyncStatusUI() {
+  if (typeof document === 'undefined') return null;
+
+  const status = await getProjectSyncStatus();
+  const btn = document.getElementById('offline-sync-status-btn');
+  const dot = document.getElementById('offline-sync-dot');
+  const label = document.getElementById('offline-sync-label');
+  const countBadge = document.getElementById('offline-sync-count-badge');
+
+  if (btn && dot && label) {
+    dot.classList.remove('connected', 'disconnected', 'connecting');
+
+    if (status.conflictCount > 0) {
+      dot.classList.add('disconnected');
+      label.textContent = `Conflict (${status.conflictCount})`;
+      btn.setAttribute('title', `${status.conflictCount} mutation conflict(s) require manual resolution.`);
+    } else if (status.failedCount > 0) {
+      dot.classList.add('disconnected');
+      label.textContent = `Sync Failed (${status.failedCount})`;
+      btn.setAttribute('title', `${status.failedCount} mutation(s) failed to synchronize. Click to inspect or retry.`);
+    } else if (status.isSyncing) {
+      dot.classList.add('connecting');
+      label.textContent = 'Syncing...';
+      btn.setAttribute('title', 'Synchronizing queued offline changes with server...');
+    } else if (!status.online) {
+      dot.classList.add('disconnected');
+      label.textContent = status.pendingCount > 0 ? `Offline (${status.pendingCount} queued)` : 'Offline';
+      btn.setAttribute('title', 'Working offline. Changes are saved to durable IndexedDB queue.');
+    } else if (status.pendingCount > 0) {
+      dot.classList.add('connecting');
+      label.textContent = `Pending (${status.pendingCount})`;
+      btn.setAttribute('title', `${status.pendingCount} pending mutation(s) ready to synchronize.`);
+    } else {
+      dot.classList.add('connected');
+      label.textContent = 'Online';
+      btn.setAttribute('title', 'Workspace is online and synchronized.');
+    }
+
+    if (countBadge) {
+      if (status.totalQueuedCount > 0) {
+        countBadge.style.display = 'inline-flex';
+        countBadge.textContent = String(status.totalQueuedCount);
+      } else {
+        countBadge.style.display = 'none';
+        countBadge.textContent = '0';
+      }
+    }
+  }
+
+  // Also refresh modal contents if open
+  const modal = document.getElementById('offline-sync-modal');
+  if (modal && modal.classList.contains('open')) {
+    renderOfflineSyncModalBody(status);
+  }
+
+  return status;
+}
+
+function renderOfflineSyncModalBody(status) {
+  if (typeof document === 'undefined' || !status) return;
+
+  const netEl = document.getElementById('offline-sync-stat-network');
+  const pendEl = document.getElementById('offline-sync-stat-pending');
+  const confEl = document.getElementById('offline-sync-stat-conflicts');
+  const failEl = document.getElementById('offline-sync-stat-failed');
+  const retryAllBtn = document.getElementById('offline-sync-retry-failed-btn');
+  const listEl = document.getElementById('offline-sync-queue-list');
+
+  if (netEl) {
+    netEl.textContent = status.isSyncing ? 'Syncing...' : (status.online ? 'Online' : 'Offline');
+    netEl.style.color = status.online ? 'var(--color-green, #22c55e)' : 'var(--color-amber, #f59e0b)';
+  }
+  if (pendEl) pendEl.textContent = String(status.pendingCount);
+  if (confEl) confEl.textContent = String(status.conflictCount);
+  if (failEl) failEl.textContent = String(status.failedCount);
+
+  if (retryAllBtn) {
+    retryAllBtn.style.display = status.failedCount > 0 ? 'inline-flex' : 'none';
+  }
+
+  if (!listEl) return;
+
+  const allOps = [
+    ...(status.operations || []),
+    ...(status.checklistOperations || []).map((cOp) => ({
+      ...cOp,
+      entityType: 'checklist',
+      entityId: cOp.checklistId,
+      operationType: cOp.type
+    }))
+  ];
+
+  if (allOps.length === 0) {
+    listEl.innerHTML = `
+      <div class="empty-state" style="padding: 28px 16px;">
+        <h4 class="empty-state-title" style="font-size: 0.95rem;">All Workspace Changes Synchronized</h4>
+        <p class="empty-state-desc" style="font-size: 0.82rem; margin-bottom: 0;">
+          There are no pending, failed, or conflicting offline mutations in your queue.
+        </p>
+      </div>`;
+    return;
+  }
+
+  listEl.innerHTML = allOps
+    .map((op) => {
+      const st = op.status || 'pending';
+      const badgeClass =
+        st === 'conflict' || st === 'failed'
+          ? 'status-fail'
+          : st === 'syncing'
+          ? 'status-blocked'
+          : 'status-notrun';
+      const conflictInfo = op.conflictDetails
+        ? `<div style="margin-top: 6px; padding: 8px; border-radius: 6px; background: rgba(245, 158, 11, 0.12); font-size: 0.75rem; color: var(--text-primary);">
+             <strong>Concurrency Conflict (HTTP 409):</strong> ${escapeHtml(op.conflictDetails.message || 'Server record changed since last sync.')}<br/>
+             <span>Expected: <code>${escapeHtml(op.conflictDetails.expectedUpdatedAt || 'N/A')}</code> · Server: <code>${escapeHtml(op.conflictDetails.currentUpdatedAt || 'N/A')}</code></span>
+           </div>`
+        : '';
+      const errInfo = op.lastError && !op.conflictDetails
+        ? `<div style="margin-top: 4px; font-size: 0.75rem; color: var(--color-red, #ef4444);">${escapeHtml(op.lastError)}</div>`
+        : '';
+
+      const actionsHtml =
+        op.entityType !== 'checklist'
+          ? `<div style="display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap;">
+               ${
+                 st === 'conflict'
+                   ? `<button type="button" class="btn btn-primary btn-xs" data-sync-action="resolve-merge" data-op-id="${escapeHtml(op.id)}">Merge &amp; Keep Changes</button>
+                      <button type="button" class="btn btn-secondary btn-xs" data-sync-action="resolve-server" data-op-id="${escapeHtml(op.id)}">Keep Server Version</button>`
+                   : ''
+               }
+               ${
+                 st === 'failed'
+                   ? `<button type="button" class="btn btn-primary btn-xs" data-sync-action="retry-op" data-op-id="${escapeHtml(op.id)}">Retry</button>`
+                   : ''
+               }
+               ${
+                 st === 'conflict' || st === 'failed'
+                   ? `<button type="button" class="btn btn-ghost btn-xs btn-danger-outline" data-sync-action="discard-op" data-op-id="${escapeHtml(op.id)}">Discard</button>`
+                   : ''
+               }
+             </div>`
+          : '';
+
+      return `
+        <div class="offline-op-card" data-op-id="${escapeHtml(op.id)}" style="padding: 12px; margin-bottom: 8px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-surface-2);">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span class="status-badge ${badgeClass}">${escapeHtml(st.toUpperCase())}</span>
+              <strong style="font-size: 0.84rem; color: var(--text-primary);">${escapeHtml(String(op.entityType || 'item').toUpperCase())} · ${escapeHtml(String(op.operationType || op.type || 'UPDATE'))}</strong>
+            </div>
+            <span style="font-size: 0.72rem; color: var(--text-muted);">${formatDate(op.updatedAt || op.createdAt)}</span>
+          </div>
+          <div style="font-size: 0.76rem; color: var(--text-muted); margin-top: 4px;">
+            Entity ID: <code>${escapeHtml(op.entityId || op.projectId || '')}</code>${op.retryCount ? ` · Retries: ${op.retryCount}` : ''}
+          </div>
+          ${conflictInfo}
+          ${errInfo}
+          ${actionsHtml}
+        </div>`;
+    })
+    .join('');
+}
+
+export async function openOfflineSyncModal() {
+  if (typeof document === 'undefined') return;
+  const modal = document.getElementById('offline-sync-modal');
+  if (!modal) return;
+  const status = await getProjectSyncStatus();
+  renderOfflineSyncModalBody(status);
+  modal.classList.add('open');
+  modal.setAttribute('aria-hidden', 'false');
+}
+
+export function closeOfflineSyncModal() {
+  if (typeof document === 'undefined') return;
+  const modal = document.getElementById('offline-sync-modal');
+  if (!modal) return;
+  modal.classList.remove('open');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+export function initOfflineSyncUI() {
+  if (typeof document === 'undefined' || _offlineSyncBound) return;
+  _offlineSyncBound = true;
+
+  const statusBtn = document.getElementById('offline-sync-status-btn');
+  const closeBtn = document.getElementById('offline-sync-modal-close');
+  const doneBtn = document.getElementById('offline-sync-modal-done');
+  const modal = document.getElementById('offline-sync-modal');
+  const syncNowBtn = document.getElementById('offline-sync-now-btn');
+  const retryFailedBtn = document.getElementById('offline-sync-retry-failed-btn');
+  const queueList = document.getElementById('offline-sync-queue-list');
+
+  statusBtn?.addEventListener('click', () => {
+    openOfflineSyncModal();
+  });
+
+  closeBtn?.addEventListener('click', closeOfflineSyncModal);
+  doneBtn?.addEventListener('click', closeOfflineSyncModal);
+  modal?.addEventListener('click', (e) => {
+    if (e.target === modal) closeOfflineSyncModal();
+  });
+
+  syncNowBtn?.addEventListener('click', async () => {
+    const res = await syncAllOfflineQueues();
+    await loadProjectsFromBackend();
+    await renderOfflineSyncStatusUI();
+    if (res.ok) {
+      showToast('Synchronized offline queue with server.', 'success');
+    } else if (res.projectSync?.conflictCount > 0) {
+      showToast('Concurrency conflict detected. Please resolve in the queue modal.', 'warning');
+    }
+  });
+
+  retryFailedBtn?.addEventListener('click', async () => {
+    await retryFailedProjectOperations();
+    await loadProjectsFromBackend();
+    await renderOfflineSyncStatusUI();
+    showToast('Retrying failed operations...', 'info');
+  });
+
+  queueList?.addEventListener('click', async (e) => {
+    const target = e.target;
+    if (!(target instanceof HTMLElement)) return;
+    const actionBtn = target.closest('[data-sync-action]');
+    if (!actionBtn) return;
+
+    const action = actionBtn.getAttribute('data-sync-action');
+    const opId = actionBtn.getAttribute('data-op-id');
+    if (!opId) return;
+
+    if (action === 'resolve-merge') {
+      const res = await resolveProjectConflict(opId, 'merge');
+      await loadProjectsFromBackend();
+      await renderOfflineSyncStatusUI();
+      if (res.ok) {
+        showToast('Conflict resolved by merging changes onto latest server record.', 'success');
+      } else {
+        showToast(res.error || 'Failed to resolve conflict.', 'error');
+      }
+    } else if (action === 'resolve-server') {
+      const res = await resolveProjectConflict(opId, 'keep_server');
+      await loadProjectsFromBackend();
+      await renderOfflineSyncStatusUI();
+      if (res.ok) {
+        showToast('Kept server version and discarded local conflicting operation.', 'info');
+      }
+    } else if (action === 'retry-op') {
+      await retryProjectOperation(opId);
+      await loadProjectsFromBackend();
+      await renderOfflineSyncStatusUI();
+      showToast('Operation retried.', 'info');
+    } else if (action === 'discard-op') {
+      await discardProjectOperation(opId);
+      await loadProjectsFromBackend();
+      await renderOfflineSyncStatusUI();
+      showToast('Operation discarded from queue.', 'info');
+    }
+  });
+
+  onOfflineSyncStateChange((event) => {
+    renderOfflineSyncStatusUI().catch(() => {});
+    if (
+      event &&
+      (event.type === 'SYNC_COMPLETED' ||
+        event.type === 'CONFLICT_RESOLVED' ||
+        event.type === 'MUTATION_QUEUED') &&
+      event.senderTabId
+    ) {
+      // Refresh active views when cross-tab or background sync finishes
+      renderProjectsGrid();
+      renderDashboard();
+      renderProjectDetails();
+    }
+  });
+
+  renderOfflineSyncStatusUI().catch(() => {});
 }
 
 // ============================================================================

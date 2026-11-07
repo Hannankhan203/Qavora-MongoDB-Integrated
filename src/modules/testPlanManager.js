@@ -677,7 +677,17 @@ export async function saveTestPlan(testPlanData) {
     updatedAt: new Date().toISOString()
   };
 
-  return saveProjectData(project.id, { testPlan: updatedPlan });
+  return saveProjectData(
+    project.id,
+    { testPlan: updatedPlan },
+    undefined,
+    {
+      entityType: 'testPlan',
+      entityId: updatedPlan.id || `plan_${project.id}`,
+      operationType: 'UPDATE',
+      delta: { testPlan: updatedPlan }
+    }
+  );
 }
 
 export function openTestPlanModal() {
@@ -723,7 +733,7 @@ export async function addPhase(phaseData) {
   const phases = Array.isArray(project.testPlan.phases) ? [...project.testPlan.phases] : [];
   const now = new Date().toISOString();
   const newPhase = {
-    id: 'ph_' + generateStableId('p'),
+    id: phaseData?.id || ('ph_' + generateStableId('p')),
     name: phaseData.name?.trim() || 'New Testing Phase',
     description: phaseData.description?.trim() || '',
     order: phases.length + 1,
@@ -739,7 +749,18 @@ export async function addPhase(phaseData) {
     updatedAt: now
   };
 
-  return saveProjectData(project.id, { testPlan: updatedPlan });
+  const res = await saveProjectData(
+    project.id,
+    { testPlan: updatedPlan },
+    undefined,
+    {
+      entityType: 'phase',
+      entityId: newPhase.id,
+      operationType: 'CREATE',
+      delta: { phase: newPhase }
+    }
+  );
+  return { ...res, phase: newPhase };
 }
 
 export async function updatePhase(phaseId, phaseData) {
@@ -757,6 +778,7 @@ export async function updatePhase(phaseId, phaseData) {
     description: phaseData.description !== undefined ? phaseData.description.trim() : phases[idx].description,
     updatedAt: now
   };
+  const updatedPhase = phases[idx];
 
   const updatedPlan = {
     ...project.testPlan,
@@ -764,7 +786,18 @@ export async function updatePhase(phaseId, phaseData) {
     updatedAt: now
   };
 
-  return saveProjectData(project.id, { testPlan: updatedPlan });
+  const res = await saveProjectData(
+    project.id,
+    { testPlan: updatedPlan },
+    undefined,
+    {
+      entityType: 'phase',
+      entityId: phaseId,
+      operationType: 'UPDATE',
+      delta: { phase: updatedPhase }
+    }
+  );
+  return { ...res, phase: updatedPhase };
 }
 
 export async function deletePhase(phaseId) {
@@ -781,7 +814,17 @@ export async function deletePhase(phaseId) {
     updatedAt: new Date().toISOString()
   };
 
-  return saveProjectData(project.id, { testPlan: updatedPlan, testSuites: suites });
+  return saveProjectData(
+    project.id,
+    { testPlan: updatedPlan, testSuites: suites },
+    undefined,
+    {
+      entityType: 'phase',
+      entityId: phaseId,
+      operationType: 'DELETE',
+      delta: { id: phaseId }
+    }
+  );
 }
 
 export function openPhaseModal(phaseToEdit = null) {
@@ -836,28 +879,44 @@ export async function saveTestSuite(suiteData) {
   const suites = Array.isArray(project.testSuites) ? [...project.testSuites] : [];
   const now = new Date().toISOString();
   const existingIdx = suites.findIndex((s) => s.id === suiteData.id);
+  let targetSuite = null;
+  let opType = 'CREATE';
 
   if (existingIdx >= 0) {
-    suites[existingIdx] = {
+    opType = 'UPDATE';
+    targetSuite = {
       ...suites[existingIdx],
       ...suiteData,
       updatedAt: now
     };
+    suites[existingIdx] = targetSuite;
   } else {
-    suites.push({
+    targetSuite = {
       id: suiteData.id || ('ts_' + generateStableId('s')),
       phaseId: suiteData.phaseId,
       name: suiteData.name?.trim() || 'New Test Suite',
       category: suiteData.category || 'Functional',
       tags: Array.isArray(suiteData.tags) ? suiteData.tags : [],
       description: suiteData.description?.trim() || '',
-      cases: [],
+      cases: Array.isArray(suiteData.cases) ? suiteData.cases : [],
       createdAt: now,
       updatedAt: now
-    });
+    };
+    suites.push(targetSuite);
   }
 
-  return saveProjectData(project.id, { testSuites: suites });
+  const res = await saveProjectData(
+    project.id,
+    { testSuites: suites },
+    undefined,
+    {
+      entityType: 'suite',
+      entityId: targetSuite.id,
+      operationType: opType,
+      delta: { suite: targetSuite }
+    }
+  );
+  return { ...res, suite: targetSuite };
 }
 
 export async function deleteTestSuite(suiteId) {
@@ -865,7 +924,17 @@ export async function deleteTestSuite(suiteId) {
   if (!project) return { ok: false, error: 'No active project selected.' };
 
   const suites = (project.testSuites || []).filter((s) => s.id !== suiteId);
-  return saveProjectData(project.id, { testSuites: suites });
+  return saveProjectData(
+    project.id,
+    { testSuites: suites },
+    undefined,
+    {
+      entityType: 'suite',
+      entityId: suiteId,
+      operationType: 'DELETE',
+      delta: { id: suiteId, suiteId }
+    }
+  );
 }
 
 export function openSuiteModal(suiteToEdit = null, defaultPhaseId = null) {
@@ -986,15 +1055,20 @@ export async function saveTestCase(suiteId, testCaseData) {
   const now = new Date().toISOString();
   const cases = Array.isArray(suites[suiteIdx].cases) ? [...suites[suiteIdx].cases] : [];
   const caseIdx = cases.findIndex((c) => c.id === testCaseData.id);
+  let targetCase = null;
+  let opType = 'CREATE';
 
   if (caseIdx >= 0) {
-    cases[caseIdx] = {
+    opType = 'UPDATE';
+    targetCase = {
       ...cases[caseIdx],
       ...testCaseData,
+      suiteId,
       updatedAt: now
     };
+    cases[caseIdx] = targetCase;
   } else {
-    cases.push({
+    targetCase = {
       id: testCaseData.id || ('tc_' + generateStableId('c')),
       testCaseId: testCaseData.testCaseId || deriveNextCaseCode(project),
       suiteId,
@@ -1002,11 +1076,23 @@ export async function saveTestCase(suiteId, testCaseData) {
       createdAt: now,
       updatedAt: now,
       ...testCaseData
-    });
+    };
+    cases.push(targetCase);
   }
 
   suites[suiteIdx] = { ...suites[suiteIdx], cases, updatedAt: now };
-  return saveProjectData(project.id, { testSuites: suites });
+  const res = await saveProjectData(
+    project.id,
+    { testSuites: suites },
+    undefined,
+    {
+      entityType: 'testCase',
+      entityId: targetCase.id,
+      operationType: opType,
+      delta: { suiteId, testCase: targetCase }
+    }
+  );
+  return { ...res, testCase: targetCase };
 }
 
 export async function deleteTestCase(suiteId, caseId) {
@@ -1020,7 +1106,17 @@ export async function deleteTestCase(suiteId, caseId) {
   const cases = (suites[suiteIdx].cases || []).filter((c) => c.id !== caseId);
   suites[suiteIdx] = { ...suites[suiteIdx], cases, updatedAt: new Date().toISOString() };
 
-  return saveProjectData(project.id, { testSuites: suites });
+  return saveProjectData(
+    project.id,
+    { testSuites: suites },
+    undefined,
+    {
+      entityType: 'testCase',
+      entityId: caseId,
+      operationType: 'DELETE',
+      delta: { suiteId, caseId, id: caseId }
+    }
+  );
 }
 
 export async function duplicateTestCase(suiteId, caseId) {
@@ -1040,6 +1136,7 @@ export async function duplicateTestCase(suiteId, caseId) {
     ...source,
     id: 'tc_' + generateStableId('c'),
     testCaseId: deriveNextCaseCode(project),
+    suiteId,
     title: `${source.title || 'Test Case'} (Copy)`,
     status: 'Not Run',
     createdAt: now,
@@ -1048,7 +1145,18 @@ export async function duplicateTestCase(suiteId, caseId) {
   cases.push(copy);
   suites[suiteIdx] = { ...suites[suiteIdx], cases, updatedAt: now };
 
-  return saveProjectData(project.id, { testSuites: suites });
+  const res = await saveProjectData(
+    project.id,
+    { testSuites: suites },
+    undefined,
+    {
+      entityType: 'testCase',
+      entityId: copy.id,
+      operationType: 'DUPLICATE',
+      delta: { suiteId, testCase: copy }
+    }
+  );
+  return { ...res, testCase: copy };
 }
 
 /* ==========================================================================

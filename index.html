@@ -502,6 +502,19 @@
         </div>
 
         <div class="top-nav-right">
+          <button
+            type="button"
+            id="offline-sync-status-btn"
+            class="btn btn-secondary btn-sm offline-sync-badge"
+            title="Offline Synchronization Status &amp; Queue"
+            aria-label="Offline Synchronization Status"
+            style="display: inline-flex; align-items: center; gap: 6px;"
+          >
+            <span id="offline-sync-dot" class="storage-dot connected" style="width: 8px; height: 8px; border-radius: 50%; display: inline-block;"></span>
+            <span id="offline-sync-label">Online</span>
+            <span id="offline-sync-count-badge" class="nav-badge" style="display: none;">0</span>
+          </button>
+
           <button id="header-create-btn" class="btn btn-primary btn-sm">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="12" y1="5" x2="12" y2="19"></line>
@@ -5962,6 +5975,56 @@
       </div>
     </div>
   </div>
+  <!-- Offline Synchronization & Conflict Resolution Modal -->
+  <div id="offline-sync-modal" class="modal-overlay" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="offline-sync-modal-title">
+    <div class="modal-card modal-lg">
+      <div class="modal-header">
+        <div>
+          <h3 id="offline-sync-modal-title" class="modal-title">Workspace Synchronization Queue</h3>
+          <p id="offline-sync-modal-subtitle" class="modal-subtitle">Monitor offline mutations, retry failed operations, and resolve concurrency conflicts</p>
+        </div>
+        <button type="button" id="offline-sync-modal-close" class="modal-close-btn" aria-label="Close dialog">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+      <div class="modal-body" style="max-height: 65vh; overflow-y: auto;">
+        <div id="offline-sync-summary-bar" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 16px;">
+          <div style="padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-surface-2);">
+            <div style="font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase;">Network</div>
+            <div id="offline-sync-stat-network" style="font-size: 0.95rem; font-weight: 700; margin-top: 2px;">Online</div>
+          </div>
+          <div style="padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-surface-2);">
+            <div style="font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase;">Pending</div>
+            <div id="offline-sync-stat-pending" style="font-size: 0.95rem; font-weight: 700; margin-top: 2px;">0</div>
+          </div>
+          <div style="padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-surface-2);">
+            <div style="font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase;">Conflicts</div>
+            <div id="offline-sync-stat-conflicts" style="font-size: 0.95rem; font-weight: 700; margin-top: 2px; color: var(--color-amber, #f59e0b);">0</div>
+          </div>
+          <div style="padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-surface-2);">
+            <div style="font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase;">Failed</div>
+            <div id="offline-sync-stat-failed" style="font-size: 0.95rem; font-weight: 700; margin-top: 2px; color: var(--color-red, #ef4444);">0</div>
+          </div>
+        </div>
+        <div id="offline-sync-queue-list"></div>
+      </div>
+      <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center;">
+        <div style="display: flex; gap: 8px;">
+          <button type="button" id="offline-sync-now-btn" class="btn btn-primary btn-sm">
+            <span>Sync Pending Now</span>
+          </button>
+          <button type="button" id="offline-sync-retry-failed-btn" class="btn btn-secondary btn-sm" style="display: none;">
+            <span>Retry Failed</span>
+          </button>
+        </div>
+        <button type="button" id="offline-sync-modal-done" class="btn btn-ghost btn-sm">Close</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
   <!-- Vanilla JavaScript Application Logic -->

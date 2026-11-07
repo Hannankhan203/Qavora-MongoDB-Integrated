@@ -89,8 +89,20 @@ import {
   resolveInitialRoute,
   initUIEventListeners,
   updateSidebarDbStatus,
-  syncSidebarDbStatus
+  syncSidebarDbStatus,
+  renderOfflineSyncStatusUI,
+  openOfflineSyncModal,
+  closeOfflineSyncModal
 } from './src/modules/uiRenderer.js';
+import {
+  getProjectSyncStatus,
+  processProjectSyncQueue,
+  syncAllOfflineQueues,
+  resolveProjectConflict,
+  retryProjectOperation,
+  retryFailedProjectOperations,
+  discardProjectOperation
+} from './qaChecklistSyncQueue.js';
 
 let _initialized = false;
 
@@ -109,6 +121,7 @@ async function init() {
       navigateTo(initialRoute, false);
 
       await loadProjectsFromBackend();
+      await renderOfflineSyncStatusUI();
       updateSidebarProjectCounters();
       renderProjectsGrid();
       populateProjectsDropdown();
@@ -268,7 +281,17 @@ if (typeof window !== 'undefined') {
     resolveInitialRoute,
     openOfflineDatabase,
     getStorageStatus,
-    ChecklistsPersistence
+    ChecklistsPersistence,
+    getProjectSyncStatus,
+    processProjectSyncQueue,
+    syncAllOfflineQueues,
+    resolveProjectConflict,
+    retryProjectOperation,
+    retryFailedProjectOperations,
+    discardProjectOperation,
+    renderOfflineSyncStatusUI,
+    openOfflineSyncModal,
+    closeOfflineSyncModal
   };
 
   ChecklistsPersistence.onPersistenceFailure(({ action, error }) => {

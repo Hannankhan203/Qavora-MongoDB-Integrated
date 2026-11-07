@@ -16,6 +16,16 @@ import {
 import { escapeHtml, formatDate } from './utils.js';
 import { populateProjectsDropdown } from './testPlanManager.js';
 import { renderDashboard } from './dashboardManager.js';
+import {
+  isClientOffline,
+  cacheProjectOffline,
+  cacheProjectsListOffline,
+  removeCachedProjectOffline,
+  getCachedProjectsForUser,
+  queueProjectMutation,
+  getPendingProjectOperations,
+  processProjectSyncQueue
+} from '../../qaChecklistSyncQueue.js';
 
 let _isLoadingProjects = false;
 let _hasLoadedProjects = false;
@@ -44,21 +54,61 @@ export async function loadProjectsFromBackend() {
   renderProjectsGrid();
   populateProjectsDropdown();
 
-  const res = await apiJson('/api/projects');
-  _isLoadingProjects = false;
-  _hasLoadedProjects = true;
-
-  if (res.ok && Array.isArray(res.data)) {
-    setProjects(res.data);
-    if (!getActiveProjectId() && res.data.length > 0) {
-      setActiveProjectId(res.data[0].id);
+  if (isClientOffline()) {
+    const cachedProjects = await getCachedProjectsForUser();
+    _isLoadingProjects = false;
+    _hasLoadedProjects = true;
+    setProjects(cachedProjects);
+    if (!getActiveProjectId() && cachedProjects.length > 0) {
+      setActiveProjectId(cachedProjects[0].id);
     }
     updateSidebarProjectCounters();
     renderProjectsGrid();
     populateProjectsDropdown();
     renderDashboard();
     renderProjectDetails();
-    return { ok: true, projects: res.data };
+    return { ok: true, offline: true, projects: cachedProjects };
+  }
+
+  const res = await apiJson('/api/projects');
+  _isLoadingProjects = false;
+  _hasLoadedProjects = true;
+
+  if (res.ok && Array.isArray(res.data)) {
+    await cacheProjectsListOffline(res.data);
+    const pendingOps = await getPendingProjectOperations();
+    let effectiveProjects = res.data;
+    if (pendingOps.length > 0) {
+      const hydrated = await getCachedProjectsForUser();
+      if (hydrated.length > 0 || pendingOps.some(op => op.entityType === 'project' && op.operationType === 'DELETE')) {
+        effectiveProjects = hydrated;
+      }
+      processProjectSyncQueue().catch(() => {});
+    }
+    setProjects(effectiveProjects);
+    if (!getActiveProjectId() && effectiveProjects.length > 0) {
+      setActiveProjectId(effectiveProjects[0].id);
+    }
+    updateSidebarProjectCounters();
+    renderProjectsGrid();
+    populateProjectsDropdown();
+    renderDashboard();
+    renderProjectDetails();
+    return { ok: true, projects: effectiveProjects };
+  }
+
+  if (res.status === 0 || isClientOffline()) {
+    const cachedProjects = await getCachedProjectsForUser();
+    setProjects(cachedProjects);
+    if (!getActiveProjectId() && cachedProjects.length > 0) {
+      setActiveProjectId(cachedProjects[0].id);
+    }
+    updateSidebarProjectCounters();
+    renderProjectsGrid();
+    populateProjectsDropdown();
+    renderDashboard();
+    renderProjectDetails();
+    return { ok: true, offline: true, projects: cachedProjects };
   }
 
   _projectLoadError = res.data?.error || 'Failed to load projects from server.';
@@ -70,12 +120,67 @@ export async function loadProjectsFromBackend() {
 }
 
 export async function createProject(payload) {
+  const projectId = (typeof payload?.id === 'string' && payload.id.trim())
+    ? payload.id.trim()
+    : `proj_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const now = new Date().toISOString();
+  const trimmedName = (payload?.name || 'Untitled Project').trim();
+
+  const buildLocalProject = () => ({
+    ...payload,
+    id: projectId,
+    name: trimmedName,
+    type: payload?.type || payload?.projectType || 'Web Application',
+    status: payload?.status || 'Active',
+    version: payload?.version || '',
+    description: payload?.description || '',
+    createdAt: payload?.createdAt || now,
+    updatedAt: now,
+    testPlan: payload?.testPlan || {
+      id: `plan_${projectId}`,
+      name: `${trimmedName} Master Test Plan`,
+      description: '',
+      objective: '',
+      scope: '',
+      notes: '',
+      createdAt: now,
+      updatedAt: now,
+      phases: []
+    },
+    testSuites: Array.isArray(payload?.testSuites) ? payload.testSuites : [],
+    executions: Array.isArray(payload?.executions) ? payload.executions : [],
+    defects: Array.isArray(payload?.defects) ? payload.defects : []
+  });
+
+  if (isClientOffline()) {
+    const localProject = buildLocalProject();
+    await queueProjectMutation({
+      projectId,
+      entityType: 'project',
+      entityId: projectId,
+      operationType: 'CREATE',
+      payload: { project: localProject },
+      expectedUpdatedAt: null
+    });
+    const current = getProjects().filter((p) => p.id !== projectId);
+    setProjects([localProject, ...current]);
+    setActiveProjectId(localProject.id);
+    updateSidebarProjectCounters();
+    renderDashboard();
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('qavora:storage-invalidate'));
+    }
+    return { ok: true, queued: true, offline: true, project: localProject };
+  }
+
+  const requestBody = { ...payload, id: projectId };
   const res = await apiJson('/api/projects', {
     method: 'POST',
-    body: JSON.stringify(payload)
+    body: JSON.stringify(requestBody)
   });
   if (res.ok && res.data) {
-    const current = getProjects();
+    await cacheProjectOffline({ ...res.data, _serverUpdatedAt: res.data.updatedAt });
+    const current = getProjects().filter((p) => p.id !== res.data.id);
     setProjects([res.data, ...current]);
     setActiveProjectId(res.data.id);
     updateSidebarProjectCounters();
@@ -85,11 +190,34 @@ export async function createProject(payload) {
     }
     return { ok: true, project: res.data };
   }
+
+  if (res.status === 0 || isClientOffline()) {
+    const localProject = buildLocalProject();
+    await queueProjectMutation({
+      projectId,
+      entityType: 'project',
+      entityId: projectId,
+      operationType: 'CREATE',
+      payload: { project: localProject },
+      expectedUpdatedAt: null
+    });
+    const current = getProjects().filter((p) => p.id !== projectId);
+    setProjects([localProject, ...current]);
+    setActiveProjectId(localProject.id);
+    updateSidebarProjectCounters();
+    renderDashboard();
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('qavora:storage-invalidate'));
+    }
+    return { ok: true, queued: true, offline: true, project: localProject };
+  }
+
   return { ok: false, status: res.status, error: res.data?.error || 'Failed to create project.' };
 }
 
 export function addPromotedProjectToState(project) {
   if (!project || !project.id) return;
+  cacheProjectOffline(project).catch(() => {});
   const current = getProjects();
   const exists = current.some((p) => p.id === project.id);
   const updated = exists
@@ -108,6 +236,44 @@ export function addPromotedProjectToState(project) {
 }
 
 export async function updateProjectMetadata(projectId, payload, expectedUpdatedAt) {
+  const existingProject = getProjects().find((p) => p.id === projectId);
+  const occTimestamp = expectedUpdatedAt !== undefined
+    ? expectedUpdatedAt
+    : (payload?.expectedUpdatedAt || existingProject?._serverUpdatedAt || existingProject?.updatedAt || null);
+  const opType = payload && payload.status !== undefined && Object.keys(payload).length === 1
+    ? 'STATUS_CHANGE'
+    : 'UPDATE';
+
+  const applyOfflineUpdate = async () => {
+    const updatedLocal = {
+      ...(existingProject || { id: projectId }),
+      ...payload,
+      updatedAt: new Date().toISOString(),
+      _serverUpdatedAt: occTimestamp
+    };
+    await queueProjectMutation({
+      projectId,
+      entityType: 'project',
+      entityId: projectId,
+      operationType: opType,
+      payload: { updates: payload, delta: payload },
+      expectedUpdatedAt: occTimestamp
+    });
+    const current = getProjects();
+    const exists = current.some((p) => p.id === projectId);
+    const updatedList = exists
+      ? current.map((p) => (p.id === projectId ? updatedLocal : p))
+      : [updatedLocal, ...current];
+    setProjects(updatedList);
+    updateSidebarProjectCounters();
+    renderDashboard();
+    return { ok: true, queued: true, offline: true, project: updatedLocal };
+  };
+
+  if (isClientOffline()) {
+    return applyOfflineUpdate();
+  }
+
   const bodyPayload = { ...payload };
   if (expectedUpdatedAt !== undefined && bodyPayload.expectedUpdatedAt === undefined) {
     bodyPayload.expectedUpdatedAt = expectedUpdatedAt;
@@ -117,12 +283,23 @@ export async function updateProjectMetadata(projectId, payload, expectedUpdatedA
     body: JSON.stringify(bodyPayload)
   });
   if (res.ok && res.data) {
-    const updated = getProjects().map((p) => (p.id === projectId ? { ...p, ...res.data } : p));
+    const mergedProject = {
+      ...(existingProject || {}),
+      ...res.data,
+      _serverUpdatedAt: res.data.updatedAt || existingProject?._serverUpdatedAt
+    };
+    await cacheProjectOffline(mergedProject);
+    const updated = getProjects().map((p) => (p.id === projectId ? mergedProject : p));
     setProjects(updated);
     updateSidebarProjectCounters();
     renderDashboard();
     return { ok: true, project: res.data };
   }
+
+  if (res.status === 0 || isClientOffline()) {
+    return applyOfflineUpdate();
+  }
+
   return {
     ok: false,
     status: res.status,
@@ -131,8 +308,52 @@ export async function updateProjectMetadata(projectId, payload, expectedUpdatedA
   };
 }
 
-export async function saveProjectData(projectId, dataPayload, expectedUpdatedAt) {
-  const payload = { ...dataPayload };
+export async function saveProjectData(projectId, dataPayload, expectedUpdatedAt, mutationMeta = null) {
+  const meta = mutationMeta || dataPayload?._mutationMeta || null;
+  const cleanPayload = { ...dataPayload };
+  delete cleanPayload._mutationMeta;
+
+  const existingProject = getProjects().find((p) => p.id === projectId);
+  const occTimestamp = expectedUpdatedAt !== undefined
+    ? expectedUpdatedAt
+    : (cleanPayload.expectedUpdatedAt || existingProject?._serverUpdatedAt || existingProject?.updatedAt || null);
+
+  const applyOfflineDataSave = async () => {
+    const updatedLocal = {
+      ...(existingProject || { id: projectId }),
+      ...cleanPayload,
+      _serverUpdatedAt: occTimestamp
+    };
+    await queueProjectMutation({
+      projectId,
+      entityType: meta?.entityType || 'data',
+      entityId: meta?.entityId || projectId,
+      operationType: meta?.operationType || 'UPDATE',
+      payload: {
+        ...(meta?.delta ? { delta: meta.delta } : {}),
+        projectSnapshot: updatedLocal
+      },
+      expectedUpdatedAt: occTimestamp
+    });
+    const current = getProjects();
+    const exists = current.some((p) => p.id === projectId);
+    const updatedList = exists
+      ? current.map((p) => (p.id === projectId ? updatedLocal : p))
+      : [updatedLocal, ...current];
+    setProjects(updatedList);
+    updateSidebarProjectCounters();
+    renderDashboard();
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('qavora:storage-invalidate'));
+    }
+    return { ok: true, queued: true, offline: true, project: updatedLocal };
+  };
+
+  if (isClientOffline()) {
+    return applyOfflineDataSave();
+  }
+
+  const payload = { ...cleanPayload };
   if (expectedUpdatedAt !== undefined && payload.expectedUpdatedAt === undefined) {
     payload.expectedUpdatedAt = expectedUpdatedAt;
   }
@@ -141,7 +362,12 @@ export async function saveProjectData(projectId, dataPayload, expectedUpdatedAt)
     body: JSON.stringify(payload)
   });
   if (res.ok && res.data) {
-    const updated = getProjects().map((p) => (p.id === projectId ? res.data : p));
+    const mergedProject = {
+      ...res.data,
+      _serverUpdatedAt: res.data.updatedAt
+    };
+    await cacheProjectOffline(mergedProject);
+    const updated = getProjects().map((p) => (p.id === projectId ? mergedProject : p));
     setProjects(updated);
     updateSidebarProjectCounters();
     renderDashboard();
@@ -150,14 +376,45 @@ export async function saveProjectData(projectId, dataPayload, expectedUpdatedAt)
     }
     return { ok: true, project: res.data };
   }
+
+  if (res.status === 0 || isClientOffline()) {
+    return applyOfflineDataSave();
+  }
+
   return { ok: false, status: res.status, error: res.data?.error || 'Failed to save project data.', data: res.data };
 }
 
 export async function deleteProjectById(projectId) {
+  const applyOfflineDelete = async () => {
+    await queueProjectMutation({
+      projectId,
+      entityType: 'project',
+      entityId: projectId,
+      operationType: 'DELETE',
+      payload: { id: projectId }
+    });
+    const remaining = getProjects().filter((p) => p.id !== projectId);
+    setProjects(remaining);
+    if (getActiveProjectId() === projectId) {
+      setActiveProjectId(remaining[0]?.id || null);
+    }
+    updateSidebarProjectCounters();
+    renderDashboard();
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('qavora:storage-invalidate'));
+    }
+    return { ok: true, queued: true, offline: true };
+  };
+
+  if (isClientOffline()) {
+    return applyOfflineDelete();
+  }
+
   const res = await apiJson(`/api/projects/${encodeURIComponent(projectId)}`, {
     method: 'DELETE'
   });
-  if (res.ok) {
+  if (res.ok || res.status === 404) {
+    await removeCachedProjectOffline(projectId);
     const remaining = getProjects().filter((p) => p.id !== projectId);
     setProjects(remaining);
     if (getActiveProjectId() === projectId) {
@@ -170,6 +427,11 @@ export async function deleteProjectById(projectId) {
     }
     return { ok: true };
   }
+
+  if (res.status === 0 || isClientOffline()) {
+    return applyOfflineDelete();
+  }
+
   return { ok: false, status: res.status, error: res.data?.error || 'Failed to delete project.' };
 }
 

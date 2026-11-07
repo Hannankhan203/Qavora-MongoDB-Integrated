@@ -18,18 +18,27 @@
 
 import { ChecklistAPI } from './qaChecklistStore.js';
 import { authController } from './authController.js';
+import { apiFetch, apiJson } from './src/modules/apiClient.js';
 
 export const DB_NAME = 'qavora_offline_db';
 export const DB_VERSION = 2;
 export const STORE_OPERATIONS = 'pending_checklist_operations';
 export const STORE_CACHE = 'offline_checklists_cache';
+export const STORE_PROJECT_OPERATIONS = 'pending_project_operations';
+export const STORE_PROJECTS_CACHE = 'offline_projects_cache';
 export const STORE_SYNC_LOCKS = 'sync_locks';
+
+export const BASE_RETRY_DELAY_MS = 1000;
+export const MAX_RETRY_DELAY_MS = 30000;
+export const DEFAULT_MAX_RETRIES = 5;
 
 let dbInstance = null;
 let dbOpenPromise = null;
 let globalSeqCounter = Date.now();
 let lastStorageError = null;
 let storageDegradedMode = false;
+let forcedOfflineMode = false;
+let activeSyncInProgressCount = 0;
 
 function getNextSeq() {
   globalSeqCounter += 1;
@@ -51,7 +60,147 @@ const SYNC_LOCK_TTL_MS = 30000;
 // ============================================================================
 const memoryOperations = new Map();
 const memoryChecklistsCache = new Map();
+const memoryProjectOperations = new Map();
+const memoryProjectsCache = new Map();
 const memorySyncLocks = new Map();
+
+function getMemoryStore(storeName) {
+  switch (storeName) {
+    case STORE_OPERATIONS:
+      return memoryOperations;
+    case STORE_CACHE:
+      return memoryChecklistsCache;
+    case STORE_PROJECT_OPERATIONS:
+      return memoryProjectOperations;
+    case STORE_PROJECTS_CACHE:
+      return memoryProjectsCache;
+    case STORE_SYNC_LOCKS:
+      return memorySyncLocks;
+    default:
+      return memoryChecklistsCache;
+  }
+}
+
+export function setOfflineModeForTesting(isOffline) {
+  forcedOfflineMode = Boolean(isOffline);
+  notifyOfflineSyncListeners({ type: forcedOfflineMode ? 'OFFLINE' : 'ONLINE' });
+}
+
+export function isClientOffline() {
+  if (forcedOfflineMode) return true;
+  if (typeof navigator !== 'undefined' && typeof navigator.onLine === 'boolean') {
+    return !navigator.onLine;
+  }
+  return false;
+}
+
+export function resolveActiveUserId(explicitUserId = null) {
+  if (explicitUserId && String(explicitUserId).trim()) {
+    return String(explicitUserId).trim();
+  }
+  const directUser = typeof authController !== 'undefined' && authController && typeof authController.getUser === 'function'
+    ? authController.getUser()
+    : null;
+  if (directUser) {
+    const uid = directUser.userId || directUser.id || directUser.email;
+    if (uid) return String(uid).trim();
+  }
+  const winAuth = typeof globalThis !== 'undefined' && globalThis.window && globalThis.window.authController;
+  if (winAuth && typeof winAuth.getUser === 'function') {
+    const winUser = winAuth.getUser();
+    const uid = winUser?.userId || winUser?.id || winUser?.email;
+    if (uid) return String(uid).trim();
+  }
+  return null;
+}
+
+// ============================================================================
+// Cross-Tab BroadcastChannel & UI Sync State Listeners
+// ============================================================================
+const syncStateListeners = new Set();
+let syncBroadcastChannel = null;
+const inMemoryBroadcastSubscribers = new Set();
+
+function getSyncBroadcastChannel() {
+  if (
+    syncBroadcastChannel &&
+    typeof BroadcastChannel !== 'undefined' &&
+    syncBroadcastChannel instanceof BroadcastChannel
+  ) {
+    return syncBroadcastChannel;
+  }
+  if (syncBroadcastChannel && typeof syncBroadcastChannel.close === 'function') {
+    try { syncBroadcastChannel.close(); } catch (_) {}
+    syncBroadcastChannel = null;
+  }
+  if (typeof BroadcastChannel !== 'undefined') {
+    try {
+      syncBroadcastChannel = new BroadcastChannel('qavora_offline_sync_channel');
+      if (typeof syncBroadcastChannel.unref === 'function') {
+        syncBroadcastChannel.unref();
+      }
+      syncBroadcastChannel.onmessage = (event) => {
+        const data = event?.data;
+        if (!data || data.senderTabId === TAB_LOCK_OWNER_ID) return;
+        for (const sub of inMemoryBroadcastSubscribers) {
+          try { sub(data); } catch (_) {}
+        }
+        for (const listener of syncStateListeners) {
+          try { listener(data); } catch (_) {}
+        }
+      };
+    } catch (_) {
+      syncBroadcastChannel = null;
+    }
+  }
+  return syncBroadcastChannel;
+}
+
+export function broadcastSyncEvent(type, payload = {}) {
+  const message = {
+    type,
+    senderTabId: TAB_LOCK_OWNER_ID,
+    timestamp: new Date().toISOString(),
+    ...payload
+  };
+  const ch = getSyncBroadcastChannel();
+  if (ch) {
+    try {
+      ch.postMessage(message);
+    } catch (_) {}
+  }
+  for (const sub of inMemoryBroadcastSubscribers) {
+    try { sub(message); } catch (_) {}
+  }
+  notifyOfflineSyncListeners(message);
+  return message;
+}
+
+export function subscribeToSyncBroadcast(callback) {
+  if (typeof callback !== 'function') return () => {};
+  getSyncBroadcastChannel();
+  inMemoryBroadcastSubscribers.add(callback);
+  return () => {
+    inMemoryBroadcastSubscribers.delete(callback);
+  };
+}
+
+export function onOfflineSyncStateChange(listener) {
+  if (typeof listener !== 'function') return () => {};
+  getSyncBroadcastChannel();
+  syncStateListeners.add(listener);
+  return () => {
+    syncStateListeners.delete(listener);
+  };
+}
+
+function notifyOfflineSyncListeners(event = {}) {
+  for (const listener of syncStateListeners) {
+    try {
+      listener(event);
+    } catch (_) {}
+  }
+}
 
 export function isBrowserEnvironment() {
   return typeof window !== 'undefined' && typeof window.document !== 'undefined';
@@ -163,8 +312,11 @@ export function resetStorageState() {
   closeOfflineDatabase();
   lastStorageError = null;
   storageDegradedMode = false;
+  forcedOfflineMode = false;
   memoryOperations.clear();
   memoryChecklistsCache.clear();
+  memoryProjectOperations.clear();
+  memoryProjectsCache.clear();
   memorySyncLocks.clear();
 }
 
@@ -226,7 +378,7 @@ export async function openOfflineDatabase() {
       request.onupgradeneeded = (event) => {
         const db = event.target.result;
 
-        // 1. Pending operations queue store
+        // 1. Pending checklist operations queue store
         if (!db.objectStoreNames.contains(STORE_OPERATIONS)) {
           const opStore = db.createObjectStore(STORE_OPERATIONS, { keyPath: 'id' });
           opStore.createIndex('userId', 'userId', { unique: false });
@@ -242,7 +394,25 @@ export async function openOfflineDatabase() {
           cacheStore.createIndex('updatedAt', 'updatedAt', { unique: false });
         }
 
-        // 3. Cross-tab synchronization lease/lock store
+        // 3. Pending formal project operations queue store
+        if (!db.objectStoreNames.contains(STORE_PROJECT_OPERATIONS)) {
+          const projOpStore = db.createObjectStore(STORE_PROJECT_OPERATIONS, { keyPath: 'id' });
+          projOpStore.createIndex('userId', 'userId', { unique: false });
+          projOpStore.createIndex('projectId', 'projectId', { unique: false });
+          projOpStore.createIndex('entityType', 'entityType', { unique: false });
+          projOpStore.createIndex('entityId', 'entityId', { unique: false });
+          projOpStore.createIndex('seq', 'seq', { unique: false });
+          projOpStore.createIndex('status', 'status', { unique: false });
+        }
+
+        // 4. Offline formal projects cache store (durable client backup across reloads)
+        if (!db.objectStoreNames.contains(STORE_PROJECTS_CACHE)) {
+          const projCacheStore = db.createObjectStore(STORE_PROJECTS_CACHE, { keyPath: 'id' });
+          projCacheStore.createIndex('userId', 'userId', { unique: false });
+          projCacheStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+        }
+
+        // 5. Cross-tab synchronization lease/lock store
         if (!db.objectStoreNames.contains(STORE_SYNC_LOCKS)) {
           db.createObjectStore(STORE_SYNC_LOCKS, { keyPath: 'lockKey' });
         }
@@ -314,7 +484,7 @@ async function idbGet(storeName, key) {
     if (isBrowserEnvironment() && !storageDegradedMode) {
       throw new Error('Durable offline storage unavailable: operating in browser without persistent IndexedDB');
     }
-    const store = storeName === STORE_OPERATIONS ? memoryOperations : memoryChecklistsCache;
+    const store = getMemoryStore(storeName);
     const item = store.get(String(key));
     return item ? JSON.parse(JSON.stringify(item)) : null;
   }
@@ -346,9 +516,10 @@ async function idbPut(storeName, value) {
     if (isBrowserEnvironment() && !storageDegradedMode) {
       throw new Error('Durable offline storage unavailable: operating in browser without persistent IndexedDB');
     }
-    const store = storeName === STORE_OPERATIONS ? memoryOperations : memoryChecklistsCache;
-    store.set(String(value.id), JSON.parse(JSON.stringify(value)));
-    return value.id;
+    const store = getMemoryStore(storeName);
+    const recordKey = value?.id !== undefined ? String(value.id) : String(value?.lockKey || '');
+    store.set(recordKey, JSON.parse(JSON.stringify(value)));
+    return value?.id !== undefined ? value.id : value?.lockKey;
   }
 
   return new Promise((resolve, reject) => {
@@ -378,7 +549,7 @@ async function idbDelete(storeName, key) {
     if (isBrowserEnvironment() && !storageDegradedMode) {
       throw new Error('Durable offline storage unavailable: operating in browser without persistent IndexedDB');
     }
-    const store = storeName === STORE_OPERATIONS ? memoryOperations : memoryChecklistsCache;
+    const store = getMemoryStore(storeName);
     store.delete(String(key));
     return true;
   }
@@ -408,7 +579,7 @@ async function idbGetAll(storeName) {
     if (isBrowserEnvironment() && !storageDegradedMode) {
       throw new Error('Durable offline storage unavailable: operating in browser without persistent IndexedDB');
     }
-    const store = storeName === STORE_OPERATIONS ? memoryOperations : memoryChecklistsCache;
+    const store = getMemoryStore(storeName);
     return Array.from(store.values()).map(v => JSON.parse(JSON.stringify(v)));
   }
 
@@ -439,7 +610,7 @@ async function idbClear(storeName) {
     if (isBrowserEnvironment() && !storageDegradedMode) {
       throw new Error('Durable offline storage unavailable: operating in browser without persistent IndexedDB');
     }
-    const store = storeName === STORE_OPERATIONS ? memoryOperations : memoryChecklistsCache;
+    const store = getMemoryStore(storeName);
     store.clear();
     return true;
   }
@@ -655,6 +826,9 @@ export async function dequeueOperation(opId) {
 export async function clearAllOfflineData() {
   await idbClear(STORE_OPERATIONS);
   await idbClear(STORE_CACHE);
+  await idbClear(STORE_PROJECT_OPERATIONS);
+  await idbClear(STORE_PROJECTS_CACHE);
+  await idbClear(STORE_SYNC_LOCKS);
 }
 
 // ============================================================================
@@ -1322,14 +1496,1504 @@ async function runSyncPass(activeUserId, verifyLock = null, lockContext = null) 
 }
 
 // ============================================================================
+// Formal Project Mutations Offline Queue & Durable Cache (QAV-OFFLINE-001)
+// ============================================================================
+
+const DEPENDENCY_RANKS = {
+  'project:CREATE': 10,
+  'project:UPDATE': 20,
+  'project:STATUS_CHANGE': 21,
+  'testPlan:CREATE': 30,
+  'testPlan:UPDATE': 31,
+  'phase:CREATE': 32,
+  'phase:UPDATE': 33,
+  'phase:DELETE': 34,
+  'suite:CREATE': 40,
+  'suite:UPDATE': 41,
+  'suite:DELETE': 42,
+  'testCase:CREATE': 50,
+  'testCase:DUPLICATE': 51,
+  'testCase:UPDATE': 52,
+  'testCase:DELETE': 53,
+  'executionRun:CREATE': 58,
+  'executionRun:UPDATE': 59,
+  'executionRun:STATUS_CHANGE': 59,
+  'execution:CREATE': 60,
+  'execution:EXECUTE': 60,
+  'execution:UPDATE': 61,
+  'execution:STATUS_CHANGE': 61,
+  'execution:DELETE': 62,
+  'defect:CREATE': 70,
+  'defect:UPDATE': 71,
+  'defect:STATUS_CHANGE': 72,
+  'defect:DELETE': 73,
+  'data:UPDATE': 80,
+  'project:DELETE': 90
+};
+
+export function getOperationDependencyRank(op) {
+  if (!op) return 80;
+  const entityType = String(op.entityType || 'data').trim();
+  const opType = String(op.operationType || op.type || 'UPDATE').trim().toUpperCase();
+  const key = `${entityType}:${opType}`;
+  if (DEPENDENCY_RANKS[key] !== undefined) {
+    return DEPENDENCY_RANKS[key];
+  }
+  if (entityType === 'project' && opType === 'CREATE') return 10;
+  if (entityType === 'project' && opType === 'DELETE') return 90;
+  if (entityType === 'project') return 20;
+  if (entityType === 'suite') return 41;
+  if (entityType === 'testCase') return 52;
+  if (entityType === 'execution' || entityType === 'executionRun') return 60;
+  if (entityType === 'defect') return 71;
+  return 80;
+}
+
+export function sortProjectOperationsByDependency(ops = []) {
+  return [...ops].sort((a, b) => {
+    // Sort by dependency rank within the same project, or globally if ranks differ for dependent entities
+    const rankA = getOperationDependencyRank(a);
+    const rankB = getOperationDependencyRank(b);
+    if (rankA !== rankB) {
+      return rankA - rankB;
+    }
+    return (a.seq || 0) - (b.seq || 0);
+  });
+}
+
+export function computeBackoffDelayMs(
+  retryCount,
+  baseDelayMs = BASE_RETRY_DELAY_MS,
+  maxDelayMs = MAX_RETRY_DELAY_MS
+) {
+  const exponent = Math.max(0, Number(retryCount || 1) - 1);
+  return Math.min(maxDelayMs, baseDelayMs * Math.pow(2, exponent));
+}
+
+/**
+ * Cache a single formal project in durable IndexedDB storage for a specific user
+ */
+export async function cacheProjectOffline(project, userId = null) {
+  const resolvedUser = resolveActiveUserId(userId || project?.userId);
+  if (!project || !project.id || !resolvedUser) return null;
+
+  const projectId = String(project.id).trim();
+  const existing = await idbGet(STORE_PROJECTS_CACHE, projectId);
+  const nowIso = new Date().toISOString();
+
+  const record = {
+    ...(existing && existing.userId === resolvedUser ? existing : {}),
+    ...JSON.parse(JSON.stringify(project)),
+    id: projectId,
+    userId: resolvedUser,
+    _serverUpdatedAt: project._serverUpdatedAt || project.updatedAt || existing?._serverUpdatedAt || null,
+    _offlineCachedAt: nowIso
+  };
+
+  await idbPut(STORE_PROJECTS_CACHE, record);
+  return record;
+}
+
+/**
+ * Cache a list of formal projects in durable IndexedDB storage for a specific user
+ */
+export async function cacheProjectsListOffline(projects = [], userId = null) {
+  const resolvedUser = resolveActiveUserId(userId);
+  if (!resolvedUser || !Array.isArray(projects)) return [];
+
+  const pendingOps = await getPendingProjectOperations(resolvedUser);
+  const pendingDeletedProjectIds = new Set(
+    pendingOps
+      .filter(op => op.entityType === 'project' && (op.operationType === 'DELETE' || op.type === 'DELETE'))
+      .map(op => op.projectId)
+  );
+
+  const saved = [];
+  for (const proj of projects) {
+    if (!proj || !proj.id) continue;
+    if (pendingDeletedProjectIds.has(String(proj.id).trim())) continue;
+    const record = await cacheProjectOffline(
+      { ...proj, _serverUpdatedAt: proj.updatedAt || proj._serverUpdatedAt || null },
+      resolvedUser
+    );
+    if (record) saved.push(record);
+  }
+  return saved;
+}
+
+/**
+ * Remove a cached project from IndexedDB
+ */
+export async function removeCachedProjectOffline(projectId, userId = null) {
+  if (!projectId) return false;
+  const cleanId = String(projectId).trim();
+  const resolvedUser = resolveActiveUserId(userId);
+  const existing = await idbGet(STORE_PROJECTS_CACHE, cleanId);
+  if (existing && resolvedUser && existing.userId && existing.userId !== resolvedUser) {
+    return false;
+  }
+  await idbDelete(STORE_PROJECTS_CACHE, cleanId);
+  return true;
+}
+
+/**
+ * Get all cached formal projects for a specific user, with any pending offline mutations applied
+ */
+export async function getCachedProjectsForUser(userId = null, applyPending = true) {
+  const resolvedUser = resolveActiveUserId(userId);
+  if (!resolvedUser) return [];
+
+  const allCached = await idbGetAll(STORE_PROJECTS_CACHE);
+  const userProjectsMap = new Map();
+
+  for (const item of allCached) {
+    if (item && item.userId === resolvedUser && item.id) {
+      userProjectsMap.set(String(item.id), JSON.parse(JSON.stringify(item)));
+    }
+  }
+
+  if (applyPending) {
+    const pendingOps = await getPendingProjectOperations(resolvedUser);
+    const orderedOps = sortProjectOperationsByDependency(pendingOps);
+    for (const op of orderedOps) {
+      if (op.status === 'failed') continue;
+      const projId = String(op.projectId || op.entityId || '').trim();
+      if (!projId) continue;
+
+      const opType = String(op.operationType || op.type || '').toUpperCase();
+      if (op.entityType === 'project' && opType === 'DELETE') {
+        userProjectsMap.delete(projId);
+        continue;
+      }
+
+      let currentProj = userProjectsMap.get(projId);
+      if (!currentProj && op.entityType === 'project' && opType === 'CREATE') {
+        const seedProj = op.payload?.project || op.payload?.projectSnapshot || op.payload;
+        if (seedProj && typeof seedProj === 'object') {
+          currentProj = {
+            ...JSON.parse(JSON.stringify(seedProj)),
+            id: projId,
+            userId: resolvedUser
+          };
+        }
+      }
+
+      if (currentProj) {
+        currentProj = applyOperationToProjectState(currentProj, op);
+        currentProj._hasPendingOfflineMutations = true;
+        userProjectsMap.set(projId, currentProj);
+      }
+    }
+  }
+
+  return Array.from(userProjectsMap.values()).sort((a, b) => {
+    const tA = Date.parse(a.createdAt || a.updatedAt || 0) || 0;
+    const tB = Date.parse(b.createdAt || b.updatedAt || 0) || 0;
+    return tB - tA;
+  });
+}
+
+export async function getCachedProjectById(projectId, userId = null, applyPending = true) {
+  if (!projectId) return null;
+  const cleanId = String(projectId).trim();
+  const projects = await getCachedProjectsForUser(userId, applyPending);
+  return projects.find(p => String(p.id) === cleanId) || null;
+}
+
+/**
+ * Structurally applies a queued mutation operation onto a project object without
+ * overwriting unrelated suites, test cases, executions, or defects.
+ */
+export function applyOperationToProjectState(baseProject, op) {
+  if (!baseProject || typeof baseProject !== 'object' || !op) {
+    return baseProject;
+  }
+
+  const project = JSON.parse(JSON.stringify(baseProject));
+  const entityType = String(op.entityType || 'data').trim();
+  const opType = String(op.operationType || op.type || 'UPDATE').trim().toUpperCase();
+  const payload = op.payload ? JSON.parse(JSON.stringify(op.payload)) : {};
+  const delta = payload.delta !== undefined ? payload.delta : payload;
+
+  if (!Array.isArray(project.testSuites)) project.testSuites = [];
+  if (!Array.isArray(project.executions)) project.executions = [];
+  if (!Array.isArray(project.defects)) project.defects = [];
+  if (!Array.isArray(project.executionRuns)) project.executionRuns = [];
+  if (!project.testPlan || typeof project.testPlan !== 'object') {
+    project.testPlan = {
+      id: `plan_${project.id}`,
+      name: `${project.name || 'Project'} Master Test Plan`,
+      description: '',
+      objective: '',
+      scope: '',
+      notes: '',
+      phases: []
+    };
+  }
+  if (!Array.isArray(project.testPlan.phases)) {
+    project.testPlan.phases = [];
+  }
+
+  if (entityType === 'project') {
+    if (opType === 'CREATE') {
+      const createdProj = payload.project || delta;
+      if (createdProj && typeof createdProj === 'object') {
+        Object.assign(project, createdProj);
+      }
+    } else if (opType === 'UPDATE' || opType === 'STATUS_CHANGE') {
+      const updates = payload.updates || delta;
+      if (updates && typeof updates === 'object') {
+        if (updates.name !== undefined) project.name = updates.name;
+        if (updates.type !== undefined) project.type = updates.type;
+        if (updates.projectType !== undefined && updates.type === undefined) project.type = updates.projectType;
+        if (updates.description !== undefined) project.description = updates.description;
+        if (updates.status !== undefined) project.status = updates.status;
+        if (updates.version !== undefined) project.version = updates.version;
+        if (updates.promotedFromChecklistId !== undefined) {
+          project.promotedFromChecklistId = updates.promotedFromChecklistId;
+        }
+      }
+    }
+    return project;
+  }
+
+  if (entityType === 'suite') {
+    const targetSuiteId = String(op.entityId || delta?.suite?.id || delta?.id || payload?.suiteId || '').trim();
+    if (opType === 'DELETE') {
+      project.testSuites = project.testSuites.filter(s => String(s.id) !== targetSuiteId);
+    } else {
+      const suiteObj = delta?.suite || (delta?.id ? delta : null) || payload?.suite;
+      if (suiteObj && suiteObj.id) {
+        const idx = project.testSuites.findIndex(s => String(s.id) === String(suiteObj.id));
+        if (idx >= 0) {
+          const existingCases = project.testSuites[idx].cases || [];
+          project.testSuites[idx] = {
+            ...project.testSuites[idx],
+            ...suiteObj,
+            cases: Array.isArray(suiteObj.cases) ? suiteObj.cases : existingCases
+          };
+        } else {
+          project.testSuites.push({
+            cases: [],
+            ...suiteObj
+          });
+        }
+      }
+    }
+    return project;
+  }
+
+  if (entityType === 'testCase') {
+    const targetCaseId = String(op.entityId || delta?.testCase?.id || delta?.id || payload?.caseId || '').trim();
+    const targetSuiteId = String(delta?.suiteId || payload?.suiteId || delta?.testCase?.suiteId || '').trim();
+
+    if (opType === 'DELETE') {
+      for (const suite of project.testSuites) {
+        if (!targetSuiteId || String(suite.id) === targetSuiteId) {
+          if (Array.isArray(suite.cases)) {
+            suite.cases = suite.cases.filter(c => String(c.id) !== targetCaseId);
+          }
+        }
+      }
+    } else {
+      const caseObj = delta?.testCase || (delta?.id ? delta : null) || payload?.testCase;
+      if (caseObj && caseObj.id) {
+        let suite = targetSuiteId
+          ? project.testSuites.find(s => String(s.id) === targetSuiteId)
+          : project.testSuites.find(s => Array.isArray(s.cases) && s.cases.some(c => String(c.id) === String(caseObj.id)));
+
+        if (!suite && targetSuiteId) {
+          suite = {
+            id: targetSuiteId,
+            name: delta?.suiteName || 'Default Suite',
+            description: '',
+            createdAt: new Date().toISOString(),
+            cases: []
+          };
+          project.testSuites.push(suite);
+        }
+
+        if (suite) {
+          if (!Array.isArray(suite.cases)) suite.cases = [];
+          const cIdx = suite.cases.findIndex(c => String(c.id) === String(caseObj.id));
+          if (cIdx >= 0) {
+            suite.cases[cIdx] = { ...suite.cases[cIdx], ...caseObj };
+          } else {
+            suite.cases.push({ ...caseObj });
+          }
+        }
+      }
+    }
+    return project;
+  }
+
+  if (entityType === 'execution' || entityType === 'executionRun') {
+    const targetId = String(op.entityId || delta?.execution?.id || delta?.id || '').trim();
+    if (opType === 'DELETE' && entityType === 'execution') {
+      project.executions = project.executions.filter(e => String(e.id) !== targetId);
+    } else {
+      const execObj = delta?.execution || (entityType === 'execution' && delta?.id ? delta : null) || payload?.execution;
+      if (execObj && execObj.id) {
+        const eIdx = project.executions.findIndex(e => String(e.id) === String(execObj.id));
+        if (eIdx >= 0) {
+          project.executions[eIdx] = { ...project.executions[eIdx], ...execObj };
+        } else {
+          project.executions.push({ ...execObj });
+        }
+      }
+
+      // Also sync linked defect if execution failure auto-created one in delta
+      const linkedDefect = delta?.defect || payload?.defect;
+      if (linkedDefect && linkedDefect.id) {
+        const dIdx = project.defects.findIndex(d => String(d.id) === String(linkedDefect.id));
+        if (dIdx >= 0) {
+          project.defects[dIdx] = { ...project.defects[dIdx], ...linkedDefect };
+        } else {
+          project.defects.push({ ...linkedDefect });
+        }
+      }
+
+      const runObj = delta?.executionRun || (entityType === 'executionRun' && delta?.id ? delta : null) || payload?.executionRun;
+      if (runObj && runObj.id) {
+        const rIdx = project.executionRuns.findIndex(r => String(r.id) === String(runObj.id));
+        if (rIdx >= 0) {
+          project.executionRuns[rIdx] = { ...project.executionRuns[rIdx], ...runObj };
+        } else {
+          project.executionRuns.push({ ...runObj });
+        }
+      }
+
+      if (delta?.activeRun !== undefined) {
+        project.activeRun = delta.activeRun;
+      } else if (payload?.activeRun !== undefined) {
+        project.activeRun = payload.activeRun;
+      }
+    }
+    return project;
+  }
+
+  if (entityType === 'defect') {
+    const targetDefectId = String(op.entityId || delta?.defect?.id || delta?.id || payload?.defectId || '').trim();
+    if (opType === 'DELETE') {
+      project.defects = project.defects.filter(d => String(d.id) !== targetDefectId);
+    } else {
+      const defectObj = delta?.defect || (delta?.id ? delta : null) || payload?.defect;
+      if (defectObj && defectObj.id) {
+        const dIdx = project.defects.findIndex(d => String(d.id) === String(defectObj.id));
+        if (dIdx >= 0) {
+          project.defects[dIdx] = { ...project.defects[dIdx], ...defectObj };
+        } else {
+          project.defects.push({ ...defectObj });
+        }
+      }
+    }
+    return project;
+  }
+
+  if (entityType === 'phase') {
+    const targetPhaseId = String(op.entityId || delta?.phase?.id || delta?.id || '').trim();
+    if (opType === 'DELETE') {
+      project.testPlan.phases = project.testPlan.phases.filter(p => String(p.id) !== targetPhaseId);
+    } else {
+      const phaseObj = delta?.phase || (delta?.id ? delta : null) || payload?.phase;
+      if (phaseObj && phaseObj.id) {
+        const pIdx = project.testPlan.phases.findIndex(p => String(p.id) === String(phaseObj.id));
+        if (pIdx >= 0) {
+          project.testPlan.phases[pIdx] = { ...project.testPlan.phases[pIdx], ...phaseObj };
+        } else {
+          project.testPlan.phases.push({ ...phaseObj });
+        }
+      }
+    }
+    return project;
+  }
+
+  if (entityType === 'testPlan') {
+    const planObj = delta?.testPlan || payload?.testPlan || delta;
+    if (planObj && typeof planObj === 'object') {
+      project.testPlan = {
+        ...project.testPlan,
+        ...planObj,
+        phases: Array.isArray(planObj.phases) ? planObj.phases : project.testPlan.phases
+      };
+    }
+    return project;
+  }
+
+  // Fallback for general project data snapshot
+  const snap = payload.projectSnapshot || delta;
+  if (snap && typeof snap === 'object') {
+    const dataFields = [
+      'testPlan', 'testSuites', 'executions', 'defects', 'executionRuns',
+      'activeRun', 'environment', 'environments', 'baseUrl', 'tags',
+      'checklist', 'customChecklist', 'report', 'status'
+    ];
+    for (const key of dataFields) {
+      if (snap[key] !== undefined) {
+        project[key] = JSON.parse(JSON.stringify(snap[key]));
+      }
+    }
+  }
+
+  return project;
+}
+
+/**
+ * Enqueue a formal project mutation operation into IndexedDB
+ */
+export async function queueProjectMutation(mutationSpec, userId = null) {
+  if (!mutationSpec || typeof mutationSpec !== 'object') return null;
+
+  const resolvedUser = resolveActiveUserId(userId || mutationSpec.userId);
+  if (!resolvedUser) return null;
+
+  const projectId = String(mutationSpec.projectId || mutationSpec.entityId || mutationSpec.payload?.id || '').trim();
+  if (!projectId) return null;
+
+  const entityType = String(mutationSpec.entityType || 'project').trim();
+  const operationType = String(mutationSpec.operationType || mutationSpec.type || 'UPDATE').trim().toUpperCase();
+  const entityId = String(mutationSpec.entityId || projectId).trim();
+  const nowIso = new Date().toISOString();
+
+  const allOps = await idbGetAll(STORE_PROJECT_OPERATIONS);
+  const userOps = allOps.filter(op => op.userId === resolvedUser);
+
+  // 1. Check explicit idempotency key or operation ID to prevent duplicate submissions
+  if (mutationSpec.id || mutationSpec.idempotencyKey) {
+    const targetOpId = mutationSpec.id ? String(mutationSpec.id) : null;
+    const targetIdemKey = mutationSpec.idempotencyKey ? String(mutationSpec.idempotencyKey) : null;
+    const existingById = userOps.find(op =>
+      (targetOpId && op.id === targetOpId) ||
+      (targetIdemKey && op.idempotencyKey === targetIdemKey)
+    );
+    if (existingById) {
+      return existingById;
+    }
+  }
+
+  // 2. Check if identical pending/syncing mutation already exists in queue
+  const serializedPayload = JSON.stringify(mutationSpec.payload || {});
+  const duplicatePending = userOps.find(op =>
+    (op.status === 'pending' || op.status === 'syncing') &&
+    op.projectId === projectId &&
+    op.entityType === entityType &&
+    op.entityId === entityId &&
+    (op.operationType === operationType || op.type === operationType) &&
+    JSON.stringify(op.payload || {}) === serializedPayload
+  );
+  if (duplicatePending) {
+    return duplicatePending;
+  }
+
+  // 3. Determine expectedUpdatedAt from mutationSpec or cached project
+  const cachedProject = await idbGet(STORE_PROJECTS_CACHE, projectId);
+  const expectedUpdatedAt = mutationSpec.expectedUpdatedAt !== undefined
+    ? mutationSpec.expectedUpdatedAt
+    : (cachedProject?._serverUpdatedAt || cachedProject?.updatedAt || null);
+
+  // 4. Handle project deletion: clean up cache and any obsolete pending child operations
+  if (entityType === 'project' && operationType === 'DELETE') {
+    await removeCachedProjectOffline(projectId, resolvedUser);
+
+    const hadPendingProjectCreate = userOps.some(
+      existing =>
+        existing.projectId === projectId &&
+        existing.entityType === 'project' &&
+        (existing.operationType === 'CREATE' || existing.type === 'CREATE') &&
+        existing.status === 'pending'
+    );
+
+    for (const existing of userOps) {
+      if (existing.projectId === projectId && existing.id) {
+        await idbDelete(STORE_PROJECT_OPERATIONS, existing.id);
+      }
+    }
+
+    if (hadPendingProjectCreate && mutationSpec.forceServerDelete !== true) {
+      broadcastSyncEvent('MUTATION_QUEUED', { userId: resolvedUser, projectId, entityType, operationType });
+      return null;
+    }
+  } else if (entityType !== 'project' || operationType !== 'DELETE') {
+    // Coalesce repeated updates to the exact same entity if a pending UPDATE/CREATE exists
+    const existingSameEntityOp = userOps.find(op =>
+      op.status === 'pending' &&
+      op.projectId === projectId &&
+      op.entityType === entityType &&
+      op.entityId === entityId
+    );
+
+    if (existingSameEntityOp) {
+      if (operationType === 'DELETE') {
+        if (existingSameEntityOp.operationType === 'CREATE' && mutationSpec.cancelIfCreatedOffline === true) {
+          await idbDelete(STORE_PROJECT_OPERATIONS, existingSameEntityOp.id);
+          if (cachedProject) {
+            const updatedProj = applyOperationToProjectState(cachedProject, {
+              entityType,
+              entityId,
+              operationType: 'DELETE',
+              payload: mutationSpec.payload || {}
+            });
+            await cacheProjectOffline(updatedProj, resolvedUser);
+          }
+          broadcastSyncEvent('MUTATION_QUEUED', { userId: resolvedUser, projectId, entityType, operationType });
+          return null;
+        }
+        // Replace pending CREATE/UPDATE on child entity with DELETE
+        existingSameEntityOp.operationType = 'DELETE';
+        existingSameEntityOp.type = 'DELETE';
+        existingSameEntityOp.payload = JSON.parse(serializedPayload);
+        existingSameEntityOp.updatedAt = nowIso;
+        await idbPut(STORE_PROJECT_OPERATIONS, existingSameEntityOp);
+        if (cachedProject) {
+          const updatedProj = applyOperationToProjectState(cachedProject, existingSameEntityOp);
+          await cacheProjectOffline(updatedProj, resolvedUser);
+        }
+        broadcastSyncEvent('MUTATION_QUEUED', { userId: resolvedUser, projectId, entityType, operationType, opId: existingSameEntityOp.id });
+        return existingSameEntityOp;
+      }
+
+      if (
+        existingSameEntityOp.entityType === 'project' &&
+        existingSameEntityOp.operationType === 'CREATE' &&
+        (operationType === 'UPDATE' || operationType === 'STATUS_CHANGE')
+      ) {
+        const updates = mutationSpec.payload?.updates || mutationSpec.payload?.delta || mutationSpec.payload || {};
+        const currentProjPayload = existingSameEntityOp.payload?.project || existingSameEntityOp.payload || {};
+        const mergedProj = {
+          ...currentProjPayload,
+          ...updates,
+          updatedAt: nowIso
+        };
+        existingSameEntityOp.payload = existingSameEntityOp.payload?.project
+          ? { ...existingSameEntityOp.payload, project: mergedProj, ...updates }
+          : mergedProj;
+        existingSameEntityOp.updatedAt = nowIso;
+        await idbPut(STORE_PROJECT_OPERATIONS, existingSameEntityOp);
+        if (cachedProject) {
+          const updatedProj = applyOperationToProjectState(cachedProject, {
+            entityType: 'project',
+            entityId: projectId,
+            operationType,
+            payload: { updates }
+          });
+          await cacheProjectOffline(updatedProj, resolvedUser);
+        }
+        broadcastSyncEvent('MUTATION_QUEUED', { userId: resolvedUser, projectId, entityType, operationType, opId: existingSameEntityOp.id });
+        return existingSameEntityOp;
+      }
+
+      if (
+        (existingSameEntityOp.operationType === 'UPDATE' || existingSameEntityOp.operationType === 'STATUS_CHANGE') &&
+        (operationType === 'UPDATE' || operationType === 'STATUS_CHANGE')
+      ) {
+        existingSameEntityOp.operationType = operationType;
+        existingSameEntityOp.type = operationType;
+        existingSameEntityOp.payload = {
+          ...(existingSameEntityOp.payload || {}),
+          ...JSON.parse(serializedPayload),
+          delta: {
+            ...(existingSameEntityOp.payload?.delta || {}),
+            ...(mutationSpec.payload?.delta || mutationSpec.payload || {})
+          }
+        };
+        existingSameEntityOp.updatedAt = nowIso;
+        if (!existingSameEntityOp.expectedUpdatedAt && expectedUpdatedAt) {
+          existingSameEntityOp.expectedUpdatedAt = expectedUpdatedAt;
+        }
+        await idbPut(STORE_PROJECT_OPERATIONS, existingSameEntityOp);
+        if (cachedProject) {
+          const updatedProj = applyOperationToProjectState(cachedProject, existingSameEntityOp);
+          await cacheProjectOffline(updatedProj, resolvedUser);
+        }
+        broadcastSyncEvent('MUTATION_QUEUED', { userId: resolvedUser, projectId, entityType, operationType, opId: existingSameEntityOp.id });
+        return existingSameEntityOp;
+      }
+    }
+  }
+
+  const op = {
+    id: mutationSpec.id ? String(mutationSpec.id) : generateOpId(`proj_op_${entityType.toLowerCase()}`),
+    idempotencyKey: mutationSpec.idempotencyKey || null,
+    seq: getNextSeq(),
+    userId: resolvedUser,
+    projectId,
+    entityType,
+    entityId,
+    operationType,
+    type: operationType,
+    payload: JSON.parse(serializedPayload),
+    expectedUpdatedAt: expectedUpdatedAt || null,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    retryCount: 0,
+    maxRetries: mutationSpec.maxRetries ?? DEFAULT_MAX_RETRIES,
+    backoffDelayMs: 0,
+    nextRetryAt: null,
+    status: 'pending',
+    requiresManualResolution: false,
+    conflictDetails: null,
+    lastError: null
+  };
+
+  await idbPut(STORE_PROJECT_OPERATIONS, op);
+
+  // Keep offline project cache in sync with the queued mutation
+  if (entityType === 'project' && operationType === 'CREATE') {
+    const projSeed = op.payload?.project || op.payload?.projectSnapshot || op.payload;
+    if (projSeed && typeof projSeed === 'object') {
+      await cacheProjectOffline({ ...projSeed, id: projectId, _isOfflineCreated: true }, resolvedUser);
+    }
+  } else if (cachedProject && !(entityType === 'project' && operationType === 'DELETE')) {
+    const updatedProj = applyOperationToProjectState(cachedProject, op);
+    await cacheProjectOffline(updatedProj, resolvedUser);
+  } else if (op.payload?.projectSnapshot && !(entityType === 'project' && operationType === 'DELETE')) {
+    const updatedProj = applyOperationToProjectState(op.payload.projectSnapshot, op);
+    await cacheProjectOffline(updatedProj, resolvedUser);
+  }
+
+  broadcastSyncEvent('MUTATION_QUEUED', {
+    userId: resolvedUser,
+    projectId,
+    entityType,
+    entityId,
+    operationType,
+    opId: op.id
+  });
+
+  return op;
+}
+
+/**
+ * Get all queued formal project operations for a specific user
+ */
+export async function getPendingProjectOperations(userId = null, options = {}) {
+  const resolvedUser = resolveActiveUserId(userId);
+  if (!resolvedUser) return [];
+
+  const allOps = await idbGetAll(STORE_PROJECT_OPERATIONS);
+  let filtered = allOps.filter(op => op.userId === resolvedUser);
+
+  if (options.projectId) {
+    filtered = filtered.filter(op => op.projectId === String(options.projectId).trim());
+  }
+  if (options.status) {
+    filtered = filtered.filter(op => op.status === options.status);
+  }
+
+  if (options.sortByDependency) {
+    return sortProjectOperationsByDependency(filtered);
+  }
+
+  return filtered.sort((a, b) => (a.seq || 0) - (b.seq || 0));
+}
+
+export async function dequeueProjectOperation(opId) {
+  if (!opId) return;
+  await idbDelete(STORE_PROJECT_OPERATIONS, String(opId));
+}
+
+export async function dequeueProjectOperationIfLockValid(
+  opId,
+  lockKey,
+  ownerId = TAB_LOCK_OWNER_ID,
+  generation
+) {
+  const db = await openOfflineDatabase();
+  const now = Date.now();
+
+  if (db.__isMemoryFallback) {
+    const lock = memorySyncLocks.get(lockKey);
+    if (
+      !lock ||
+      lock.ownerId !== ownerId ||
+      lock.expiresAt <= now ||
+      (generation !== undefined && lock.generation !== generation)
+    ) {
+      return false;
+    }
+    memoryProjectOperations.delete(String(opId));
+    return true;
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const safeResolve = (val) => { if (!settled) { settled = true; resolve(val); } };
+    const safeReject = (err) => { if (!settled) { settled = true; reject(err); } };
+
+    try {
+      const tx = db.transaction([STORE_SYNC_LOCKS, STORE_PROJECT_OPERATIONS], 'readwrite');
+      const lockStore = tx.objectStore(STORE_SYNC_LOCKS);
+      const opStore = tx.objectStore(STORE_PROJECT_OPERATIONS);
+      let deleted = false;
+
+      const getReq = lockStore.get(lockKey);
+      getReq.onsuccess = () => {
+        const lock = getReq.result;
+        if (
+          !lock ||
+          lock.ownerId !== ownerId ||
+          lock.expiresAt <= now ||
+          (generation !== undefined && lock.generation !== generation)
+        ) {
+          deleted = false;
+          return;
+        }
+        opStore.delete(opId);
+        deleted = true;
+      };
+      getReq.onerror = () => safeReject(getReq.error);
+      tx.oncomplete = () => safeResolve(deleted);
+      tx.onerror = () => safeReject(tx.error);
+      tx.onabort = () => safeResolve(false);
+    } catch (err) {
+      safeReject(err);
+    }
+  });
+}
+
+/**
+ * Returns a comprehensive synchronization status summary for the UI
+ */
+export async function getProjectSyncStatus(userId = null) {
+  const resolvedUser = resolveActiveUserId(userId);
+  const isOffline = isClientOffline();
+
+  if (!resolvedUser) {
+    return {
+      online: !isOffline,
+      isSyncing: activeSyncInProgressCount > 0,
+      pendingCount: 0,
+      syncingCount: 0,
+      conflictCount: 0,
+      failedCount: 0,
+      totalQueuedCount: 0,
+      requiresManualResolution: false,
+      operations: [],
+      checklistOperations: []
+    };
+  }
+
+  const [projectOps, checklistOps] = await Promise.all([
+    getPendingProjectOperations(resolvedUser),
+    getPendingOperations(resolvedUser)
+  ]);
+
+  const pendingCount = projectOps.filter(op => op.status === 'pending').length +
+    checklistOps.filter(op => op.status === 'pending').length;
+  const syncingCount = projectOps.filter(op => op.status === 'syncing').length +
+    checklistOps.filter(op => op.status === 'syncing').length;
+  const conflictCount = projectOps.filter(op => op.status === 'conflict').length;
+  const failedCount = projectOps.filter(op => op.status === 'failed').length;
+  const requiresManualResolution = projectOps.some(
+    op => op.requiresManualResolution || op.status === 'conflict' || op.status === 'failed'
+  );
+
+  return {
+    online: !isOffline,
+    isSyncing: activeSyncInProgressCount > 0 || syncingCount > 0,
+    pendingCount,
+    syncingCount,
+    conflictCount,
+    failedCount,
+    totalQueuedCount: projectOps.length + checklistOps.length,
+    requiresManualResolution,
+    operations: projectOps,
+    checklistOperations: checklistOps
+  };
+}
+
+const activeProjectSyncUsers = new Set();
+
+/**
+ * Synchronize all pending formal project mutations for the authenticated user
+ */
+export async function processProjectSyncQueue(targetUserId = null, options = {}) {
+  const authUserId = resolveActiveUserId(null);
+  const activeUserId = targetUserId ? String(targetUserId).trim() : authUserId;
+
+  if (!activeUserId) {
+    return { ok: false, syncedCount: 0, reason: 'Unauthenticated' };
+  }
+
+  // Prevent cross-account synchronization
+  if (authUserId && activeUserId !== authUserId) {
+    console.warn(`Qavora ProjectSyncQueue: Blocked cross-account sync attempt for ${activeUserId} while logged in as ${authUserId}`);
+    return { ok: false, syncedCount: 0, reason: 'Cross-account sync prevented' };
+  }
+
+  if (isClientOffline() && !options.ignoreOfflineState) {
+    return { ok: false, syncedCount: 0, reason: 'Client is offline' };
+  }
+
+  if (!options.lockOwnerId && activeProjectSyncUsers.has(activeUserId)) {
+    return { ok: false, syncedCount: 0, reason: 'Sync in progress' };
+  }
+
+  const lockKey = `qavora_project_sync_${activeUserId}`;
+  const lockOwnerId = options.lockOwnerId || TAB_LOCK_OWNER_ID;
+
+  if (
+    !options.disableNavigatorLocks &&
+    !options.lockOwnerId &&
+    typeof navigator !== 'undefined' &&
+    navigator.locks &&
+    typeof navigator.locks.request === 'function'
+  ) {
+    return navigator.locks.request(
+      lockKey,
+      { ifAvailable: true },
+      async (lock) => {
+        if (!lock) {
+          return { ok: false, syncedCount: 0, reason: 'Sync in progress' };
+        }
+        activeProjectSyncUsers.add(activeUserId);
+        try {
+          return await runProjectSyncPass(activeUserId, null, null, options);
+        } finally {
+          activeProjectSyncUsers.delete(activeUserId);
+        }
+      }
+    );
+  }
+
+  const lockResult = await acquireIndexedDbSyncLock(lockKey, lockOwnerId, SYNC_LOCK_TTL_MS);
+  if (!lockResult.acquired) {
+    return { ok: false, syncedCount: 0, reason: 'Sync in progress' };
+  }
+
+  const { generation } = lockResult;
+  const renewIntervalMs = Math.max(1000, Math.floor(SYNC_LOCK_TTL_MS / 3));
+  const renewTimer = setInterval(() => {
+    renewIndexedDbSyncLock(lockKey, lockOwnerId, generation, SYNC_LOCK_TTL_MS).catch(() => {});
+  }, renewIntervalMs);
+  if (typeof renewTimer.unref === 'function') {
+    renewTimer.unref();
+  }
+
+  activeProjectSyncUsers.add(activeUserId);
+  try {
+    return await runProjectSyncPass(
+      activeUserId,
+      () => verifyIndexedDbSyncLock(lockKey, lockOwnerId, generation),
+      { lockKey, ownerId: lockOwnerId, generation },
+      options
+    );
+  } finally {
+    activeProjectSyncUsers.delete(activeUserId);
+    clearInterval(renewTimer);
+    await releaseIndexedDbSyncLock(lockKey, lockOwnerId, generation);
+  }
+}
+
+async function executeProjectOperationRequest(op, currentProjectState, effectiveExpectedUpdatedAt, transport) {
+  const entityType = String(op.entityType || 'data').trim();
+  const opType = String(op.operationType || op.type || 'UPDATE').trim().toUpperCase();
+  const projectId = String(op.projectId || op.entityId).trim();
+
+  if (entityType === 'project' && opType === 'CREATE') {
+    const baseProj = op.payload?.project || currentProjectState || op.payload || {};
+    const createBody = {
+      ...baseProj,
+      id: projectId,
+      name: baseProj.name || 'Untitled Project',
+      type: baseProj.type || baseProj.projectType || 'Web Application',
+      description: baseProj.description || '',
+      status: baseProj.status || 'Active'
+    };
+    delete createBody._id;
+    delete createBody.userId;
+    delete createBody._offlineCachedAt;
+    delete createBody._serverUpdatedAt;
+    delete createBody._isOfflineCreated;
+    delete createBody._hasPendingOfflineMutations;
+
+    return transport('/api/projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(createBody)
+    });
+  }
+
+  if (entityType === 'project' && (opType === 'UPDATE' || opType === 'STATUS_CHANGE')) {
+    const rawUpdates = op.payload?.updates || op.payload?.delta || op.payload || {};
+    const patchBody = {};
+    if (rawUpdates.name !== undefined) patchBody.name = rawUpdates.name;
+    if (rawUpdates.type !== undefined) patchBody.type = rawUpdates.type;
+    if (rawUpdates.projectType !== undefined && patchBody.type === undefined) {
+      patchBody.type = rawUpdates.projectType;
+    }
+    if (rawUpdates.version !== undefined) patchBody.version = rawUpdates.version;
+    if (rawUpdates.description !== undefined) patchBody.description = rawUpdates.description;
+    if (rawUpdates.status !== undefined) patchBody.status = rawUpdates.status;
+    if (rawUpdates.environment !== undefined) patchBody.environment = rawUpdates.environment;
+    if (rawUpdates.baseUrl !== undefined) patchBody.baseUrl = rawUpdates.baseUrl;
+    if (rawUpdates.tags !== undefined) patchBody.tags = rawUpdates.tags;
+    if (rawUpdates.promotedFromChecklistId !== undefined) {
+      patchBody.promotedFromChecklistId = rawUpdates.promotedFromChecklistId;
+    }
+    if (effectiveExpectedUpdatedAt) {
+      patchBody.expectedUpdatedAt = effectiveExpectedUpdatedAt;
+    }
+
+    return transport(`/api/projects/${encodeURIComponent(projectId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patchBody)
+    });
+  }
+
+  if (entityType === 'project' && opType === 'DELETE') {
+    return transport(`/api/projects/${encodeURIComponent(projectId)}`, {
+      method: 'DELETE'
+    });
+  }
+
+  // Suite, TestCase, Execution, Defect, TestPlan, Phase mutations -> PATCH /api/projects/:id/data
+  const stateToSend = currentProjectState || {};
+  const patchDataBody = {
+    testPlan: stateToSend.testPlan || { phases: [] },
+    testSuites: Array.isArray(stateToSend.testSuites) ? stateToSend.testSuites : [],
+    executions: Array.isArray(stateToSend.executions) ? stateToSend.executions : [],
+    defects: Array.isArray(stateToSend.defects) ? stateToSend.defects : []
+  };
+
+  const optionalKeys = [
+    'executionRuns', 'activeRun', 'environment', 'environments',
+    'baseUrl', 'tags', 'checklist', 'customChecklist', 'report', 'status'
+  ];
+  for (const k of optionalKeys) {
+    if (stateToSend[k] !== undefined) {
+      patchDataBody[k] = stateToSend[k];
+    }
+  }
+
+  if (effectiveExpectedUpdatedAt) {
+    patchDataBody.expectedUpdatedAt = effectiveExpectedUpdatedAt;
+  }
+
+  return transport(`/api/projects/${encodeURIComponent(projectId)}/data`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patchDataBody)
+  });
+}
+
+async function runProjectSyncPass(activeUserId, verifyLock = null, lockContext = null, options = {}) {
+  let syncedCount = 0;
+  let conflictCount = 0;
+  let failedCount = 0;
+  const transport = typeof options.transport === 'function' ? options.transport : apiJson;
+
+  activeSyncInProgressCount += 1;
+  broadcastSyncEvent('SYNC_STARTED', { userId: activeUserId });
+
+  try {
+    const rawOps = await getPendingProjectOperations(activeUserId);
+    const orderedOps = sortProjectOperationsByDependency(rawOps);
+
+    if (orderedOps.length === 0) {
+      return { ok: true, syncedCount: 0, conflictCount: 0, failedCount: 0 };
+    }
+
+    const blockedProjectIds = new Set();
+    const projectVersionTracker = new Map(); // projectId -> { previousVersion, latestVersion }
+    const projectStateTracker = new Map();   // projectId -> project state
+
+    for (const op of orderedOps) {
+      if (op.status === 'conflict') {
+        blockedProjectIds.add(op.projectId);
+        conflictCount += 1;
+        continue;
+      }
+      if (op.status === 'failed' && !options.includeFailed) {
+        blockedProjectIds.add(op.projectId);
+        failedCount += 1;
+        continue;
+      }
+      if (blockedProjectIds.has(op.projectId)) {
+        continue;
+      }
+      if (options.respectBackoff && op.nextRetryAt) {
+        const nextRetryMs = Date.parse(op.nextRetryAt);
+        if (!Number.isNaN(nextRetryMs) && Date.now() < nextRetryMs) {
+          blockedProjectIds.add(op.projectId);
+          continue;
+        }
+      }
+
+      if (verifyLock && !(await verifyLock())) {
+        console.warn('Qavora ProjectSyncQueue: Lost sync lock ownership; halting queue.');
+        break;
+      }
+
+      const freshAuthUserId = resolveActiveUserId(null);
+      if (freshAuthUserId && freshAuthUserId !== activeUserId) {
+        console.warn('Qavora ProjectSyncQueue: User session switched; halting queue.');
+        break;
+      }
+      if (!freshAuthUserId && !options.allowImplicitUserInTests) {
+        // Check if authController exists and explicitly logged out
+        const ctrlUser = typeof authController !== 'undefined' && authController.getUser ? authController.getUser() : null;
+        if (!ctrlUser && typeof window !== 'undefined' && window.authController) {
+          console.warn('Qavora ProjectSyncQueue: User session terminated; halting queue.');
+          break;
+        }
+      }
+
+      // Mark operation as syncing
+      op.status = 'syncing';
+      op.updatedAt = new Date().toISOString();
+      await idbPut(STORE_PROJECT_OPERATIONS, op);
+      notifyOfflineSyncListeners({ type: 'OPERATION_SYNCING', opId: op.id, projectId: op.projectId });
+
+      // Prepare current project state by applying this operation onto base project
+      let baseProject = projectStateTracker.get(op.projectId);
+      if (!baseProject) {
+        baseProject = await idbGet(STORE_PROJECTS_CACHE, op.projectId);
+      }
+      if (!baseProject && op.payload?.projectSnapshot) {
+        baseProject = JSON.parse(JSON.stringify(op.payload.projectSnapshot));
+      }
+      if (!baseProject) {
+        baseProject = {
+          id: op.projectId,
+          userId: activeUserId,
+          name: op.payload?.project?.name || op.payload?.name || 'Untitled Project',
+          type: op.payload?.project?.type || op.payload?.type || 'Web Application',
+          status: 'Active',
+          testPlan: { phases: [] },
+          testSuites: [],
+          executions: [],
+          defects: []
+        };
+      }
+
+      const nextProjectState = applyOperationToProjectState(baseProject, op);
+
+      // Resolve effective expectedUpdatedAt (advancing if an earlier op in this pass updated the same project)
+      let effectiveExpectedUpdatedAt = op.expectedUpdatedAt || null;
+      const versionInfo = projectVersionTracker.get(op.projectId);
+      if (versionInfo && versionInfo.latestVersion) {
+        effectiveExpectedUpdatedAt = versionInfo.latestVersion;
+      }
+
+      let res = null;
+      let networkException = null;
+
+      try {
+        res = await executeProjectOperationRequest(
+          op,
+          nextProjectState,
+          effectiveExpectedUpdatedAt,
+          transport
+        );
+
+        // Idempotent handling for project CREATE if project already exists on server (409)
+        const opType = String(op.operationType || op.type || '').toUpperCase();
+        if (
+          res &&
+          !res.ok &&
+          res.status === 409 &&
+          op.entityType === 'project' &&
+          opType === 'CREATE'
+        ) {
+          const existingServerVer = res.data?.currentUpdatedAt || res.data?.updatedAt || null;
+          res = {
+            ok: true,
+            status: 200,
+            data: {
+              id: op.projectId,
+              updatedAt: existingServerVer || baseProject.updatedAt || new Date().toISOString()
+            }
+          };
+        }
+      } catch (err) {
+        networkException = err;
+      }
+
+      if (!networkException && res && (res.ok || (op.entityType === 'project' && (op.operationType === 'DELETE' || op.type === 'DELETE') && res.status === 404))) {
+        // Success!
+        const returnedUpdatedAt = res.data?.updatedAt || new Date().toISOString();
+        const prevVersion = effectiveExpectedUpdatedAt || baseProject._serverUpdatedAt || baseProject.updatedAt || null;
+        const existingTracker = projectVersionTracker.get(op.projectId) || {
+          previousVersion: prevVersion,
+          latestVersion: returnedUpdatedAt,
+          knownVersions: new Set()
+        };
+        if (prevVersion) existingTracker.knownVersions.add(prevVersion);
+        if (op.expectedUpdatedAt) existingTracker.knownVersions.add(op.expectedUpdatedAt);
+        existingTracker.previousVersion = prevVersion;
+        existingTracker.latestVersion = returnedUpdatedAt;
+        projectVersionTracker.set(op.projectId, existingTracker);
+
+        if (op.entityType === 'project' && (op.operationType === 'DELETE' || op.type === 'DELETE')) {
+          projectStateTracker.delete(op.projectId);
+          await removeCachedProjectOffline(op.projectId, activeUserId);
+        } else {
+          nextProjectState.updatedAt = returnedUpdatedAt;
+          nextProjectState._serverUpdatedAt = returnedUpdatedAt;
+          delete nextProjectState._isOfflineCreated;
+          projectStateTracker.set(op.projectId, nextProjectState);
+          await cacheProjectOffline(nextProjectState, activeUserId);
+        }
+
+        // Advance expectedUpdatedAt on remaining queued operations for the same project
+        const remainingSameProjectOps = orderedOps.filter(
+          other => other.id !== op.id && other.projectId === op.projectId && other.status === 'pending'
+        );
+        for (const nextOp of remainingSameProjectOps) {
+          nextOp.expectedUpdatedAt = returnedUpdatedAt;
+          await idbPut(STORE_PROJECT_OPERATIONS, nextOp);
+        }
+
+        if (lockContext) {
+          const dequeued = await dequeueProjectOperationIfLockValid(
+            op.id,
+            lockContext.lockKey,
+            lockContext.ownerId,
+            lockContext.generation
+          );
+          if (!dequeued) {
+            console.warn('Qavora ProjectSyncQueue: Lost sync lock ownership before dequeue; halting queue.');
+            break;
+          }
+        } else {
+          await dequeueProjectOperation(op.id);
+        }
+
+        syncedCount += 1;
+      } else if (!networkException && res && res.status === 401) {
+        // Authentication expired during synchronization -> preserve operation as pending and halt queue
+        op.status = 'pending';
+        op.lastError = 'Authentication session expired (HTTP 401)';
+        op.updatedAt = new Date().toISOString();
+        await idbPut(STORE_PROJECT_OPERATIONS, op);
+        broadcastSyncEvent('SYNC_AUTH_EXPIRED', { userId: activeUserId, opId: op.id });
+        return {
+          ok: false,
+          syncedCount,
+          conflictCount,
+          failedCount,
+          authExpired: true,
+          reason: 'Session expired (HTTP 401)'
+        };
+      } else if (!networkException && res && res.status === 409) {
+        // Optimistic concurrency control conflict (HTTP 409)
+        const serverUpdatedAt = res.data?.currentUpdatedAt || res.data?.updatedAt || null;
+        op.status = 'conflict';
+        op.requiresManualResolution = true;
+        op.lastError = res.error || res.data?.error || 'Conflict (HTTP 409): Server record was modified by another session';
+        op.conflictDetails = {
+          expectedUpdatedAt: effectiveExpectedUpdatedAt || op.expectedUpdatedAt || null,
+          currentUpdatedAt: serverUpdatedAt,
+          message: op.lastError,
+          detectedAt: new Date().toISOString()
+        };
+        op.updatedAt = new Date().toISOString();
+        await idbPut(STORE_PROJECT_OPERATIONS, op);
+
+        blockedProjectIds.add(op.projectId);
+        conflictCount += 1;
+
+        broadcastSyncEvent('SYNC_CONFLICT', {
+          userId: activeUserId,
+          projectId: op.projectId,
+          opId: op.id,
+          conflictDetails: op.conflictDetails
+        });
+      } else {
+        // Determine whether failure is a permanent 4xx error or transient 5xx/network error
+        const status = res?.status || 0;
+        const isPermanentClientError =
+          !networkException &&
+          status >= 400 &&
+          status < 500 &&
+          status !== 401 &&
+          status !== 404 &&
+          status !== 408 &&
+          status !== 409 &&
+          status !== 429;
+
+        op.retryCount = (op.retryCount || 0) + 1;
+        const maxRetries = op.maxRetries ?? DEFAULT_MAX_RETRIES;
+        const errorMessage = networkException
+          ? (networkException.message || 'Network request failed')
+          : (res?.error || res?.data?.error || `Server returned HTTP ${status}`);
+
+        op.lastError = errorMessage;
+        op.updatedAt = new Date().toISOString();
+
+        if (isPermanentClientError || op.retryCount > maxRetries) {
+          // Dead-letter state: requires manual recovery or discard
+          op.status = 'failed';
+          op.requiresManualResolution = true;
+          op.failedAt = op.updatedAt;
+          op.nextRetryAt = null;
+          await idbPut(STORE_PROJECT_OPERATIONS, op);
+
+          blockedProjectIds.add(op.projectId);
+          failedCount += 1;
+
+          broadcastSyncEvent('SYNC_FAILED', {
+            userId: activeUserId,
+            projectId: op.projectId,
+            opId: op.id,
+            error: errorMessage
+          });
+        } else {
+          // Transient error: exponential backoff retry
+          const delayMs = computeBackoffDelayMs(op.retryCount);
+          op.status = 'pending';
+          op.backoffDelayMs = delayMs;
+          op.nextRetryAt = new Date(Date.now() + delayMs).toISOString();
+          await idbPut(STORE_PROJECT_OPERATIONS, op);
+
+          blockedProjectIds.add(op.projectId);
+          // Halt queue pass on transient network/server outage to preserve ordering
+          break;
+        }
+      }
+    }
+
+    const result = {
+      ok: conflictCount === 0 && failedCount === 0,
+      syncedCount,
+      conflictCount,
+      failedCount
+    };
+
+    broadcastSyncEvent('SYNC_COMPLETED', {
+      userId: activeUserId,
+      ...result
+    });
+
+    return result;
+  } catch (err) {
+    console.warn('Qavora ProjectSyncQueue: sync pass error:', err);
+    return {
+      ok: false,
+      syncedCount,
+      conflictCount,
+      failedCount,
+      error: err?.message || String(err)
+    };
+  } finally {
+    activeSyncInProgressCount = Math.max(0, activeSyncInProgressCount - 1);
+    notifyOfflineSyncListeners({ type: 'SYNC_IDLE', userId: activeUserId });
+  }
+}
+
+/**
+ * Resolve an HTTP 409 conflict on a queued project operation.
+ * Strategies:
+ * - 'merge' / 'keep_local' / 'force_local': Fetches latest server state, applies the user's mutation onto it,
+ *   updates expectedUpdatedAt to the server's currentUpdatedAt, and synchronizes immediately.
+ * - 'keep_server' / 'discard_local': Discards the conflicting local mutation and refreshes cache from server.
+ */
+export async function resolveProjectConflict(
+  opId,
+  strategy = 'merge',
+  targetUserId = null,
+  options = {}
+) {
+  if (!opId) return { ok: false, error: 'Missing operation ID' };
+  const activeUserId = resolveActiveUserId(targetUserId);
+  if (!activeUserId) return { ok: false, error: 'Unauthenticated' };
+
+  const op = await idbGet(STORE_PROJECT_OPERATIONS, String(opId));
+  if (!op) return { ok: false, error: 'Operation not found' };
+  if (op.userId !== activeUserId) {
+    return { ok: false, error: 'Cross-account conflict resolution prevented' };
+  }
+
+  const transport = typeof options.transport === 'function' ? options.transport : apiJson;
+  const normalizedStrategy = String(strategy || 'merge').trim().toLowerCase();
+
+  // Fetch latest server projects to get authoritative server record & timestamp
+  let serverProject = options.serverProject || null;
+  if (!serverProject) {
+    try {
+      const listRes = await transport('/api/projects', { method: 'GET' });
+      if (listRes && listRes.ok && Array.isArray(listRes.data?.data || listRes.data)) {
+        const list = Array.isArray(listRes.data?.data) ? listRes.data.data : listRes.data;
+        serverProject = list.find(p => String(p.id) === String(op.projectId)) || null;
+      }
+    } catch (_) {}
+  }
+
+  if (normalizedStrategy === 'keep_server' || normalizedStrategy === 'discard_local' || normalizedStrategy === 'discard') {
+    await idbDelete(STORE_PROJECT_OPERATIONS, String(opId));
+    if (serverProject) {
+      await cacheProjectOffline(serverProject, activeUserId);
+    }
+    broadcastSyncEvent('CONFLICT_RESOLVED', {
+      userId: activeUserId,
+      projectId: op.projectId,
+      opId: op.id,
+      strategy: normalizedStrategy
+    });
+    return { ok: true, resolved: true, strategy: normalizedStrategy, serverProject };
+  }
+
+  // Default: 'merge' / 'keep_local'
+  const latestServerTimestamp =
+    serverProject?.updatedAt ||
+    op.conflictDetails?.currentUpdatedAt ||
+    null;
+
+  if (serverProject) {
+    const mergedProject = applyOperationToProjectState(serverProject, op);
+    mergedProject.updatedAt = latestServerTimestamp;
+    mergedProject._serverUpdatedAt = latestServerTimestamp;
+    await cacheProjectOffline(mergedProject, activeUserId);
+    op.payload = {
+      ...(op.payload || {}),
+      projectSnapshot: mergedProject
+    };
+  }
+
+  op.expectedUpdatedAt = latestServerTimestamp;
+  op.status = 'pending';
+  op.requiresManualResolution = false;
+  op.conflictDetails = null;
+  op.lastError = null;
+  op.retryCount = 0;
+  op.nextRetryAt = null;
+  op.updatedAt = new Date().toISOString();
+
+  await idbPut(STORE_PROJECT_OPERATIONS, op);
+
+  broadcastSyncEvent('CONFLICT_RESOLVED', {
+    userId: activeUserId,
+    projectId: op.projectId,
+    opId: op.id,
+    strategy: normalizedStrategy
+  });
+
+  if (!isClientOffline() || options.ignoreOfflineState) {
+    const syncResult = await processProjectSyncQueue(activeUserId, options);
+    return { ok: syncResult.ok, resolved: true, strategy: normalizedStrategy, syncResult };
+  }
+
+  return { ok: true, resolved: true, strategy: normalizedStrategy };
+}
+
+/**
+ * Retry a single failed/conflicted operation by resetting its status to 'pending'
+ */
+export async function retryProjectOperation(opId, targetUserId = null, options = {}) {
+  if (!opId) return { ok: false, error: 'Missing operation ID' };
+  const activeUserId = resolveActiveUserId(targetUserId);
+  if (!activeUserId) return { ok: false, error: 'Unauthenticated' };
+
+  const op = await idbGet(STORE_PROJECT_OPERATIONS, String(opId));
+  if (!op) return { ok: false, error: 'Operation not found' };
+  if (op.userId !== activeUserId) {
+    return { ok: false, error: 'Cross-account retry prevented' };
+  }
+
+  op.status = 'pending';
+  op.requiresManualResolution = false;
+  op.retryCount = 0;
+  op.backoffDelayMs = 0;
+  op.nextRetryAt = null;
+  op.lastError = null;
+  op.updatedAt = new Date().toISOString();
+  await idbPut(STORE_PROJECT_OPERATIONS, op);
+
+  notifyOfflineSyncListeners({ type: 'OPERATION_RETRIED', opId: op.id, projectId: op.projectId });
+
+  if (!isClientOffline() || options.ignoreOfflineState) {
+    return processProjectSyncQueue(activeUserId, options);
+  }
+  return { ok: true, queued: true };
+}
+
+/**
+ * Retry all failed operations for the current user
+ */
+export async function retryFailedProjectOperations(targetUserId = null, options = {}) {
+  const activeUserId = resolveActiveUserId(targetUserId);
+  if (!activeUserId) return { ok: false, error: 'Unauthenticated' };
+
+  const ops = await getPendingProjectOperations(activeUserId);
+  const failedOps = ops.filter(op => op.status === 'failed');
+
+  for (const op of failedOps) {
+    op.status = 'pending';
+    op.requiresManualResolution = false;
+    op.retryCount = 0;
+    op.backoffDelayMs = 0;
+    op.nextRetryAt = null;
+    op.lastError = null;
+    op.updatedAt = new Date().toISOString();
+    await idbPut(STORE_PROJECT_OPERATIONS, op);
+  }
+
+  notifyOfflineSyncListeners({ type: 'FAILED_OPERATIONS_RETRIED', userId: activeUserId, count: failedOps.length });
+
+  if (!isClientOffline() || options.ignoreOfflineState) {
+    return processProjectSyncQueue(activeUserId, options);
+  }
+  return { ok: true, retriedCount: failedOps.length };
+}
+
+/**
+ * Discard a failed or conflicting operation from the queue
+ */
+export async function discardProjectOperation(opId, targetUserId = null) {
+  if (!opId) return { ok: false, error: 'Missing operation ID' };
+  const activeUserId = resolveActiveUserId(targetUserId);
+  if (!activeUserId) return { ok: false, error: 'Unauthenticated' };
+
+  const op = await idbGet(STORE_PROJECT_OPERATIONS, String(opId));
+  if (!op) return { ok: false, error: 'Operation not found' };
+  if (op.userId !== activeUserId) {
+    return { ok: false, error: 'Cross-account discard prevented' };
+  }
+
+  await idbDelete(STORE_PROJECT_OPERATIONS, String(opId));
+  broadcastSyncEvent('OPERATION_DISCARDED', {
+    userId: activeUserId,
+    projectId: op.projectId,
+    opId: op.id
+  });
+  return { ok: true, discardedId: op.id };
+}
+
+/**
+ * Synchronize both QA Checklists and Formal Projects offline queues
+ */
+export async function syncAllOfflineQueues(targetUserId = null, options = {}) {
+  const [checklistRes, projectRes] = await Promise.all([
+    processChecklistSyncQueue(targetUserId),
+    processProjectSyncQueue(targetUserId, options)
+  ]);
+  return {
+    ok: Boolean(checklistRes?.ok && projectRes?.ok),
+    checklistSync: checklistRes,
+    projectSync: projectRes,
+    totalSynced: (checklistRes?.syncedCount || 0) + (projectRes?.syncedCount || 0)
+  };
+}
+
+// ============================================================================
 // Auto-Sync Event Listeners
 // ============================================================================
 if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
   // Sync automatically when network connectivity returns
   window.addEventListener('online', () => {
+    notifyOfflineSyncListeners({ type: 'ONLINE' });
     processChecklistSyncQueue().catch((err) => {
-      console.warn('Qavora SyncQueue: Auto-sync on online event warning:', err);
+      console.warn('Qavora SyncQueue: Auto-sync checklists on online event warning:', err);
     });
+    processProjectSyncQueue().catch((err) => {
+      console.warn('Qavora SyncQueue: Auto-sync projects on online event warning:', err);
+    });
+  });
+
+  window.addEventListener('offline', () => {
+    notifyOfflineSyncListeners({ type: 'OFFLINE' });
   });
 
   // Sync automatically when window / tab regains focus
@@ -1337,6 +3001,7 @@ if (typeof window !== 'undefined' && typeof window.addEventListener === 'functio
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) {
         processChecklistSyncQueue().catch(() => {});
+        processProjectSyncQueue().catch(() => {});
       }
     });
   }
